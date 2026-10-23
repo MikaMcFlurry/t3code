@@ -10140,7 +10140,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             current?.providerTurnId === input.context.providerTurnId ? null : current,
           );
           yield* clearUnansweredRequestWatch(input.context);
-          if (input.status === "completed") {
+          // A failed root turn can leave background agents alive in the same CLI.
+          // Their later task notifications still need a context to settle their records.
+          if (
+            input.status === "completed" ||
+            (input.status === "failed" &&
+              liveQuery?.nativeThreadId === input.context.nativeThreadId &&
+              !liveQuery.stopping)
+          ) {
             settledTurnByNativeThread.set(input.context.nativeThreadId, input.context);
           } else {
             settledTurnByNativeThread.delete(input.context.nativeThreadId);
