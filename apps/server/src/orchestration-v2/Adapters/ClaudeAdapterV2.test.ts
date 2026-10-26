@@ -21802,6 +21802,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               session_id: WAKE_NATIVE_SESSION,
             }),
           );
+          assert.equal(yield* harness.hasPendingBackgroundWork, taskId === "agent-a");
         }
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
         for (const taskId of ["agent-a", "agent-b"]) {
