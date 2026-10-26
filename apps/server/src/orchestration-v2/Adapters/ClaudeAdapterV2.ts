@@ -9915,8 +9915,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           yield* Ref.update(activeTurn, (current) =>
             current?.providerTurnId === input.context.providerTurnId ? null : current,
           );
-          // A failed root turn can leave background agents alive in the same CLI.
-          // Their later task notifications still need a context to settle their records.
+          // Late child outcomes need a context while the failed parent's query is still alive.
           if (
             input.status === "completed" ||
             (input.status === "failed" &&
