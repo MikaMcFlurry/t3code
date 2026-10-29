@@ -72,4 +72,23 @@ describe("DesktopEnvironment", () => {
       assert.equal(production.stateDir, "/Users/alice/.t3/userdata");
     }),
   );
+
+  it.effect("lets a side-by-side build choose its own app data directory", () =>
+    Effect.gen(function* () {
+      const defaultWindows = yield* makeEnvironment(
+        { platform: "win32" },
+        { APPDATA: "/Users/alice/AppData/Roaming" },
+      );
+      const sideBySide = yield* makeEnvironment(
+        { platform: "win32" },
+        {
+          APPDATA: "/Users/alice/AppData/Roaming",
+          T3CODE_DESKTOP_APP_DATA_DIR: "/data/t3-fork/appdata",
+        },
+      );
+
+      assert.equal(defaultWindows.appDataDirectory, "/Users/alice/AppData/Roaming");
+      assert.equal(sideBySide.appDataDirectory, "/data/t3-fork/appdata");
+    }),
+  );
 });
