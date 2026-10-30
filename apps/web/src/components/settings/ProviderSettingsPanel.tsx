@@ -100,6 +100,7 @@ import { ExpandableText } from "./ExpandableText";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { UsageProviderSettings } from "./UsageProviderSettings";
 import { CentralSkillsSection } from "./CentralSkillsSection";
+import { CentralMcpServersSection } from "./CentralMcpServersSection";
 import { ProviderSetupSection, readAntigravityAuthMethod } from "./ProviderSetupSection";
 import { ProviderAuthenticationSection } from "./ProviderAuthenticationSection";
 import { CodexSetupSection, CodexManagedRuntimeFields } from "./CodexSetupSection";
@@ -1083,6 +1084,12 @@ export function EnvironmentProviderSettings({
         key={`skills:${environmentId}`}
         environmentId={environmentId}
         readOnly={readOnly}
+      />
+
+      <CentralMcpServersSection
+        servers={settings.centralMcpServers}
+        readOnly={readOnly}
+        onChange={(centralMcpServers) => updateSettings({ centralMcpServers })}
       />
 
       <SettingsSection title="Advanced">
