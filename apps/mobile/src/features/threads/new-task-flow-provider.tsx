@@ -1,7 +1,7 @@
 import { ActiveNewTaskContext } from "../../state/active-new-task";
 import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
 import { msg, useMessages } from "gt-react-native";
-import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
+import { resolveNewThreadModelRoute } from "@t3tools/shared/autoModelRouting";
 import { useNowMinuteMs } from "../../lib/clock";
 import { m, type MessageResolver } from "../../i18n/messages";
 import * as Dialog from "../../components/ui/Dialog";
@@ -485,7 +485,7 @@ export function NewTaskFlowProvider(
     stickySelection: stickyModelSelection,
     modelOptions,
   });
-  const selectedModel = resolveNewThreadModelSelection({
+  const selectedModel = resolveNewThreadModelRoute({
     defaultSelection: selectedDefaultModel,
     explicitSelection:
       draftModelSelection ?? (projectDefaultModelSelection ? null : stickyModelSelection),
