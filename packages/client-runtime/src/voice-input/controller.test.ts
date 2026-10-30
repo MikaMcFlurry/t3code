@@ -91,6 +91,27 @@ describe("resolveTranscriptCommit", () => {
     });
   });
 
+  it.each([
+    { locale: "en-US", text: "Fix|", transcript: "the tests", expected: "Fix the tests" },
+    { locale: "de-DE", text: "Grüße|", transcript: "an alle", expected: "Grüße an alle" },
+    { locale: "de_AT", text: "|über", transcript: "Bitte", expected: "Bitte über" },
+    { locale: "fr", text: "Merci.|", transcript: "Ça marche", expected: "Merci. Ça marche" },
+    { locale: "de-DE", text: "a |b", transcript: "und", expected: "a und b" },
+    { locale: "ja-JP", text: "テスト|", transcript: "を直して", expected: "テストを直して" },
+    { locale: "zh_CN", text: "abc|", transcript: "修复", expected: "abc修复" },
+  ])("spaces an insertion at $text for $locale", ({ locale, text, transcript, expected }) => {
+    const cursor = text.indexOf("|");
+    const captured = draft({
+      text: text.replace("|", ""),
+      selection: { start: cursor, end: cursor },
+    });
+
+    expect(resolveTranscriptCommit(captured, captured, transcript, locale)).toMatchObject({
+      kind: "commit",
+      text: expected,
+    });
+  });
+
   it("does not replace text after the owner, text, or revision changes", () => {
     const captured = draft();
     expect(
