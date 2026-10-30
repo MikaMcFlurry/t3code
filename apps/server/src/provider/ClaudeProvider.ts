@@ -428,9 +428,15 @@ export const probeClaudeWorkspaceSnapshot = Effect.fn("probeClaudeWorkspaceSnaps
   machineSnapshot: ServerProvider,
   cwd: string,
   environment?: NodeJS.ProcessEnv,
+  extraSkillDirectories?: ReadonlyArray<string>,
 ): Effect.fn.Return<ProviderWorkspaceSnapshot, never, FileSystem.FileSystem | Path.Path> {
   if (!claudeSettings.enabled) return machineSnapshot;
-  const skills = yield* discoverClaudeSkills(claudeSettings, cwd, environment);
+  const skills = yield* discoverClaudeSkills(
+    claudeSettings,
+    cwd,
+    environment,
+    extraSkillDirectories,
+  );
   const fileSystem = yield* FileSystem.FileSystem;
   // A deleted worktree can never answer the probe. Pending would make clients rescan it forever.
   const cwdExists = yield* fileSystem.exists(cwd).pipe(Effect.orElseSucceed(() => true));
@@ -461,6 +467,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   /** Shared with the adapter so turn events reuse the scoped-bucket names this probe saw. */
   scopedLimitNames?: Ref.Ref<ClaudeScopedLimitNames>,
   resolveResetCredits?: (version: string) => Effect.Effect<ServerProviderResetCredits | undefined>,
+  extraSkillDirectories?: ReadonlyArray<string>,
 ): Effect.fn.Return<
   ServerProviderDraft,
   never,
@@ -574,7 +581,12 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     probeResult && Result.isSuccess(probeResult) ? probeResult.success : undefined;
   const probeFailure =
     probeResult && Result.isFailure(probeResult) ? probeResult.failure : undefined;
-  const skills = yield* discoverClaudeSkills(claudeSettings, cwd, resolvedEnvironment);
+  const skills = yield* discoverClaudeSkills(
+    claudeSettings,
+    cwd,
+    resolvedEnvironment,
+    extraSkillDirectories,
+  );
   const slashCommands = [COMPACT_SLASH_COMMAND, ...(capabilities?.slashCommands ?? [])];
   const dedupedSlashCommands = dedupeSlashCommands(slashCommands);
 
