@@ -47,7 +47,11 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { routeModelSelection } from "@t3tools/shared/autoModelRouting";
+import {
+  parseRoutineRoutingDirective,
+  resolveRoutineModelSelection,
+  type RoutineRoutingDirective,
+} from "@t3tools/shared/routineModelRouting";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as Metrics from "../observability/Metrics.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -442,23 +446,26 @@ export const layer = Layer.effect(
     const readWebhookOrigin = yield* ScheduledTaskWebhookOrigin;
     const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
     const providerRegistry = yield* Effect.serviceOption(ProviderRegistry.ProviderRegistry);
-    /** With automatic account selection on, scheduled launches use the account with the most usage left. */
+    /**
+     * New-thread runs: a webhook's `t3` routing, then the automatic account setting, all limited
+     * to the allowed models. Falls back to the stored model when nothing can be resolved.
+     */
     const routedModelSelection = Effect.fn("ScheduledTaskService.routedModelSelection")(
-      function* (task: ScheduledTask) {
+      function* (task: ScheduledTask, prompt: string, routing: RoutineRoutingDirective | null) {
         if (Option.isNone(serverSettings) || Option.isNone(providerRegistry)) {
           return task.modelSelection;
         }
-        const settings = yield* serverSettings.value.getSettings;
-        if (settings.autoModelSelection === "off") return task.modelSelection;
-        const route = routeModelSelection({
-          desired: task.modelSelection,
-          mode: settings.autoModelSelection,
+        const route = resolveRoutineModelSelection({
+          stored: task.modelSelection,
+          prompt,
+          directive: routing,
           providers: yield* providerRegistry.value.getProviders,
-          settings,
+          settings: yield* serverSettings.value.getSettings,
           projectId: task.projectId,
           now: DateTime.toEpochMillis(yield* DateTime.now),
         });
-        return route?.selection ?? task.modelSelection;
+        yield* Effect.annotateCurrentSpan({ "scheduled_task.model_route": route.reason });
+        return route.selection;
       },
       (effect, task) => effect.pipe(Effect.orElseSucceed(() => task.modelSelection)),
     );
@@ -806,6 +813,7 @@ export const layer = Layer.effect(
         readonly deliveryId: string;
         readonly prompt: string;
         readonly dispatched: Ref.Ref<boolean>;
+        readonly routing: RoutineRoutingDirective | null;
       },
     ) {
       // Read before reserving: nothing between the reservation and its release may fail.
@@ -931,7 +939,11 @@ export const layer = Layer.effect(
                     commandId,
                     projectId: active.projectId,
                     title: active.title,
-                    modelSelection: yield* routedModelSelection(active),
+                    modelSelection: yield* routedModelSelection(
+                      active,
+                      prompt,
+                      webhook?.routing ?? null,
+                    ),
                     runtimeMode: active.runtimeMode,
                     interactionMode: active.interactionMode,
                     workspaceStrategy: active.workspaceStrategy,
@@ -1777,6 +1789,7 @@ export const layer = Layer.effect(
       task: ScheduledTask,
       deliveryId: string,
       prompt: string,
+      routing: RoutineRoutingDirective | null,
     ) {
       const runOutcome = (outcome: "started" | "skipped" | "failed") =>
         Effect.all([
@@ -1784,7 +1797,7 @@ export const layer = Layer.effect(
           Metrics.increment(Metrics.webhookRunsTotal, { outcome }),
         ]);
       const dispatched = yield* Ref.make(false);
-      return yield* runTask(task, "webhook", { deliveryId, prompt, dispatched }).pipe(
+      return yield* runTask(task, "webhook", { deliveryId, prompt, dispatched, routing }).pipe(
         Effect.flatMap(({ dispatchFailed }) =>
           dispatchFailed
             ? runOutcome("failed").pipe(
@@ -2233,11 +2246,12 @@ export const layer = Layer.effect(
           }
           yield* observe("accepted");
           const permit = yield* webhookPermit(task.id);
-          yield* runWebhookDelivery(task, deliveryId, rendered.prompt).pipe(
-            permit.withPermits(1),
-            Effect.ensuring(release),
-            Effect.forkIn(serviceScope),
-          );
+          yield* runWebhookDelivery(
+            task,
+            deliveryId,
+            rendered.prompt,
+            parseRoutineRoutingDirective(request.bodyText),
+          ).pipe(permit.withPermits(1), Effect.ensuring(release), Effect.forkIn(serviceScope));
           // Dispatch owns the accepted delivery now; retries must keep its claim.
           claimAcquired = false;
           return { _tag: "accepted" as const, deliveryId, outcome: "accepted" as const };
@@ -2300,7 +2314,11 @@ export const layer = Layer.effect(
                 const task = yield* decodePendingTask(entry.task_json);
                 const request = yield* decodePendingRequest(entry.request_json);
                 const frameId = Buffer.from(yield* crypto.randomBytes(6)).toString("hex");
-                return { task, rendered: renderWebhookPrompt(task.prompt, request, frameId) };
+                return {
+                  task,
+                  rendered: renderWebhookPrompt(task.prompt, request, frameId),
+                  routing: parseRoutineRoutingDirective(request.bodyText),
+                };
               }).pipe(Effect.exit);
               if (Exit.isFailure(prepared)) {
                 if (Cause.hasInterruptsOnly(prepared.cause))
@@ -2313,13 +2331,14 @@ export const layer = Layer.effect(
                 yield* remove;
                 continue;
               }
-              const { task, rendered } = prepared.value;
+              const { task, rendered, routing } = prepared.value;
               if (rendered.prompt.trim().length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS) {
                 yield* markDeliveryFailed(entry.delivery_id, PROMPT_TOO_LONG);
                 yield* releaseFailedDelivery(entry.delivery_id);
               } else {
                 yield* sql`UPDATE scheduled_task_webhook_deliveries SET outcome = 'accepted', error = NULL, rendered_prompt = ${rendered.prompt.slice(0, WEBHOOK_DELIVERY_LOG_PROMPT_LIMIT)}, missing_fields_json = ${encodeMissingFieldsJson(rendered.missing)} WHERE delivery_id = ${entry.delivery_id}`;
-                if (!(yield* runWebhookDelivery(task, entry.delivery_id, rendered.prompt))) return;
+                if (!(yield* runWebhookDelivery(task, entry.delivery_id, rendered.prompt, routing)))
+                  return;
               }
               yield* remove;
             }

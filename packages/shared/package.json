@@ -379,6 +379,10 @@
       "types": "./src/autoLaunchPlan.ts",
       "import": "./src/autoLaunchPlan.ts"
     },
+    "./routineModelRouting": {
+      "types": "./src/routineModelRouting.ts",
+      "import": "./src/routineModelRouting.ts"
+    },
     "./desktopAppControl": {
       "types": "./src/desktopAppControl.ts",
       "import": "./src/desktopAppControl.ts"

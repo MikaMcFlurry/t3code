@@ -1233,6 +1233,10 @@ export const ServerSettings = Schema.Struct({
     Schema.catchDecoding(() => Effect.succeedSome("off" as const)),
     Schema.withDecodingDefault(Effect.succeed("off" as const)),
   ),
+  /** Entries `instanceId`, `instanceId/model` or `driver:<kind>`; empty allows every model. */
+  autoRoutingAllowed: Schema.Array(Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   defaultRuntimeMode: RuntimeMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE)),
   ),
@@ -1598,6 +1602,7 @@ export const ServerSettingsPatch = Schema.Struct({
   defaultRuntimeMode: Schema.optionalKey(RuntimeMode),
   fallbackModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   autoModelSelection: Schema.optionalKey(AutoModelSelectionMode),
+  autoRoutingAllowed: Schema.optionalKey(Schema.Array(Schema.String)),
   /** Replaces each project's override set; null removes it. Omitted providerInstances retains its stored value. */
   projectSettingsOverrides: Schema.optionalKey(
     Schema.Record(
