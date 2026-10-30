@@ -53,12 +53,14 @@ if ($failed.Count -gt 0) {
 git switch -q -C mika/main main
 foreach ($branch in $branches) {
   git merge -q --no-ff $branch -m "merge: $branch"
+  $merged = $LASTEXITCODE -eq 0
   # rerere replays conflict resolutions recorded on earlier updates; commit when none remain.
-  if ($LASTEXITCODE -ne 0 -and -not (git diff --name-only --diff-filter=U)) {
+  if (-not $merged -and -not (git diff --name-only --diff-filter=U)) {
     git add -A
     git commit -q --no-edit
+    $merged = $LASTEXITCODE -eq 0
   }
-  if ($LASTEXITCODE -ne 0) {
+  if (-not $merged) {
     git merge --abort
     git switch -q main
     throw "Die Branches vertragen sich untereinander nicht ($branch). Build unverändert."
