@@ -9,8 +9,10 @@ import {
   type VoiceTranscriptionOptions,
 } from "@t3tools/client-runtime/voice-input";
 
-function getDeviceLocale(): string {
-  return Intl.DateTimeFormat().resolvedOptions().locale;
+import type { DictationLanguage } from "../lib/dictationLanguage";
+
+function resolveLocale(language: DictationLanguage): string {
+  return language === "auto" ? Intl.DateTimeFormat().resolvedOptions().locale : language;
 }
 
 function wrapError(
@@ -33,8 +35,10 @@ function getNativeErrorCode(error: unknown): string | undefined {
   return typeof error.code === "string" ? error.code : undefined;
 }
 
-export function getLocalVoiceTranscriber(): VoiceTranscriber | null {
-  const locale = getDeviceLocale();
+export function getLocalVoiceTranscriber(
+  language: DictationLanguage = "auto",
+): VoiceTranscriber | null {
+  const locale = resolveLocale(language);
   if (!AppleTranscription.isAvailable(locale)) return null;
   return { prepare: (options) => prepareVoiceTranscription(locale, options) };
 }
@@ -63,7 +67,7 @@ async function prepareVoiceTranscription(
     if (getNativeErrorCode(error) === "AppleTranscriptionUnsupportedLocale") {
       throw new VoiceTranscriptionError(
         "unsupported-locale",
-        "Voice transcription does not support this device language.",
+        "Voice transcription does not support this language.",
         { cause: error },
       );
     }
