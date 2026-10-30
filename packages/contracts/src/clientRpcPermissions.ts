@@ -21,6 +21,10 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.serverRunStorageCleanup]: AuthSettingsWriteScope,
   [WS_METHODS.serverCheckOtlpEndpoint]: AuthSettingsWriteScope,
   [WS_METHODS.serverRefreshProviders]: AuthOrchestrationReadScope,
+  // The shared skill library reaches every provider account's sessions.
+  [WS_METHODS.centralSkillsInstall]: AuthSettingsWriteScope,
+  [WS_METHODS.centralSkillsRemove]: AuthSettingsWriteScope,
+  [WS_METHODS.centralSkillsSetEnabled]: AuthSettingsWriteScope,
   [WS_METHODS.pullRequestsRunAction]: AuthSourceControlWriteScope,
   [WS_METHODS.pullRequestsUpdate]: AuthSourceControlWriteScope,
   [WS_METHODS.pullRequestsComment]: AuthSourceControlWriteScope,
