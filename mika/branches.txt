@@ -1,11 +1,11 @@
 # Branches merged into mika/main, in order. Each one starts from upstream main.
 # Branches meant for upstream pull requests should touch one thing each.
 # Stacked branches: list only the tip; Update-T3Mika rebases the ones below it too.
-#   mika/routine-auto sits on mika/auto-launch, which sits on mika/auto-model.
+#   mika/routine-routing > mika/routine-auto > mika/auto-launch > mika/auto-model.
 mika/tooling
 mika/side-by-side
 mika/usage-rings
 mika/dictation-locale
 mika/central-skills
 mika/central-mcp
-mika/routine-auto
+mika/routine-routing
