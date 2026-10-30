@@ -13,6 +13,8 @@ Initialize-T3MikaToolchain
 Set-Location $T3Mika.Repo
 
 if ((Test-T3MikaRunning) -and -not $NoBuild) { throw 'Bitte zuerst T3 Code Mika beenden.' }
+git config rerere.enabled true
+git config rerere.autoUpdate true
 if (git status --porcelain) { throw 'Es gibt uncommittete Änderungen im Fork. Bitte erst committen oder verwerfen.' }
 
 $branches = Get-Content (Join-Path $PSScriptRoot 'branches.txt') |
@@ -51,6 +53,11 @@ if ($failed.Count -gt 0) {
 git switch -q -C mika/main main
 foreach ($branch in $branches) {
   git merge -q --no-ff $branch -m "merge: $branch"
+  # rerere replays conflict resolutions recorded on earlier updates; commit when none remain.
+  if ($LASTEXITCODE -ne 0 -and -not (git diff --name-only --diff-filter=U)) {
+    git add -A
+    git commit -q --no-edit
+  }
   if ($LASTEXITCODE -ne 0) {
     git merge --abort
     git switch -q main
