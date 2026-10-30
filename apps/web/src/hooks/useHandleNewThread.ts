@@ -45,7 +45,7 @@ import { getClientSettings } from "./useSettings";
 import { useThreadRouteTarget } from "./useThreadRouteTarget";
 import { readUnloadedThreadCount } from "../state/olderSettledShelf";
 import { resolveProjectDefaultProviderModelSelection } from "../providerInstances";
-import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
+import { resolveNewThreadModelRoute } from "@t3tools/shared/autoModelRouting";
 
 interface NewThreadWorkspaceOptions {
   branch?: string | null;
@@ -147,7 +147,7 @@ export function createNewThreadHandler(router: AnyRouter) {
       project,
     );
     const configuredDefaultModelSelection = projectSettings.settings.defaultModelSelection ?? null;
-    const fallbackResolution = resolveNewThreadModelSelection({
+    const modelResolution = resolveNewThreadModelRoute({
       defaultSelection:
         configuredDefaultModelSelection ??
         (carryModelSelection || useComposerDraftStore.getState().stickyActiveProvider !== null
@@ -163,9 +163,10 @@ export function createNewThreadHandler(router: AnyRouter) {
       projectId: projectRef.projectId,
       now: Date.now(),
     });
-    const projectDefaultModelSelection = fallbackResolution.fallback
-      ? fallbackResolution.selection
-      : configuredDefaultModelSelection;
+    const projectDefaultModelSelection =
+      modelResolution.fallback || modelResolution.auto
+        ? modelResolution.selection
+        : configuredDefaultModelSelection;
     const defaultRuntimeMode = projectSettings.settings.defaultRuntimeMode;
     const resolveModelSelectionOverride = (destinationDraftId: DraftId) =>
       resolveNewThreadModelSelectionOverride({
