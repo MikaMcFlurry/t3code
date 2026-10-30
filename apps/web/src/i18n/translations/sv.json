@@ -12404,5 +12404,25 @@
   "27d76249d09eb69f": "Granskningsguiden är klar",
   "faa3bb26abb39c93": "Granskningsguiden misslyckades",
   "b7df38b7d8792d78": "Öppna guiden",
-  "9e91e9a77b664e4e": "Kunde inte starta en granskningsguide"
+  "9e91e9a77b664e4e": "Kunde inte starta en granskningsguide",
+  "f3eeebac9160c736": "Centrala färdigheter",
+  "41df551174846725": "Färdighetsbibliotek",
+  "16f3efa6174af615": "Aktiverade färdigheter når varje leverantörskonto på den här datorn: Claude läser in dem direkt och Codex-hemkataloger får en hanterad kopia. Dina egna färdigheter med samma namn har företräde.",
+  "6248d665f995d8d1": "Mapp: {directory}",
+  "786d17c346c53e64": "Mapp, git-URL eller SKILL.md-URL",
+  "95b612e63247ef9b": "Färdighetens källa",
+  "1bc402d7ddebc6c9": "Det gick inte att installera färdigheten",
+  "c62a0c9e2a477626": "Från {source}",
+  "05a06bc27d4f461e": "Det gick inte att uppdatera färdigheten",
+  "9f750ea9758231e9": "Det gick inte att ta bort färdigheten",
+  "b848773fd942cc02": "Installera",
+  "bcd81f6bc8be0377": [
+    "Det gick inte att läsa in färdigheter: ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
+  "93776d65eeabf676": "Inga centrala färdigheter ännu."
 }
