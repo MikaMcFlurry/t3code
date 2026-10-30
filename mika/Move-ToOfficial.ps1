@@ -32,5 +32,7 @@ Write-Host "Sichere offizielle Daten nach $backup"
 Copy-T3Directory $target $backup
 
 Write-Host 'Übertrage Mika-Daten zur offiziellen Version ...'
-Copy-T3Directory $source $target @('logs')
+# In parallel mode Mika has its own identity; the official app keeps its own and its phone link.
+$keepIdentity = if ((Get-T3MikaMode) -eq 'parallel') { @('environment-id', 'cloud-*') } else { @() }
+Copy-T3Directory $source $target @('logs') $keepIdentity
 Write-Host 'Fertig. Die offizielle T3 Code App kann wieder gestartet werden.'

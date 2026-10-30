@@ -30,14 +30,18 @@ $lockBefore = git rev-parse 'mika/main:pnpm-lock.yaml' 2>$null
 $failed = @()
 foreach ($branch in $branches) {
   git switch -q $branch
-  git rebase -q main 2>&1 | Out-Null
+  # --update-refs carries stacked branches (e.g. auto-model under routine-auto) along.
+  git rebase -q --update-refs main 2>&1 | Out-Null
   if ($LASTEXITCODE -ne 0) {
     git rebase --abort
     $failed += $branch
     Write-Warning "Konflikt beim Rebase von $branch auf das neue upstream main."
     continue
   }
-  if (-not $NoPush) { git push -q --force-with-lease origin $branch }
+}
+if (-not $NoPush) {
+  $all = git for-each-ref --format='%(refname:short)' refs/heads/mika/ | Where-Object { $_ -ne 'mika/main' }
+  git push -q --force-with-lease origin @all
 }
 if ($failed.Count -gt 0) {
   git switch -q mika/main

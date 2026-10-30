@@ -13,6 +13,14 @@ $T3Mika = [ordered]@{
   OfficialProfile = Join-Path $env:APPDATA 't3code-v2'
   OfficialExe     = Join-Path $env:LOCALAPPDATA 'Programs\t3code\T3 Code (Beta).exe'
   AppUserModelId  = 'com.mikamcflurry.t3code.mika'
+  # "takeover" keeps the official identity (phone works unchanged, one app at a time);
+  # "parallel" has its own identity (pair the phone once more, both apps can run).
+  ModeFile        = 'D:\T3-Mika\mode.txt'
+  OfficialPort    = 3773
+}
+
+function Get-T3MikaMode {
+  if (Test-Path $T3Mika.ModeFile) { (Get-Content $T3Mika.ModeFile -Raw).Trim() } else { 'takeover' }
 }
 
 function Initialize-T3MikaToolchain {
@@ -54,9 +62,11 @@ function Get-T3OfficialVersion {
 }
 
 # Mirror a directory; robocopy exit codes below 8 mean success.
-function Copy-T3Directory([string]$From, [string]$To, [string[]]$ExcludeDirs = @()) {
+function Copy-T3Directory([string]$From, [string]$To, [string[]]$ExcludeDirs = @(), [string[]]$ExcludeFiles = @()) {
   $robo = @($From, $To, '/MIR', '/R:1', '/W:1', '/NFL', '/NDL', '/NP', '/NJH')
   if ($ExcludeDirs.Count -gt 0) { $robo += '/XD'; $robo += $ExcludeDirs }
+  # Excluded files are neither copied nor purged from the target.
+  if ($ExcludeFiles.Count -gt 0) { $robo += '/XF'; $robo += $ExcludeFiles }
   robocopy @robo | Out-Host
   if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE): $From -> $To" }
   $global:LASTEXITCODE = 0
