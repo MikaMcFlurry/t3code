@@ -371,6 +371,10 @@
       "types": "./src/usageLimits.ts",
       "import": "./src/usageLimits.ts"
     },
+    "./autoModelRouting": {
+      "types": "./src/autoModelRouting.ts",
+      "import": "./src/autoModelRouting.ts"
+    },
     "./desktopAppControl": {
       "types": "./src/desktopAppControl.ts",
       "import": "./src/desktopAppControl.ts"

@@ -22,7 +22,7 @@ import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as DateTime from "effect/DateTime";
-import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
+import { resolveNewThreadModelRoute } from "@t3tools/shared/autoModelRouting";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { resolveRuntimeMode } from "../../delegatedTaskModes.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -186,7 +186,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           launchedModel ??
           caller?.modelSelection ??
           (projectDefaults
-            ? resolveNewThreadModelSelection({
+            ? resolveNewThreadModelRoute({
                 defaultSelection: projectDefaults.defaultModelSelection,
                 fallbackSelection: projectDefaults.fallbackModelSelection,
                 providers: yield* ProviderRegistry.ProviderRegistry.pipe(

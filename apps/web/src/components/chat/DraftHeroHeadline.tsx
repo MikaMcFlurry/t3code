@@ -54,7 +54,7 @@ import { DraftHeroProjectHeading } from "./DraftHeroProjectHeading";
 import { TriageDraftHero } from "./TriageDraftHero";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { resolveProjectDefaultProviderModelSelection } from "../../providerInstances";
-import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
+import { resolveNewThreadModelRoute } from "@t3tools/shared/autoModelRouting";
 
 const ADD_PROJECT_VALUE = "add-project";
 
@@ -219,7 +219,7 @@ export function DraftHeroHeadline({
         ? resolveProjectSettings(environmentSettings, project.id, project).settings
             .defaultModelSelection
         : project.defaultModelSelection;
-      const fallbackResolution = resolveNewThreadModelSelection({
+      const modelResolution = resolveNewThreadModelRoute({
         defaultSelection:
           defaultSelection ??
           (useComposerDraftStore.getState().stickyActiveProvider !== null || !environmentSettings
@@ -235,9 +235,10 @@ export function DraftHeroHeadline({
         projectId: project.id,
         now: Date.now(),
       });
-      const defaultModelSelection = fallbackResolution.fallback
-        ? fallbackResolution.selection
-        : defaultSelection;
+      const defaultModelSelection =
+        modelResolution.fallback || modelResolution.auto
+          ? modelResolution.selection
+          : defaultSelection;
       if (defaultModelSelection) {
         setModelSelection(draftId, defaultModelSelection, {
           replaceOptions: true,

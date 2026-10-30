@@ -984,6 +984,13 @@ export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 export const ResponseStreamingMode = Schema.Literals(["turn", "paragraph"]);
 export type ResponseStreamingMode = typeof ResponseStreamingMode.Type;
 
+/**
+ * How new threads pick an account by usage headroom. `balance-accounts` keeps the provider
+ * kind and model; `any-provider` may switch kinds when every account of the preferred one is low.
+ */
+export const AutoModelSelectionMode = Schema.Literals(["off", "balance-accounts", "any-provider"]);
+export type AutoModelSelectionMode = typeof AutoModelSelectionMode.Type;
+
 const StorageRetentionDays = Schema.NullOr(
   Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 3650 })),
 );
@@ -1221,6 +1228,10 @@ export const ServerSettings = Schema.Struct({
   ),
   fallbackModelSelection: Schema.NullOr(ModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  autoModelSelection: AutoModelSelectionMode.pipe(
+    Schema.catchDecoding(() => Effect.succeedSome("off" as const)),
+    Schema.withDecodingDefault(Effect.succeed("off" as const)),
   ),
   defaultRuntimeMode: RuntimeMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE)),
@@ -1586,6 +1597,7 @@ export const ServerSettingsPatch = Schema.Struct({
   defaultModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   defaultRuntimeMode: Schema.optionalKey(RuntimeMode),
   fallbackModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
+  autoModelSelection: Schema.optionalKey(AutoModelSelectionMode),
   /** Replaces each project's override set; null removes it. Omitted providerInstances retains its stored value. */
   projectSettingsOverrides: Schema.optionalKey(
     Schema.Record(

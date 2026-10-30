@@ -1,4 +1,5 @@
 import {
+  type AutoModelSelectionMode,
   DEFAULT_SERVER_SETTINGS,
   type ModelSelection,
   type WorktreeSubmodules,
@@ -50,6 +51,16 @@ function isWorktreeSubmodules(value: string | null): value is WorktreeSubmodules
   return value !== null && (WORKTREE_SUBMODULES_OPTIONS as readonly string[]).includes(value);
 }
 
+const AUTO_MODEL_SELECTION_MODES = ["off", "balance-accounts", "any-provider"] as const;
+const AUTO_MODEL_SELECTION_LABELS: Record<AutoModelSelectionMode, string> = {
+  off: "Off",
+  "balance-accounts": "Same provider",
+  "any-provider": "Any provider",
+};
+function isAutoModelSelectionMode(value: string | null): value is AutoModelSelectionMode {
+  return value !== null && (AUTO_MODEL_SELECTION_MODES as readonly string[]).includes(value);
+}
+
 export function ProjectDefaultsSettings({ category }: { category: ProjectSettingsCategory }) {
   const { scope, target, targets, connectedEnvironments } = useSettingsScope();
   const settings = useScopedSettings();
@@ -92,6 +103,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
     targets.length > 0 &&
     targets.every((candidate) => candidate.settings.defaultModelSelection === null);
   const mixedFallback = useScopedSettingsMixed(["fallbackModelSelection"]);
+  const mixedAutoModel = useScopedSettingsMixed(["autoModelSelection"]);
   const fallbackSelection = settings.fallbackModelSelection ?? selection;
   const fallbackEntry = entries.find((entry) => entry.instanceId === fallbackSelection?.instanceId);
   const fallbackModelOptions = getCustomModelOptionsByInstance(
@@ -322,6 +334,49 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
     />
   ) : null;
 
+  const autoModelRow = !isProjectScope ? (
+    <SettingsRow
+      serverScoped
+      settingKeys={["autoModelSelection"]}
+      mixed={mixedAutoModel}
+      id="auto-model-selection"
+      title="Automatic account"
+      description="Starts new threads on the account with the most usage left. Same provider keeps the default model; Any provider may switch providers when every account is low."
+      resetAction={
+        settings.autoModelSelection !== DEFAULT_SERVER_SETTINGS.autoModelSelection ? (
+          <SettingResetButton
+            label="automatic account"
+            tooltip="Turn automatic account off"
+            onClick={() => updateSettings({ autoModelSelection: "off" })}
+          />
+        ) : null
+      }
+      control={
+        <Select
+          value={mixedAutoModel ? null : settings.autoModelSelection}
+          onValueChange={(value) => {
+            if (isAutoModelSelectionMode(value)) updateSettings({ autoModelSelection: value });
+          }}
+        >
+          <SelectTrigger size="sm" aria-label="Automatic account">
+            <SelectValue>
+              {(value: string | null) =>
+                isAutoModelSelectionMode(value) ? AUTO_MODEL_SELECTION_LABELS[value] : "Mixed"
+              }
+            </SelectValue>
+          </SelectTrigger>
+          <SelectPopup align="end" alignItemWithTrigger={false}>
+            {AUTO_MODEL_SELECTION_MODES.map((mode) => (
+              <SelectItem key={mode} value={mode}>
+                {AUTO_MODEL_SELECTION_LABELS[mode]}
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
+      }
+    />
+  ) : null;
+
   return (
     <SettingsSection
       id={category === "source-control" ? "source-control-defaults" : "project-defaults"}
@@ -331,12 +386,14 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
         <>
           {modelRow}
           {fallbackRow}
+          {autoModelRow}
           {workspaceRow}
         </>
       ) : category === "general" ? (
         <>
           {modelRow}
           {fallbackRow}
+          {autoModelRow}
           <SettingsRow
             serverScoped
             settingKeys={["defaultRuntimeMode"]}

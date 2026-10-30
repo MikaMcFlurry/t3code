@@ -375,6 +375,24 @@ describe("ServerSettings.sourceControlWritingStyle", () => {
   });
 });
 
+describe("ServerSettings.autoModelSelection", () => {
+  it.each([
+    [{}, "off"],
+    [{ autoModelSelection: "balance-accounts" }, "balance-accounts"],
+    [{ autoModelSelection: "any-provider" }, "any-provider"],
+    [{ autoModelSelection: "from-a-newer-server" }, "off"],
+  ] as const)("decodes %j as %s", (input, expected) => {
+    expect(decodeServerSettings(input).autoModelSelection).toBe(expected);
+  });
+
+  it("rejects unknown modes in patches", () => {
+    expect(
+      decodeServerSettingsPatch({ autoModelSelection: "any-provider" }).autoModelSelection,
+    ).toBe("any-provider");
+    expect(() => decodeServerSettingsPatch({ autoModelSelection: "always" })).toThrow();
+  });
+});
+
 describe("ServerSettings environment icon", () => {
   it("decodes a kind from a newer server as null instead of failing the snapshot", () => {
     expect(decodeServerSettings({ environmentIcon: "toaster" }).environmentIcon).toBeNull();
