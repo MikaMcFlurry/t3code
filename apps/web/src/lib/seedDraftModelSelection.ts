@@ -1,6 +1,6 @@
 import type { ScopedProjectRef } from "@t3tools/contracts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
-import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
+import { resolveNewThreadModelRoute } from "@t3tools/shared/autoModelRouting";
 
 import { type DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { resolveProjectDefaultProviderModelSelection } from "../providerInstances";
@@ -20,7 +20,7 @@ export function seedDraftModelSelection(draftId: DraftId, projectRef: ScopedProj
     ? resolveProjectSettings(settings, projectRef.projectId, project ?? undefined).settings
         .defaultModelSelection
     : (project?.defaultModelSelection ?? null);
-  const resolution = resolveNewThreadModelSelection({
+  const resolution = resolveNewThreadModelRoute({
     defaultSelection:
       defaultSelection ??
       (useComposerDraftStore.getState().stickyActiveProvider !== null || !settings
@@ -32,6 +32,7 @@ export function seedDraftModelSelection(draftId: DraftId, projectRef: ScopedProj
     projectId: projectRef.projectId,
     now: Date.now(),
   });
-  const selection = resolution.fallback ? resolution.selection : defaultSelection;
+  const selection =
+    resolution.fallback || resolution.auto ? resolution.selection : defaultSelection;
   if (selection) store.setModelSelection(draftId, selection, { replaceOptions: true });
 }
