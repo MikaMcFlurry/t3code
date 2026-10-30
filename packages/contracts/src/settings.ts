@@ -1064,6 +1064,13 @@ export const CentralMcpServer = Schema.Struct({
 });
 export type CentralMcpServer = typeof CentralMcpServer.Type;
 
+/**
+ * How new threads pick an account by usage headroom. `balance-accounts` keeps the provider
+ * kind and model; `any-provider` may switch kinds when every account of the preferred one is low.
+ */
+export const AutoModelSelectionMode = Schema.Literals(["off", "balance-accounts", "any-provider"]);
+export type AutoModelSelectionMode = typeof AutoModelSelectionMode.Type;
+
 const StorageRetentionDays = Schema.NullOr(
   Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 3650 })),
 );
@@ -1303,6 +1310,14 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   centralMcpServers: Schema.Array(CentralMcpServer).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  autoModelSelection: AutoModelSelectionMode.pipe(
+    Schema.catchDecoding(() => Effect.succeedSome("off" as const)),
+    Schema.withDecodingDefault(Effect.succeed("off" as const)),
+  ),
+  /** Entries `instanceId`, `instanceId/model` or `driver:<kind>`; empty allows every model. */
+  autoRoutingAllowed: Schema.Array(Schema.String).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   defaultRuntimeMode: RuntimeMode.pipe(
@@ -1669,6 +1684,8 @@ export const ServerSettingsPatch = Schema.Struct({
   defaultRuntimeMode: Schema.optionalKey(RuntimeMode),
   fallbackModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   centralMcpServers: Schema.optionalKey(Schema.Array(CentralMcpServer)),
+  autoModelSelection: Schema.optionalKey(AutoModelSelectionMode),
+  autoRoutingAllowed: Schema.optionalKey(Schema.Array(Schema.String)),
   /** Replaces each project's override set; null removes it. Omitted providerInstances retains its stored value. */
   projectSettingsOverrides: Schema.optionalKey(
     Schema.Record(
