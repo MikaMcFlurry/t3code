@@ -4,6 +4,7 @@ import {
   type AutoModelRoute,
   type AutoModelRoutingContext,
   chooseModelForTask,
+  filterAllowedProviders,
   type TaskProfile,
 } from "./autoModelRouting.ts";
 
@@ -104,7 +105,9 @@ export function planAutoLaunch(
     ranked,
     profile,
     route: chooseModelForTask({
-      providers: input.providers,
+      providers: filterAllowedProviders(input.providers, [
+        input.settings?.autoRoutingAllowed ?? [],
+      ]),
       now: input.now,
       profile,
       ...(input.settings === undefined ? {} : { settings: input.settings }),
