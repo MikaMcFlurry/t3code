@@ -195,6 +195,7 @@ import { makePrepareTerminalLaunch } from "./workspace/restoreMissingWorktree.ts
 import { terminalOutputStream, withOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as DeviceService from "./device/DeviceService.ts";
+import * as CentralSkills from "./skills/CentralSkills.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
@@ -1472,6 +1473,7 @@ export const layerWsRpc = (
       const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
       const pullRequestSync = yield* PullRequestSyncReactor.PullRequestSyncReactor;
       const deviceService = yield* DeviceService.DeviceService;
+      const centralSkills = yield* CentralSkills.CentralSkills;
       const deviceHostContext =
         yield* Effect.context<Effect.Services<ReturnType<typeof remoteSshDeviceHosts>>>();
       const orchestrationEngine = yield* Orchestrator.OrchestratorV2;
@@ -3213,6 +3215,11 @@ export const layerWsRpc = (
         [WS_METHODS.previewReportProfiles]: (input) => reportProfiles(input),
         [WS_METHODS.previewReportStatus]: (input) => previewManager.reportStatus(input),
         [WS_METHODS.subscribePreviewEvents]: (_input) => previewManager.events,
+        [WS_METHODS.centralSkillsList]: (_input) => centralSkills.list,
+        [WS_METHODS.centralSkillsInstall]: (input) => centralSkills.install(input),
+        [WS_METHODS.centralSkillsRemove]: (input) => centralSkills.remove(input.name),
+        [WS_METHODS.centralSkillsSetEnabled]: (input) =>
+          centralSkills.setEnabled(input.name, input.enabled),
         [WS_METHODS.deviceConfigure]: (input) => deviceService.configure(input),
         [WS_METHODS.deviceTestHost]: (input) => deviceService.testHost(input),
         [WS_METHODS.deviceEasAccount]: (input) => deviceService.easAccount(input),

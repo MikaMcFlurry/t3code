@@ -18,6 +18,7 @@ import { makeCodexTextGeneration } from "../../textGeneration/CodexTextGeneratio
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as ServerConfig from "../../config.ts";
+import { mirrorCentralSkillsToCodexHome } from "../../skills/CentralSkillsMirror.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import {
@@ -195,6 +196,7 @@ export const CodexDriver: ProviderDriver<
         ? { ...config, homePath: environmentHome }
         : config;
     const homeLayout = yield* resolveCodexHomeLayout(homeConfig);
+    const { skillsDir } = yield* ServerConfig.ServerConfig;
     const continuationIdentity = codexContinuationIdentity(homeLayout);
     const stampIdentity = withInstanceIdentity({
       instanceId,
@@ -268,7 +270,17 @@ export const CodexDriver: ProviderDriver<
 
     // Kick the TTL-gated manifest refresh in the background and classify with the in-memory
     // manifest, so a slow or hung fetch never delays the provider check.
+    // Skills are mirrored before each Codex probe so its skills/list shows the central library.
+    const syncCentralSkills = mirrorCentralSkillsToCodexHome({
+      skillsDir,
+      homePath: effectiveConfig.homePath,
+      environment: processEnv,
+    }).pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, pathService),
+    );
     const checkProvider = modelCatalog.refreshInBackground.pipe(
+      Effect.andThen(effectiveConfig.enabled ? syncCentralSkills : Effect.void),
       Effect.andThen(
         Effect.zipWith(
           checkCodexProviderStatus(effectiveConfig, undefined, processEnv),
@@ -326,13 +338,16 @@ export const CodexDriver: ProviderDriver<
         ? snapshot.getSnapshot
         : Effect.all([
             snapshot.getSnapshot,
-            probeCodexSkillsForCwd({
-              binaryPath: effectiveConfig.binaryPath,
-              homePath: effectiveConfig.homePath,
-              launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, processEnv),
-              cwd,
-              environment: processEnv,
-            }).pipe(
+            syncCentralSkills.pipe(
+              Effect.andThen(
+                probeCodexSkillsForCwd({
+                  binaryPath: effectiveConfig.binaryPath,
+                  homePath: effectiveConfig.homePath,
+                  launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, processEnv),
+                  cwd,
+                  environment: processEnv,
+                }),
+              ),
               Effect.scoped,
               Effect.timeout(resolveProviderProbeTimeoutMs("codex", 20_000, processEnv)),
               Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
