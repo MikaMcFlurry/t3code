@@ -99,6 +99,7 @@ import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
 import { ExpandableText } from "./ExpandableText";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { UsageProviderSettings } from "./UsageProviderSettings";
+import { CentralMcpServersSection } from "./CentralMcpServersSection";
 import { ProviderSetupSection, readAntigravityAuthMethod } from "./ProviderSetupSection";
 import { ProviderAuthenticationSection } from "./ProviderAuthenticationSection";
 import { CodexSetupSection, CodexManagedRuntimeFields } from "./CodexSetupSection";
@@ -1076,6 +1077,12 @@ export function EnvironmentProviderSettings({
         sources={settings.usageLimitSources}
         cursorKeychainUsageEnabled={settings.cursorKeychainUsageEnabled}
         readOnly={readOnly}
+      />
+
+      <CentralMcpServersSection
+        servers={settings.centralMcpServers}
+        readOnly={readOnly}
+        onChange={(centralMcpServers) => updateSettings({ centralMcpServers })}
       />
 
       <SettingsSection title="Advanced">
