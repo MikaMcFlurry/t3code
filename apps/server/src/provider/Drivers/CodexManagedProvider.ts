@@ -30,6 +30,8 @@ import {
 import { codexContinuationIdentity } from "./CodexHomeLayout.ts";
 import { withInstanceIdentity } from "@t3tools/provider-core/server/instanceIdentity";
 import { HttpClient } from "effect/http";
+import * as ServerConfig from "../../config.ts";
+import { mirrorCentralSkillsToCodexHome } from "../../skills/CentralSkillsMirror.ts";
 const DRIVER = ProviderDriverKind.make("codex");
 
 export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(function* (
@@ -41,6 +43,7 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const host = yield* ProviderHost.ProviderHost;
+  const { skillsDir } = yield* ServerConfig.ServerConfig;
   const runtime = yield* makeCodexManagedRuntime({
     instanceId,
     enabled,
@@ -309,13 +312,22 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
                   ),
                 ),
               onSuccess: (effective) =>
-                probeCodexSkillsForCwd({
-                  binaryPath: effective.config.binaryPath,
+                mirrorCentralSkillsToCodexHome({
+                  skillsDir,
                   homePath: effective.config.homePath,
-                  launchArgs: effective.config.launchArgs,
-                  cwd,
                   environment: effective.environment,
                 }).pipe(
+                  Effect.provideService(FileSystem.FileSystem, fileSystem),
+                  Effect.provideService(Path.Path, path),
+                  Effect.andThen(
+                    probeCodexSkillsForCwd({
+                      binaryPath: effective.config.binaryPath,
+                      homePath: effective.config.homePath,
+                      launchArgs: effective.config.launchArgs,
+                      cwd,
+                      environment: effective.environment,
+                    }),
+                  ),
                   Effect.flatMap((skills) =>
                     snapshot.getSnapshot.pipe(Effect.map((draft) => ({ ...draft, skills }))),
                   ),
