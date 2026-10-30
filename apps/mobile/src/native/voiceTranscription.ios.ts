@@ -10,6 +10,8 @@ import {
   type VoiceTranscriptionOptions,
 } from "@t3tools/client-runtime/voice-input";
 
+import type { DictationLanguage } from "../lib/dictationLanguage";
+
 // The English-only app locale can differ from the user's preferred spoken languages.
 function getPreferredLocales(): string[] {
   const languages = Settings.get("AppleLanguages");
@@ -39,8 +41,11 @@ function getNativeErrorCode(error: unknown): string | undefined {
   return typeof error.code === "string" ? error.code : undefined;
 }
 
-export function getLocalVoiceTranscriber(): VoiceTranscriber | null {
-  const locales = getPreferredLocales();
+/** Automatic follows the iPhone's preferred languages; a chosen language is used on its own. */
+export function getLocalVoiceTranscriber(
+  language: DictationLanguage = "auto",
+): VoiceTranscriber | null {
+  const locales = language === "auto" ? getPreferredLocales() : [language];
   if (!AppleTranscription.isAvailable(locales[0]!)) return null;
   return { prepare: (options) => prepareVoiceTranscription(locales, options) };
 }

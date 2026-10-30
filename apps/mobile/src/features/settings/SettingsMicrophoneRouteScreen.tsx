@@ -11,6 +11,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { type AppSymbolName, SymbolView } from "../../components/ui/AppSymbol";
 import { AppText as Text } from "../../components/ui/AppText";
 import { cn } from "../../lib/cn";
+import { DEFAULT_DICTATION_LANGUAGE, DICTATION_LANGUAGES } from "../../lib/dictationLanguage";
 import {
   isMicrophoneDevice,
   type MicrophoneEntry,
@@ -21,6 +22,7 @@ import {
 import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
 import { ListRowLayout } from "../../components/ui/ListRowLayout";
 import { SettingsActionRow } from "./components/SettingsActionRow";
+import { SettingsChoiceRow } from "./components/SettingsChoiceRow";
 import { SettingsDragHandle } from "./components/SettingsDragHandle";
 import { SettingsSection } from "./components/SettingsSection";
 
@@ -97,6 +99,9 @@ export function SettingsMicrophoneRouteScreen() {
     AsyncResult.isSuccess(preferencesResult) ? preferencesResult.value.microphones : undefined,
   );
   const hasDevices = entries.some(isMicrophoneDevice);
+  const dictationLanguage = AsyncResult.isSuccess(preferencesResult)
+    ? (preferencesResult.value.dictationLanguage ?? DEFAULT_DICTATION_LANGUAGE)
+    : null;
   const { permission, request: requestPermission } = useMicrophonePermission();
   const [editing, setEditing] = useState(false);
   const [drag, setDrag] = useState<{ readonly key: string; readonly translation: number } | null>(
@@ -214,6 +219,29 @@ export function SettingsMicrophoneRouteScreen() {
           Voice input records from the first connected microphone in this list. Wired and Bluetooth
           devices are added by name after you use voice input with them connected; until then, the
           Other row ranks them.
+        </Text>
+        <SettingsSection title="Dictation language">
+          <SettingsChoiceRow
+            label="Automatic"
+            description="Uses your iPhone languages, in order"
+            selected={dictationLanguage === "auto"}
+            disabled={!ready}
+            onPress={() => savePreferences({ dictationLanguage: "auto" })}
+          />
+          {DICTATION_LANGUAGES.map((language) => (
+            <SettingsChoiceRow
+              key={language.locale}
+              label={language.label}
+              selected={dictationLanguage === language.locale}
+              separated
+              disabled={!ready}
+              onPress={() => savePreferences({ dictationLanguage: language.locale })}
+            />
+          ))}
+        </SettingsSection>
+        <Text className="px-2 text-sm text-foreground-muted">
+          Voice input transcribes on this device. The first recording in a new language may wait
+          while iOS downloads it.
         </Text>
       </ScrollView>
     </View>
