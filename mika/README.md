@@ -49,15 +49,15 @@ Identität würden sich sonst den T3-Connect-Tunnel streitig machen.
 
 ## Eigene Funktionen
 
-| #   | Funktion                                                             | Branch                  | Wo                                                      |
-| --- | -------------------------------------------------------------------- | ----------------------- | ------------------------------------------------------- |
-| 1   | Limit-Kreise (5h / Woche, % übrig) je Account                        | `mika/usage-rings`      | Modell-Auswahl, Account-Leiste links                    |
-| 2   | „Auto thread“: Projekt, Modell, Reasoning und Account aus dem Prompt | `mika/auto-launch`      | Stern-Button neben „New thread“                         |
-| 3   | Automatischer Account nach Auslastung                                | `mika/auto-model`       | Einstellungen > Projects > „Automatic account“          |
-| 4   | Routinen/Webhooks laufen über den automatischen Account              | `mika/routine-auto`     | Einstellungen > Scheduled tasks                         |
-| 5   | Sprache fürs Diktat (iPhone-App)                                     | `mika/dictation-locale` | iPhone: Settings > Microphone (eigener iOS-Build nötig) |
-| 6   | Zentrale Skills für alle Accounts, auch per KI installierbar         | `mika/central-skills`   | Einstellungen > Providers > „Central skills“            |
-| 7   | Zentrale MCP-Server für alle Claude- und Codex-Sitzungen             | `mika/central-mcp`      | Einstellungen > Providers > „Central MCP servers“       |
+| #   | Funktion                                                                                        | Branch                                      | Wo                                                               |
+| --- | ----------------------------------------------------------------------------------------------- | ------------------------------------------- | ---------------------------------------------------------------- |
+| 1   | Limit-Kreise (5h / Woche, % übrig) je Account                                                   | `mika/usage-rings`                          | Modell-Auswahl, Account-Leiste links                             |
+| 2   | „Auto thread“: Projekt, Modell, Reasoning und Account aus dem Prompt                            | `mika/auto-launch`                          | Stern-Button neben „New thread“                                  |
+| 3   | Automatischer Account nach Auslastung                                                           | `mika/auto-model`                           | Einstellungen > Projects > „Automatic account“                   |
+| 4   | Routinen/Webhooks: automatischer Account, Modell oder Auto-Routing pro Aufruf, erlaubte Modelle | `mika/routine-auto`, `mika/routine-routing` | Einstellungen > Scheduled tasks; erlaubte Modelle unter Projects |
+| 5   | Sprache fürs Diktat (iPhone-App)                                                                | `mika/dictation-locale`                     | iPhone: Settings > Microphone (eigener iOS-Build nötig)          |
+| 6   | Zentrale Skills für alle Accounts, auch per KI installierbar                                    | `mika/central-skills`                       | Einstellungen > Providers > „Central skills“                     |
+| 7   | Zentrale MCP-Server für alle Claude- und Codex-Sitzungen                                        | `mika/central-mcp`                          | Einstellungen > Providers > „Central MCP servers“                |
 
 Dazu kommt `mika/side-by-side` (eigenes Electron-Profil über `T3CODE_DESKTOP_APP_DATA_DIR`). Claude.ai-Konnektoren
 wie Gmail oder Drive hängen am claude.ai-Konto und lassen sich nicht zentral teilen. Ersatz sind lokale MCP-Server (7).
@@ -77,7 +77,33 @@ await fetch(process.env.T3_WEBHOOK_URL, {
 });
 ```
 
-Ist „Automatic account“ aktiv, startet der Lauf auf dem Account mit der meisten Restkapazität.
+#### Modell pro Aufruf wählen oder automatisch routen
+
+Der Body darf ein Objekt `t3` enthalten, alle Felder sind optional:
+
+```json
+{
+  "task": "Prüfe die Kontaktformulare",
+  "t3": {
+    "routing": "auto",
+    "allowed": ["driver:codex", "claude-2/claude-opus-5-5"],
+    "effort": "high"
+  }
+}
+```
+
+| Feld               | Wirkung                                                                                                |
+| ------------------ | ------------------------------------------------------------------------------------------------------ |
+| `model`            | Fest dieses Modell, z. B. `"codex-business-3/gpt-6.1-sol"` (Account-ID/Modell)                         |
+| `routing: "auto"`  | Aufgabengröße aus dem Prompt, dann passendes Modell auf dem Account mit der meisten Restkapazität      |
+| `routing: "fixed"` | Gespeichertes Modell der Routine, ohne automatischen Account                                           |
+| `allowed`          | Engt die erlaubten Modelle für diesen Aufruf ein (kann die Einstellung nur verkleinern, nie erweitern) |
+| `effort`           | Reasoning-Stufe, z. B. `low`, `medium`, `high`, wenn das Modell sie kennt                              |
+
+Ohne `t3` gilt: Ist „Automatic account“ aktiv, startet der Lauf auf dem Account mit der meisten Restkapazität,
+sonst mit dem gespeicherten Modell. Die erlaubten Modelle stellst du in Einstellungen > Projects >
+„Allowed models for automatic routing“ ein (Account-ID, `Account/Modell` oder `driver:codex`). Sie gelten für jede
+automatische Wahl: neue Threads, Auto thread und Routinen. Die Account-IDs stehen in Einstellungen > Providers.
 
 ## Konflikte bei Updates (mit KI lösen)
 
