@@ -327,6 +327,39 @@ export function chooseModelForTask(
     : null;
 }
 
+function matchesEntry(provider: ServerProvider, entry: string) {
+  const trimmed = entry.trim();
+  if (trimmed.startsWith("driver:")) return provider.driver === trimmed.slice("driver:".length);
+  const [instanceId] = trimmed.split("/", 1);
+  return provider.instanceId === instanceId;
+}
+
+/**
+ * Keeps providers an entry allows; `instanceId/model` entries also narrow that provider's models.
+ * Every list must allow a provider, so a webhook can narrow the setting but never widen it.
+ */
+export function filterAllowedProviders(
+  providers: ReadonlyArray<ServerProvider>,
+  lists: ReadonlyArray<ReadonlyArray<string>>,
+): ServerProvider[] {
+  const active = lists.filter((list) => list.length > 0);
+  return providers.flatMap((provider) => {
+    let models = provider.models;
+    for (const list of active) {
+      const entries = list.filter((entry) => matchesEntry(provider, entry));
+      if (entries.length === 0) return [];
+      const slugs = entries.flatMap((entry) => {
+        const cut = entry.indexOf("/");
+        return cut < 0 ? [] : [entry.slice(cut + 1).trim()];
+      });
+      if (slugs.length > 0 && entries.every((entry) => entry.includes("/"))) {
+        models = models.filter((model) => slugs.includes(model.slug));
+      }
+    }
+    return models.length > 0 ? [{ ...provider, models }] : [];
+  });
+}
+
 /**
  * `resolveNewThreadModelSelection` plus the opt-in `autoModelSelection` setting. `auto` is set
  * only when routing changed the selection; a configured fallback still beats a cross-kind route.
@@ -338,7 +371,12 @@ export function resolveNewThreadModelRoute(
   const mode = input.settings?.autoModelSelection ?? "off";
   const desired = input.defaultSelection;
   if (mode === "off" || input.explicitSelection || !desired) return base;
-  const route = routeModelSelection({ ...input, desired, mode });
+  const route = routeModelSelection({
+    ...input,
+    providers: filterAllowedProviders(input.providers, [input.settings?.autoRoutingAllowed ?? []]),
+    desired,
+    mode,
+  });
   if (
     !route ||
     (route.crossProvider && base.fallback) ||
