@@ -37,6 +37,48 @@ D:\T3-Dev\t3code\mika\Move-ToOfficial.ps1
 Die offizielle App wird von keinem Skript verändert, außer von `Move-ToOfficial.ps1`. Das sichert vorher nach `D:\T3-Mika\backups`.
 Worktrees und Projektordner bleiben an ihrem Ort, beide Versionen zeigen auf dieselben Ordner.
 
+### Handy-App: zwei Modi
+
+| Modus                | Befehl                      | Handy                                                   | Gleichzeitig nutzbar     |
+| -------------------- | --------------------------- | ------------------------------------------------------- | ------------------------ |
+| Übernahme (Standard) | `Move-ToMika.ps1`           | funktioniert unverändert (gleiche Identität, Port 3773) | nein, immer nur eine App |
+| Parallel             | `Move-ToMika.ps1 -Parallel` | einmal neu koppeln, danach zwei Rechner in der App      | ja                       |
+
+`Start-T3Mika.ps1` startet im Übernahme-Modus nicht, solange die offizielle App läuft. Zwei Server mit derselben
+Identität würden sich sonst den T3-Connect-Tunnel streitig machen.
+
+## Eigene Funktionen
+
+| #   | Funktion                                                             | Branch                  | Wo                                                      |
+| --- | -------------------------------------------------------------------- | ----------------------- | ------------------------------------------------------- |
+| 1   | Limit-Kreise (5h / Woche, % übrig) je Account                        | `mika/usage-rings`      | Modell-Auswahl, Account-Leiste links                    |
+| 2   | „Auto thread“: Projekt, Modell, Reasoning und Account aus dem Prompt | `mika/auto-launch`      | Stern-Button neben „New thread“                         |
+| 3   | Automatischer Account nach Auslastung                                | `mika/auto-model`       | Einstellungen > Projects > „Automatic account“          |
+| 4   | Routinen/Webhooks laufen über den automatischen Account              | `mika/routine-auto`     | Einstellungen > Scheduled tasks                         |
+| 5   | Sprache fürs Diktat (iPhone-App)                                     | `mika/dictation-locale` | iPhone: Settings > Microphone (eigener iOS-Build nötig) |
+| 6   | Zentrale Skills für alle Accounts, auch per KI installierbar         | `mika/central-skills`   | Einstellungen > Providers > „Central skills“            |
+| 7   | Zentrale MCP-Server für alle Claude- und Codex-Sitzungen             | `mika/central-mcp`      | Einstellungen > Providers > „Central MCP servers“       |
+
+Dazu kommt `mika/side-by-side` (eigenes Electron-Profil über `T3CODE_DESKTOP_APP_DATA_DIR`). Claude.ai-Konnektoren
+wie Gmail oder Drive hängen am claude.ai-Konto und lassen sich nicht zentral teilen. Ersatz sind lokale MCP-Server (7).
+
+### Routine von der eigenen Webseite starten
+
+1. In T3 Code Mika unter Einstellungen > Scheduled tasks eine Aufgabe mit dem Auslöser **Webhook** anlegen.
+   Der Prompt kann Platzhalter aus dem Request-Body verwenden; die Hilfe im Formular zeigt die Syntax.
+2. Die angezeigte Webhook-Adresse kopieren. Mit T3 Connect ist sie über das Internet erreichbar, ohne offenen Port.
+3. Von der Webseite (serverseitig, die Adresse ist geheim) aufrufen:
+
+```js
+await fetch(process.env.T3_WEBHOOK_URL, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ task: "Prüfe die Kontaktformulare und berichte Fehler" }),
+});
+```
+
+Ist „Automatic account“ aktiv, startet der Lauf auf dem Account mit der meisten Restkapazität.
+
 ## Konflikte bei Updates (mit KI lösen)
 
 Wenn `Update-T3Mika.ps1` mit „Konflikt in mika/xyz“ stoppt, bleiben der Build und `mika/main` unverändert.
