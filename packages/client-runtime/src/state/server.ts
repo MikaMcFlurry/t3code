@@ -1530,6 +1530,28 @@ export function createServerEnvironmentAtoms<R, E>(
       scheduler: configScheduler,
       concurrency: configConcurrency,
     }),
+    centralSkills: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:central-skills",
+      tag: WS_METHODS.centralSkillsList,
+    }),
+    installCentralSkill: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:central-skills:install",
+      tag: WS_METHODS.centralSkillsInstall,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
+    removeCentralSkill: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:central-skills:remove",
+      tag: WS_METHODS.centralSkillsRemove,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
+    setCentralSkillEnabled: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:central-skills:set-enabled",
+      tag: WS_METHODS.centralSkillsSetEnabled,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
     // Deliberately not on the config lane: run-now blocks until the run is
     // dispatched, and a slow run must not stall settings/keybinding/provider
     // mutations (or other scheduled-task edits) queued behind it.
