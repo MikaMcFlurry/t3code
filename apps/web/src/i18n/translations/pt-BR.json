@@ -12195,5 +12195,21 @@
   "27d76249d09eb69f": "Guia de revisão pronto",
   "faa3bb26abb39c93": "O guia de revisão falhou",
   "b7df38b7d8792d78": "Abrir guia",
-  "9e91e9a77b664e4e": "Não foi possível iniciar um guia de revisão"
+  "9e91e9a77b664e4e": "Não foi possível iniciar um guia de revisão",
+  "f3eeebac9160c736": "Skills centrais",
+  "41df551174846725": "Biblioteca de skills",
+  "16f3efa6174af615": "Skills ativadas chegam a todas as contas de provedor nesta máquina: o Claude as carrega diretamente, e as pastas do Codex recebem uma cópia gerenciada. Suas próprias skills com o mesmo nome têm prioridade.",
+  "6248d665f995d8d1": "Pasta: {directory}",
+  "786d17c346c53e64": "Pasta, URL do git ou URL de SKILL.md",
+  "95b612e63247ef9b": "Origem da skill",
+  "1bc402d7ddebc6c9": "Não foi possível instalar a skill",
+  "c62a0c9e2a477626": "De {source}",
+  "05a06bc27d4f461e": "Não foi possível atualizar a skill",
+  "9f750ea9758231e9": "Não foi possível remover a skill",
+  "b848773fd942cc02": "Instalar",
+  "bcd81f6bc8be0377": [
+    "Não foi possível carregar as skills: ",
+    { "i": 1, "k": "_gt_value_1", "v": "v" }
+  ],
+  "93776d65eeabf676": "Ainda não há skills centrais."
 }
