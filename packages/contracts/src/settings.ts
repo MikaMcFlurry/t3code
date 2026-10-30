@@ -1155,6 +1155,39 @@ export type ResponseStreamingMode = typeof ResponseStreamingMode.Type;
 export const AgentFeedbackMode = Schema.Literals(["off", "on-request", "auto"]);
 export type AgentFeedbackMode = typeof AgentFeedbackMode.Type;
 
+/** A name both Claude and Codex accept as an MCP server key; `t3-code` stays T3's own. */
+export const CentralMcpServerName = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(64),
+  Schema.isPattern(/^(?!t3-code$)[a-zA-Z0-9][a-zA-Z0-9_-]*$/),
+);
+
+export const CentralMcpServerTransport = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("stdio"),
+    command: TrimmedNonEmptyString,
+    args: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+    env: Schema.Record(Schema.String, Schema.String).pipe(
+      Schema.withDecodingDefault(Effect.succeed({})),
+    ),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("http"),
+    url: TrimmedNonEmptyString,
+    headers: Schema.Record(Schema.String, Schema.String).pipe(
+      Schema.withDecodingDefault(Effect.succeed({})),
+    ),
+  }),
+]);
+export type CentralMcpServerTransport = typeof CentralMcpServerTransport.Type;
+
+/** An MCP server T3 adds to every Claude and Codex session, whichever account runs it. */
+export const CentralMcpServer = Schema.Struct({
+  name: CentralMcpServerName,
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  transport: CentralMcpServerTransport,
+});
+export type CentralMcpServer = typeof CentralMcpServer.Type;
+
 const StorageRetentionDays = Schema.NullOr(
   Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 3650 })),
 );
@@ -1462,6 +1495,9 @@ export const ServerSettings = Schema.Struct({
   ),
   fallbackModelSelection: Schema.NullOr(ModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  centralMcpServers: Schema.Array(CentralMcpServer).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
   ),
   defaultRuntimeMode: RuntimeMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE)),
@@ -1924,6 +1960,7 @@ export const ServerSettingsPatch = Schema.Struct({
   defaultModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   defaultRuntimeMode: Schema.optionalKey(RuntimeMode),
   fallbackModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
+  centralMcpServers: Schema.optionalKey(Schema.Array(CentralMcpServer)),
   /** Replaces each project's override set; null removes it. Omitted providerInstances retains its stored value. */
   projectSettingsOverrides: Schema.optionalKey(
     Schema.Record(
