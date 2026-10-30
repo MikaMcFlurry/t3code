@@ -111,6 +111,7 @@ import { readCodexSetupMode } from "./CodexSetupSection.logic";
 import { providerClients } from "./providerDriverMeta";
 import { useSearchableSetting } from "./settingsSearch";
 import { CompactIdleThreadsRow } from "./SettingsPanels";
+import { CentralMcpServersSection } from "./CentralMcpServersSection";
 import {
   backgroundActivityOverrideSettings,
   buildProviderInstanceUpdatePatch,
@@ -1151,6 +1152,12 @@ export function EnvironmentProviderSettings({
         environmentLabel={environmentLabel}
         sources={settings.usageLimitSources}
         readOnly={readOnly}
+      />
+
+      <CentralMcpServersSection
+        servers={settings.centralMcpServers}
+        readOnly={readOnly}
+        onChange={(centralMcpServers) => updateSettings({ centralMcpServers })}
       />
 
       {/* The server drops text generators under a provider allow-list. */}
