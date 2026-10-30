@@ -29,6 +29,7 @@ import {
   type CodexRateLimitSnapshot,
 } from "../../provider/codexUsageLimits.ts";
 import {
+  type CentralMcpServer,
   CodexSettings,
   defaultInstanceIdForDriver,
   isOrchestrationV2WorkActive,
@@ -103,6 +104,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { resolveAttachmentPath, resolveAttachmentPathById } from "../../attachmentStore.ts";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import { ServerConfig } from "../../config.ts";
+import * as ServerSettings from "../../serverSettings.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import { buildCodexAdditionalContext } from "../../provider/CodexDeveloperInstructions.ts";
 import {
@@ -1333,8 +1335,29 @@ export const CODEX_THREAD_CONFIG = {
 // T3 waits can block for an hour; keep Codex's MCP timeout above that.
 const CODEX_T3_MCP_TOOL_TIMEOUT_SEC = 65 * 60;
 
+/** Central MCP servers as `mcp_servers.<name>` config overrides; disabled ones are left out. */
+export function codexCentralMcpConfig(
+  servers: ReadonlyArray<CentralMcpServer> | undefined,
+): Record<string, Schema.Json> {
+  return Object.fromEntries(
+    (servers ?? [])
+      .filter((server) => server.enabled)
+      .map((server) => [
+        `mcp_servers.${server.name}`,
+        server.transport.type === "stdio"
+          ? {
+              command: server.transport.command,
+              args: [...server.transport.args],
+              env: { ...server.transport.env },
+            }
+          : { url: server.transport.url, http_headers: { ...server.transport.headers } },
+      ]),
+  );
+}
+
 function codexThreadRuntimeParams(input: {
   readonly mcpSession: McpProviderSession.McpProviderSessionConfig | undefined;
+  readonly centralMcpServers?: ReadonlyArray<CentralMcpServer>;
   readonly modelSelection?: { readonly model: string };
   readonly runtimePolicy?: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
 }): {
@@ -1348,6 +1371,7 @@ function codexThreadRuntimeParams(input: {
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
     config: {
       ...CODEX_THREAD_CONFIG,
+      ...codexCentralMcpConfig(input.centralMcpServers),
       ...(mcpSession === undefined
         ? {}
         : {
@@ -1636,6 +1660,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
   const readMcpSession = (threadId: ThreadId | null) =>
     // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
     threadId === null ? Effect.succeed(undefined) : mcpSessions.read(threadId);
+  const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
+  const readCentralMcpServers = Option.isSome(serverSettings)
+    ? serverSettings.value.getSettings.pipe(
+        Effect.map((settings) => settings.centralMcpServers),
+        Effect.orElseSucceed((): ReadonlyArray<CentralMcpServer> => []),
+      )
+    : Effect.succeed<ReadonlyArray<CentralMcpServer>>([]);
   const { clientFactory, crypto, fileSystem, idAllocator, serverConfig } = adapterOptions;
   const continuationRequests = adapterOptions.continuationRequests;
 
@@ -6952,12 +6983,15 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           }),
           ensureThread: (threadInput) =>
             ensureInitialized.pipe(
-              Effect.andThen(mcpSessions.read(threadInput.threadId)),
-              Effect.flatMap((mcpSession) =>
+              Effect.andThen(
+                Effect.zip(mcpSessions.read(threadInput.threadId), readCentralMcpServers),
+              ),
+              Effect.flatMap(([mcpSession, centralMcpServers]) =>
                 client.request(
                   "thread/start",
                   codexThreadRuntimeParams({
                     mcpSession,
+                    centralMcpServers,
                     modelSelection: threadInput.modelSelection,
                     runtimePolicy: threadInput.runtimePolicy,
                   }),
@@ -6992,6 +7026,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   mcpSession: yield* readMcpSession(
                     threadInput.threadId ?? threadInput.providerThread.appThreadId,
                   ),
+                  centralMcpServers: yield* readCentralMcpServers,
                   ...(threadInput.modelSelection === undefined
                     ? {}
                     : { modelSelection: threadInput.modelSelection }),
@@ -7777,6 +7812,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   excludeTurns: true,
                   ...codexThreadRuntimeParams({
                     mcpSession: yield* readMcpSession(threadInput.providerThread.appThreadId),
+                    centralMcpServers: yield* readCentralMcpServers,
                     modelSelection: input.modelSelection,
                     runtimePolicy: input.runtimePolicy,
                   }),
@@ -7829,6 +7865,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                       : { lastTurnId: boundary.lastTurnId }),
                     ...codexThreadRuntimeParams({
                       mcpSession: yield* mcpSessions.read(threadInput.targetThreadId),
+                      centralMcpServers: yield* readCentralMcpServers,
                       ...(threadInput.modelSelection === undefined
                         ? {}
                         : { modelSelection: threadInput.modelSelection }),
