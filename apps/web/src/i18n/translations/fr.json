@@ -12785,6 +12785,26 @@
   "faa3bb26abb39c93": "Échec du guide de revue",
   "b7df38b7d8792d78": "Ouvrir le guide",
   "9e91e9a77b664e4e": "Impossible de démarrer un guide de revue",
+  "f3eeebac9160c736": "Skills centraux",
+  "41df551174846725": "Bibliothèque de skills",
+  "16f3efa6174af615": "Les skills activés sont disponibles pour chaque compte fournisseur de cette machine : Claude les charge directement, les dossiers Codex en reçoivent une copie gérée. Vos propres skills portant le même nom sont prioritaires.",
+  "6248d665f995d8d1": "Dossier : {directory}",
+  "786d17c346c53e64": "Dossier, URL git ou URL de SKILL.md",
+  "95b612e63247ef9b": "Source du skill",
+  "1bc402d7ddebc6c9": "Impossible d’installer le skill",
+  "c62a0c9e2a477626": "Depuis {source}",
+  "05a06bc27d4f461e": "Impossible de mettre à jour le skill",
+  "9f750ea9758231e9": "Impossible de supprimer le skill",
+  "b848773fd942cc02": "Installer",
+  "bcd81f6bc8be0377": [
+    "Impossible de charger les skills : ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
+  "93776d65eeabf676": "Aucun skill central pour l’instant.",
   "99d51127f573296b": "Autre compte",
   "8ec2c57414669b79": "Connectez un second espace de travail ou utilisateur {tracker}.",
   "99963c0142e17f00": "Pour le nouveau compte {tracker}.",
