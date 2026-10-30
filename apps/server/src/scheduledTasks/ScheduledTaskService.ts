@@ -45,6 +45,9 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import { routeModelSelection } from "@t3tools/shared/autoModelRouting";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as Metrics from "../observability/Metrics.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -437,6 +440,28 @@ export const layer = Layer.effect(
     const secretRequests = yield* SecretRequests.SecretRequests;
     const scheduler = yield* Scheduler.Scheduler;
     const readWebhookOrigin = yield* ScheduledTaskWebhookOrigin;
+    const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
+    const providerRegistry = yield* Effect.serviceOption(ProviderRegistry.ProviderRegistry);
+    /** With automatic account selection on, scheduled launches use the account with the most usage left. */
+    const routedModelSelection = Effect.fn("ScheduledTaskService.routedModelSelection")(
+      function* (task: ScheduledTask) {
+        if (Option.isNone(serverSettings) || Option.isNone(providerRegistry)) {
+          return task.modelSelection;
+        }
+        const settings = yield* serverSettings.value.getSettings;
+        if (settings.autoModelSelection === "off") return task.modelSelection;
+        const route = routeModelSelection({
+          desired: task.modelSelection,
+          mode: settings.autoModelSelection,
+          providers: yield* providerRegistry.value.getProviders,
+          settings,
+          projectId: task.projectId,
+          now: DateTime.toEpochMillis(yield* DateTime.now),
+        });
+        return route?.selection ?? task.modelSelection;
+      },
+      (effect, task) => effect.pipe(Effect.orElseSucceed(() => task.modelSelection)),
+    );
     const webhookPermits = yield* Ref.make<ReadonlyMap<ScheduledTaskId, Semaphore.Semaphore>>(
       new Map(),
     );
@@ -906,7 +931,7 @@ export const layer = Layer.effect(
                     commandId,
                     projectId: active.projectId,
                     title: active.title,
-                    modelSelection: active.modelSelection,
+                    modelSelection: yield* routedModelSelection(active),
                     runtimeMode: active.runtimeMode,
                     interactionMode: active.interactionMode,
                     workspaceStrategy: active.workspaceStrategy,
