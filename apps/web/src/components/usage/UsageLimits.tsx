@@ -191,12 +191,15 @@ export function LimitWindows({
   windows,
   now,
   compact = false,
+  formatReset,
 }: {
   readonly driver: ServerProvider["driver"];
   readonly accentColor?: string | undefined;
   readonly windows: ReadonlyArray<ServerProviderUsageWindow>;
   readonly now: number;
   readonly compact?: boolean;
+  /** Replaces the relative "resets in" text, e.g. with the reset's wall-clock time. */
+  readonly formatReset?: (window: ServerProviderUsageWindow) => string | null;
 }) {
   const color = normalizeProviderAccentColor(accentColor) ?? barColor(driver);
   return (
@@ -209,7 +212,7 @@ export function LimitWindows({
     >
       {windows.map((window) => {
         const pace = paceOf(window, now);
-        const resetsIn = formatResetsIn(window, now);
+        const resetsIn = formatReset ? formatReset(window) : formatResetsIn(window, now);
         return (
           <Fragment key={window.id}>
             <span className="flex min-w-0 items-center gap-2 text-xs">
