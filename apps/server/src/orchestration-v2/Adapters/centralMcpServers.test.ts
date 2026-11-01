@@ -1,9 +1,16 @@
 import { CentralMcpServer, EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 
 import { claudeCentralMcpServers, claudeMcpQueryOverrides } from "./ClaudeAdapterV2.ts";
 import { codexCentralMcpConfig } from "./CodexAdapterV2.ts";
+import {
+  acpCentralMcpServers,
+  resolveAcpCentralMcpServers,
+} from "../../provider/ProviderInstanceRegistryHydration.ts";
 
 const decodeServers = Schema.decodeUnknownSync(Schema.Array(CentralMcpServer));
 
@@ -67,4 +74,38 @@ describe("central MCP servers", () => {
       },
     });
   });
+
+  it("maps enabled servers into ACP session servers", () => {
+    assert.deepStrictEqual(acpCentralMcpServers(servers), [
+      { name: "github", command: "npx", args: ["-y", "gh-mcp"], env: [] },
+      {
+        type: "http",
+        name: "docs",
+        url: "https://docs.example/mcp",
+        headers: [{ name: "X-Key", value: "k" }],
+      },
+    ]);
+  });
+
+  it.effect("resolves ACP stdio commands, running Windows cmd shims through cmd.exe", () =>
+    Effect.gen(function* () {
+      const resolved = yield* resolveAcpCentralMcpServers(servers);
+      assert.deepStrictEqual(resolved[0], {
+        name: "github",
+        command: "C:\Windows\System32\cmd.exe",
+        args: ["/d", "/c", "npx", "-y", "gh-mcp"],
+        env: [],
+      });
+      assert.deepStrictEqual(resolved[1], acpCentralMcpServers(servers)[1]);
+    }).pipe(
+      Effect.provideService(HostProcess.Platform, "win32"),
+      Effect.provideService(HostProcess.Environment, {
+        ComSpec: "C:\Windows\System32\cmd.exe",
+        PATH: "C:\nodejs",
+      }),
+      Effect.provideService(SpawnExecutableResolution, (command) =>
+        command === "npx" ? "C:\nodejs\npx.cmd" : undefined,
+      ),
+    ),
+  );
 });
