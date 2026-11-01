@@ -1,5 +1,5 @@
 import { ActiveNewTaskContext } from "../../state/active-new-task";
-import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
+import { resolveNewThreadModelRoute } from "@t3tools/shared/autoModelRouting";
 import { useNowMinuteMs } from "../../lib/clock";
 import * as Dialog from "../../components/ui/Dialog";
 import React, { useEffect, useRef, useState } from "react";
@@ -449,7 +449,7 @@ export function NewTaskFlowProvider(
     stickySelection: stickyModelSelection,
     modelOptions,
   });
-  const selectedModel = resolveNewThreadModelSelection({
+  const selectedModel = resolveNewThreadModelRoute({
     defaultSelection: selectedDefaultModel,
     explicitSelection:
       draftModelSelection ?? (projectDefaultModelSelection ? null : stickyModelSelection),

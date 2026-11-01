@@ -11,6 +11,7 @@ import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import {
+  ForwardCompatibleArray,
   ForwardCompatibleNullable,
   ForwardCompatibleOptional,
   OmittedWhenNull,
@@ -1016,6 +1017,32 @@ export const CentralMcpServer = Schema.Struct({
   transport: CentralMcpServerTransport,
 });
 export type CentralMcpServer = typeof CentralMcpServer.Type;
+/**
+ * An expected usage reset found by research or entered by hand, for example a provider granting
+ * everyone a free reset. Planning prefers that provider's accounts before the reset.
+ */
+export const UsageResetForecastEntry = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  /** Provider driver, e.g. `codex` or `claudeAgent`. */
+  driver: TrimmedNonEmptyString,
+  kind: Schema.Literals(["free-reset", "limit-increase", "outage-credit", "other"]),
+  /** When the reset is expected or announced to happen. */
+  expectedAt: TrimmedNonEmptyString,
+  /** 0 to 1: announced by the provider is about 1, a rumor is low. */
+  confidence: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
+  /** Web links only: agents fill this from pages they read. */
+  source: Schema.optional(TrimmedNonEmptyString.check(Schema.isPattern(/^https?:\/\//i))),
+  note: Schema.optional(Schema.String.check(Schema.isMaxLength(500))),
+  recordedAt: TrimmedNonEmptyString,
+});
+export type UsageResetForecastEntry = typeof UsageResetForecastEntry.Type;
+
+/**
+ * How new threads pick an account by usage headroom. `balance-accounts` keeps the provider
+ * kind and model; `any-provider` may switch kinds when every account of the preferred one is low.
+ */
+export const AutoModelSelectionMode = Schema.Literals(["off", "balance-accounts", "any-provider"]);
+export type AutoModelSelectionMode = typeof AutoModelSelectionMode.Type;
 
 const StorageRetentionDays = Schema.NullOr(
   Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 3650 })),
@@ -1256,6 +1283,23 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   centralMcpServers: Schema.Array(CentralMcpServer).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  autoModelSelection: AutoModelSelectionMode.pipe(
+    Schema.catchDecoding(() => Effect.succeedSome("off" as const)),
+    Schema.withDecodingDefault(Effect.succeed("off" as const)),
+  ),
+  /** Entries `instanceId`, `instanceId/model` or `driver:<kind>`; empty allows every model. */
+  autoRoutingAllowed: Schema.Array(Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  /**
+   * Spread the weekly limit windows of accounts of one provider across the week: an account whose
+   * weekly window has not started is held back until its planned start.
+   */
+  usageResetStaggering: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // One malformed entry is dropped on its own instead of clearing the list.
+  usageResetForecast: ForwardCompatibleArray(UsageResetForecastEntry).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   defaultRuntimeMode: RuntimeMode.pipe(
@@ -1623,6 +1667,10 @@ export const ServerSettingsPatch = Schema.Struct({
   defaultRuntimeMode: Schema.optionalKey(RuntimeMode),
   fallbackModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   centralMcpServers: Schema.optionalKey(Schema.Array(CentralMcpServer)),
+  autoModelSelection: Schema.optionalKey(AutoModelSelectionMode),
+  autoRoutingAllowed: Schema.optionalKey(Schema.Array(Schema.String)),
+  usageResetStaggering: Schema.optionalKey(Schema.Boolean),
+  usageResetForecast: Schema.optionalKey(Schema.Array(UsageResetForecastEntry)),
   /** Replaces each project's override set; null removes it. Omitted providerInstances retains its stored value. */
   projectSettingsOverrides: Schema.optionalKey(
     Schema.Record(

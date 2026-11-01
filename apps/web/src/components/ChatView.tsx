@@ -1,7 +1,7 @@
 import { ChildThreadApprovals } from "./chat/ChildThreadApprovals";
 import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
-import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
+import { resolveNewThreadModelRoute } from "@t3tools/shared/autoModelRouting";
 import { queuedRunEditBlockedReason } from "@t3tools/client-runtime/queued-run-edit";
 import { ScrollToEndButton, WorkspaceFileDropOverlay } from "./chat/TimelineOverlays";
 import { usePasteToFocusComposer } from "./chat/usePasteToFocusComposer";
@@ -767,7 +767,7 @@ export default function ChatView(props: ChatViewProps) {
       ).settings.defaultModelSelection
     : null;
   const draftModelResolution = draftThread
-    ? resolveNewThreadModelSelection({
+    ? resolveNewThreadModelRoute({
         defaultSelection:
           draftDefaultModelSelection ??
           resolveProjectDefaultProviderModelSelection(
@@ -782,7 +782,8 @@ export default function ChatView(props: ChatViewProps) {
         now: Date.parse(`${nowMinute}:00Z`),
       })
     : null;
-  const draftFallback = draftModelResolution?.fallback ? draftModelResolution : null;
+  const draftFallback =
+    draftModelResolution?.fallback || draftModelResolution?.auto ? draftModelResolution : null;
   const localDraftThread = draftThread
     ? buildLocalDraftThread(
         threadId,
