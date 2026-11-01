@@ -134,6 +134,12 @@ and a partly spent session may only regain its unused portion when the week rese
 stale reset times have no refill estimate; refresh Limits for a new reading. Claude's
 model-specific weekly allowances keep their reported values.
 
+When the default model's account is out of usage, new threads start on another account
+instead. A **Fallback model** set in **Settings → New threads** is tried first. Otherwise T3 Code
+picks another account of the same provider with usage left, keeping the model, and then another
+provider's default model. Only accounts that report limits under **Usage → Limits** are picked.
+The composer names the account it switched to; choose the default model there to keep it.
+
 Opening Limits checks the selected connected environments automatically. Each client waits at
 least five minutes between automatic checks of an environment, including after a failed check.
 If a window still looks stale, refresh Limits to re-check every provider and hub.
