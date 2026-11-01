@@ -76,6 +76,7 @@ import { formatReadToolLabel, formatSearchToolLabel } from "@t3tools/shared/tool
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/mediaPreview";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { makeAcpMcpOverAcpBridge, type AcpMcpOverAcpBridge } from "./mcpOverAcpBridge.ts";
+import { AcpSharedMcpServers } from "./sharedMcpServers.ts";
 import { mcpToolPresentation } from "@t3tools/provider-core/server/mcpToolPresentation";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
@@ -249,6 +250,7 @@ export interface AcpAdapterV2RuntimeInput {
   readonly mcpServers: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly acpMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly httpMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
+  readonly sharedMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly processEnvironment?: NodeJS.ProcessEnv;
   readonly resumeSessionId?: string;
   readonly interruptPromptOnCancel?: boolean;
@@ -1055,6 +1057,7 @@ interface AcpMcpContext {
   readonly servers: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly acpServers: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly httpServers: ReadonlyArray<EffectAcpSchema.McpServer>;
+  readonly sharedServers: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly processEnvironment?: NodeJS.ProcessEnv;
   readonly endpoint?: string;
   readonly authorization?: string;
@@ -1099,9 +1102,10 @@ function acpMcpContext(
   mcpOverHttp: boolean | undefined,
   deferMcpTools: boolean | undefined,
   callLauncher: string | undefined,
+  sharedServers: ReadonlyArray<EffectAcpSchema.McpServer> = [],
 ): AcpMcpContext {
   if (session === undefined) {
-    return { servers: [], acpServers: [], httpServers: [] };
+    return { servers: [], acpServers: [], httpServers: [], sharedServers };
   }
   // codex-acp 1.2.0 and pi-acp drop injected HTTP servers, so HTTP is opt-in per flavor.
   return {
@@ -1134,6 +1138,7 @@ function acpMcpContext(
             },
           ]
         : [],
+    sharedServers,
     endpoint: session.endpoint,
     authorization: session.authorizationHeader,
     processEnvironment: {
@@ -1156,6 +1161,7 @@ function acpMcpActivation(context: AcpMcpContext) {
     mcpServers: context.servers,
     acpMcpServers: context.acpServers,
     httpMcpServers: context.httpServers,
+    sharedMcpServers: context.sharedServers,
   };
 }
 
@@ -2095,18 +2101,17 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
   const { flavor, selfInvocation: self } = options;
   const callLauncher = yield* writeAcpMcpCallLauncher(host.paths.stateDir);
+  const sharedMcpServers = yield* AcpSharedMcpServers;
   const readMcpContext = (threadId: ThreadId | null) =>
-    threadId === null
-      ? Effect.succeed(
-          acpMcpContext(undefined, self, flavor.mcpOverHttp, flavor.deferMcpTools, callLauncher),
-        )
-      : mcpSessions
-          .read(threadId)
-          .pipe(
-            Effect.map((session) =>
-              acpMcpContext(session, self, flavor.mcpOverHttp, flavor.deferMcpTools, callLauncher),
-            ),
-          );
+    Effect.zip(
+      // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
+      threadId === null ? Effect.succeed(undefined) : mcpSessions.read(threadId),
+      sharedMcpServers.read,
+    ).pipe(
+      Effect.map(([session, shared]) =>
+        acpMcpContext(session, self, flavor.mcpOverHttp, flavor.deferMcpTools, callLauncher, shared),
+      ),
+    );
   const driver = flavor.driver;
   const continuationRequests = options.continuationRequests;
 
@@ -2929,6 +2934,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             mcpServers: mcpContext.servers,
             acpMcpServers: mcpContext.acpServers,
             httpMcpServers: mcpContext.httpServers,
+            sharedMcpServers: mcpContext.sharedServers,
             ...(mcpContext.processEnvironment === undefined
               ? {}
               : { processEnvironment: mcpContext.processEnvironment }),
