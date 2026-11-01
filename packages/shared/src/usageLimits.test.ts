@@ -134,11 +134,21 @@ describe("new thread model fallback", () => {
       models: [model("claude-sonnet-5-5"), model("claude-opus-5-5", true)],
       usageLimits: limits(0),
     });
-    const resolve = (providers: ServerProvider[]) =>
+    const resolve = (providers: ServerProvider[], fallbackToAvailableAccounts = true) =>
       resolveNewThreadModelSelection({
         defaultSelection: { ...selection, options: [{ id: "reasoningEffort", value: "high" }] },
         fallbackSelection: null,
         providers: [limited, ...providers],
+        settings: {
+          ...DEFAULT_SERVER_SETTINGS,
+          fallbackToAvailableAccounts,
+          providerInstances: Object.fromEntries(
+            providers.map((entry) => [
+              entry.instanceId,
+              { driver: entry.driver, enabled: true, config: {} },
+            ]),
+          ),
+        },
         now,
       }).selection;
 
@@ -164,6 +174,9 @@ describe("new thread model fallback", () => {
       ],
     ] as const)("switches to %s", (_name, providers, expected) => {
       expect(resolve([...providers])).toMatchObject(expected);
+    });
+    it("stays on the default while the setting is off", () => {
+      expect(resolve([codexAccount("codex_a", 0), claude], false)).toMatchObject(selection);
     });
   });
   it.each([undefined, "invalid"])("treats an unknown reset as exhausted: %s", (resetsAt) => {
