@@ -110,6 +110,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
   const mixedWorkspace = useScopedSettingsMixed(["defaultThreadEnvMode"]);
   const mixedAutoPull = useScopedSettingsMixed(["defaultAutoPull"]);
   const mixedAgentCredits = useScopedSettingsMixed(["removeAgentCreditsOnMerge"]);
+  const mixedAvailableAccounts = useScopedSettingsMixed(["fallbackToAvailableAccounts"]);
   const mixedMergeMethod = useScopedSettingsMixed(["pullRequestMergeMethod"]);
   const modelSource = useScopedSettingSource(["defaultModelSelection"]);
   const isProjectScope = scope.kind === "project" || scope.kind === "checkout";
@@ -275,9 +276,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
       settingKeys={["fallbackModelSelection"]}
       mixed={mixedFallback}
       {...searchableSetting("fallback-model")}
-      description={gt(
-        "Used for new threads when the default model's provider is out of usage. Without one, another account with usage left is picked.",
-      )}
+      description={gt("Used for new threads when the default model's provider is out of usage.")}
       resetAction={
         mixedFallback || settings.fallbackModelSelection !== null ? (
           <SettingResetButton
@@ -351,6 +350,33 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
       }
     />
   ) : null;
+  const availableAccountsRow = !isProjectScope ? (
+    <SettingsRow
+      serverScoped
+      settingKeys={["fallbackToAvailableAccounts"]}
+      mixed={mixedAvailableAccounts}
+      {...searchableSetting("fallback-available-accounts")}
+      description={gt(
+        "When the default model is out of usage and no fallback model is usable, new threads start on another account of the same provider with usage left, then on another provider.",
+      )}
+      resetAction={
+        settings.fallbackToAvailableAccounts ? (
+          <SettingResetButton
+            ariaLabel={gt("Reset switching to available accounts to default")}
+            onClick={() => updateSettings({ fallbackToAvailableAccounts: false })}
+          />
+        ) : null
+      }
+      control={
+        <Switch
+          aria-label={gt("Switch to an account with usage left")}
+          mixed={mixedAvailableAccounts}
+          checked={mixedAvailableAccounts ? false : settings.fallbackToAvailableAccounts}
+          onCheckedChange={(enabled) => updateSettings({ fallbackToAvailableAccounts: enabled })}
+        />
+      }
+    />
+  ) : null;
 
   return (
     <SettingsSection
@@ -361,12 +387,14 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
         <>
           {modelRow}
           {fallbackRow}
+          {availableAccountsRow}
           {workspaceRow}
         </>
       ) : category === "general" ? (
         <>
           {modelRow}
           {fallbackRow}
+          {availableAccountsRow}
           <SettingsRow
             serverScoped
             settingKeys={["defaultRuntimeMode"]}
