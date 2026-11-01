@@ -275,7 +275,9 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
       settingKeys={["fallbackModelSelection"]}
       mixed={mixedFallback}
       {...searchableSetting("fallback-model")}
-      description={gt("Used for new threads when the default model's provider is out of usage.")}
+      description={gt(
+        "Used for new threads when the default model's provider is out of usage. Without one, another account with usage left is picked.",
+      )}
       resetAction={
         mixedFallback || settings.fallbackModelSelection !== null ? (
           <SettingResetButton
