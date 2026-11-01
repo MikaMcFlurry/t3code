@@ -19,6 +19,7 @@ import type {
   ProviderOptionDescriptor,
   ProviderOptionSelection,
   RuntimeMode,
+  ServerProvider,
   ServerSettings,
   ThreadId,
 } from "@t3tools/contracts";
@@ -113,6 +114,7 @@ import {
 import { useNativeLayoutMetrics } from "../../native/native-layout-metrics";
 import { useNativeMailSearchToolbar } from "../../native/use-native-mail-search-toolbar";
 import { ModelRow, ChoiceRow } from "./ThreadSettingsRows";
+import { ProviderHeadroom } from "./ProviderHeadroom";
 import {
   compatibleRuntimeModeForChoices,
   runtimeModeChoicesForSupportedModes,
@@ -153,6 +155,7 @@ const EMPTY_MODEL_FAVORITES: ReadonlyArray<{
   readonly model: string;
 }> = [];
 const FAVORITES_PROVIDER_FILTER = "@favorites";
+const EMPTY_PROVIDERS: ReadonlyArray<ServerProvider> = [];
 // Servers that predate `migrateModelPreferences` drop it and keep reporting null favorites.
 const attemptedMigrationGenerations = new Map<EnvironmentId, number>();
 function ProviderHeader(props: {
@@ -162,15 +165,19 @@ function ProviderHeader(props: {
   readonly collapsible: boolean;
   readonly collapsed: boolean;
   readonly modelCount: number;
+  readonly provider: ServerProvider | undefined;
   readonly onToggle: () => void;
 }) {
   const content = (
     <>
       <ProviderIcon iconUrl={props.iconUrl} provider={props.driver} size={15} />
-      <Text className="text-sm font-t3-medium text-foreground-muted">{props.label}</Text>
+      <Text className="shrink text-sm font-t3-medium text-foreground-muted" numberOfLines={1}>
+        {props.label}
+      </Text>
+      <View className="flex-1" />
+      <ProviderHeadroom provider={props.provider} />
       {props.collapsible ? (
         <>
-          <View className="flex-1" />
           {props.collapsed ? (
             <Text className="text-2xs font-t3-medium text-foreground-muted">
               {props.modelCount}
@@ -296,6 +303,8 @@ type ThreadSettingsSessionValue = {
   readonly environmentId: EnvironmentId | null;
   readonly providerInstanceId?: ProviderInstanceId;
   readonly providerGroups: ReadonlyArray<ProviderGroup>;
+  /** Provider snapshots, for the usage headroom in each provider header. */
+  readonly providers: ReadonlyArray<ServerProvider>;
   readonly favoriteKeys: ReadonlySet<string>;
   readonly favoritesLoaded: boolean;
   readonly toggleFavorite: (option: ModelOption) => void;
@@ -607,6 +616,7 @@ function ThreadSettingsSessionProvider(
     environmentId: props.environmentId,
     providerInstanceId: props.providerInstanceId,
     providerGroups,
+    providers: config?.providers ?? EMPTY_PROVIDERS,
     manageHidden,
     setManageHidden,
     toggleHidden,
@@ -662,6 +672,7 @@ type ThreadSettingsProviderCatalog = {
   readonly collapsed: boolean;
   readonly modelCount: number;
   readonly models: ReadonlyArray<ModelOption>;
+  readonly snapshot: ServerProvider | undefined;
 };
 
 type ThreadSettingsCatalogItem =
@@ -733,6 +744,7 @@ function ThreadSettingsProviderListHeader(props: {
       iconUrl={props.provider.iconUrl}
       label={props.provider.label}
       modelCount={props.provider.modelCount}
+      provider={props.provider.snapshot}
       onToggle={onToggle}
     />
   );
@@ -797,6 +809,7 @@ function buildThreadSettingsCatalogItems(
       collapsed,
       modelCount: visibleModels.length,
       models: collapsed ? [] : visibleModels,
+      snapshot: session.providers.find((entry) => entry.instanceId === group.providerKey),
     };
     return [
       {

@@ -314,3 +314,49 @@ export function formatExpiresInLabel(isoDate: string, nowMs: number = Date.now()
   if (seconds > 0) tail.push(`${seconds}s`);
   return tail.length > 0 ? `Expires in ${days}d ${tail.join(" ")}` : `Expires in ${days}d`;
 }
+
+const weekdayFormatterCache = new Map<string, Intl.DateTimeFormat>();
+
+// Clock-style times read better zero-padded: 09:00, not 9:00.
+function getResetTimeFormatter(timestampFormat: TimestampFormat): Intl.DateTimeFormat {
+  const key = `reset:${timestampFormat}`;
+  const cached = weekdayFormatterCache.get(key);
+  if (cached) return cached;
+  const formatter = new Intl.DateTimeFormat(timestampLocale, {
+    ...getTimestampFormatOptions(timestampFormat, false),
+    hour: "2-digit",
+  });
+  weekdayFormatterCache.set(key, formatter);
+  return formatter;
+}
+
+function getWeekdayFormatter(): Intl.DateTimeFormat {
+  const cached = weekdayFormatterCache.get("short");
+  if (cached) return cached;
+  const formatter = new Intl.DateTimeFormat(timestampLocale, { weekday: "short" });
+  weekdayFormatterCache.set("short", formatter);
+  return formatter;
+}
+
+/**
+ * A limit reset as a wall-clock time: `14:30` today, `Fri 09:00` later (`Fri` when `compact`).
+ * Follows the user's 12/24-hour setting.
+ */
+export function formatResetClock(
+  isoDate: string,
+  timestampFormat: TimestampFormat,
+  nowMs: number,
+  options: { readonly compact?: boolean } = {},
+): string {
+  const date = parseTimestampDate(isoDate);
+  if (!date) return "";
+  const time = getResetTimeFormatter(timestampFormat).format(date);
+  const now = new Date(nowMs);
+  const sameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+  if (sameDay || date.getTime() - nowMs < 12 * HOUR_MS) return time;
+  const weekday = getWeekdayFormatter().format(date);
+  return options.compact ? weekday : `${weekday} ${time}`;
+}

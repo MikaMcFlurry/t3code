@@ -865,3 +865,79 @@ export function collectProviderUsageLimits(
   }
   return { createdAt: DateTime.formatIso(DateTime.makeUnsafe(now)), accounts, notices };
 }
+
+export type UsageHeadroomKind = "session" | "weekly";
+export type UsageHeadroomTone = "ok" | "low" | "critical";
+
+export interface UsageHeadroomWindow {
+  readonly kind: UsageHeadroomKind;
+  readonly window: ServerProviderUsageWindow;
+  readonly remaining: number;
+  /** `5h` (or the reported session length) and `W`, for space-constrained surfaces. */
+  readonly shortLabel: string;
+}
+
+const HEADROOM_KINDS: ReadonlyArray<UsageHeadroomKind> = ["session", "weekly"];
+
+function headroomShortLabel(kind: UsageHeadroomKind, window: ServerProviderUsageWindow): string {
+  if (kind === "weekly") return "W";
+  const mins = window.windowDurationMins;
+  if (mins === undefined) return "5h";
+  return mins > 0 && mins < DAY / MINUTE && mins % 60 === 0 ? `${mins / 60}h` : "S";
+}
+
+/**
+ * A window whose reset has passed is full again, even before the next probe reports it. Use this
+ * before showing stored windows next to `usageHeadroomWindows`, so both agree.
+ */
+export function currentUsageWindow(
+  window: ServerProviderUsageWindow,
+  now: number,
+): ServerProviderUsageWindow {
+  const resetsAt = resetMillis(window);
+  if (resetsAt === null || resetsAt > now) return window;
+  const { resetsAt: _passed, ...rest } = window;
+  return { ...rest, usedPercent: 0 };
+}
+
+/**
+ * The session and weekly window closest to empty, for compact headroom indicators. Claude and
+ * Antigravity report several scoped weekly windows; the tightest one stops the next turn first.
+ */
+export function usageHeadroomWindows(
+  limits: ServerProviderUsageLimits | undefined,
+  now: number,
+): ReadonlyArray<UsageHeadroomWindow> {
+  if (!limits || limits.unavailable?.reason === "unsupported") return [];
+  return HEADROOM_KINDS.flatMap((kind) => {
+    const tightest = limits.windows
+      .filter((window) => window.kind === kind)
+      .map((window) => currentUsageWindow(window, now))
+      .map((window) => ({ window, remaining: remainingPercent(window) }))
+      .sort((left, right) => left.remaining - right.remaining)[0];
+    return tightest
+      ? [{ kind, ...tightest, shortLabel: headroomShortLabel(kind, tightest.window) }]
+      : [];
+  });
+}
+
+/** Matches the mobile usage bars: amber at 30% left or less, red at 10% or less. */
+export function usageHeadroomTone(remaining: number): UsageHeadroomTone {
+  if (remaining <= 10) return "critical";
+  if (remaining <= 30) return "low";
+  return "ok";
+}
+
+/** The soonest upcoming reset among headroom windows, for a compact "resets at" label. */
+export function nextHeadroomReset(
+  rings: ReadonlyArray<UsageHeadroomWindow>,
+  now: number,
+): UsageHeadroomWindow | null {
+  let next: { readonly ring: UsageHeadroomWindow; readonly at: number } | null = null;
+  for (const ring of rings) {
+    const at = resetMillis(ring.window);
+    if (at === null || at <= now) continue;
+    if (next === null || at < next.at) next = { ring, at };
+  }
+  return next?.ring ?? null;
+}
