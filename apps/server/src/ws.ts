@@ -1473,6 +1473,7 @@ export const layerWsRpc = (
         | FileSystem.FileSystem
         | ServerConfig.ServerConfig
         | ServerSettings.ServerSettingsService
+        | ProviderRegistry.ProviderRegistry
         | DocumentText.DocumentText
       >();
       const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
