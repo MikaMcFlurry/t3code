@@ -75,43 +75,69 @@ export function exhaustedUsageWindow(
   }
 }
 
-export function resolveNewThreadModelSelection(input: {
-  readonly defaultSelection: ModelSelection | null;
-  readonly explicitSelection?: ModelSelection | null;
-  readonly fallbackSelection: ModelSelection | null;
+interface AccountChoiceInput {
   readonly providers: readonly ServerProvider[];
   readonly now: number;
   readonly settings?: ServerSettings;
   readonly projectId?: ProjectId | null;
-}) {
+}
+
+function isUsableSelection(candidate: ModelSelection, input: AccountChoiceInput) {
+  const entry = input.providers.find((item) => item.instanceId === candidate.instanceId);
+  return (
+    entry !== undefined &&
+    entry.enabled &&
+    entry.installed &&
+    entry.auth.status !== "unauthenticated" &&
+    isProviderAvailable(entry) &&
+    !exhaustedUsageWindow(entry, input.now, candidate.model) &&
+    (!input.settings ||
+      resolveProjectProviderInstanceEnabled(
+        input.settings,
+        input.projectId ?? null,
+        entry.instanceId,
+      ))
+  );
+}
+
+/**
+ * With `fallbackToAvailableAccounts` on and the selection's account out of usage (`exhausted`
+ * when a turn just said so), the same model on another account with usage left, else another
+ * provider's default model.
+ */
+export function availableAccountSelection(
+  input: AccountChoiceInput & { readonly selection: ModelSelection; readonly exhausted?: boolean },
+): ModelSelection | null {
+  if (!input.settings?.fallbackToAvailableAccounts) return null;
+  const provider = input.providers.find((entry) => entry.instanceId === input.selection.instanceId);
+  if (!provider) return null;
+  if (!input.exhausted && !exhaustedUsageWindow(provider, input.now, input.selection.model)) {
+    return null;
+  }
+  return (
+    automaticFallbackSelections(input.selection, provider, input.providers).find((candidate) =>
+      isUsableSelection(candidate, input),
+    ) ?? null
+  );
+}
+
+export function resolveNewThreadModelSelection(
+  input: AccountChoiceInput & {
+    readonly defaultSelection: ModelSelection | null;
+    readonly explicitSelection?: ModelSelection | null;
+    readonly fallbackSelection: ModelSelection | null;
+  },
+) {
   const selection = input.explicitSelection ?? input.defaultSelection;
   const unchanged = { selection, fallback: null };
   if (input.explicitSelection || !selection) return unchanged;
   const provider = input.providers.find((entry) => entry.instanceId === selection.instanceId);
   const window = exhaustedUsageWindow(provider, input.now, selection.model);
   if (!provider || !window) return unchanged;
-  const usable = (candidate: ModelSelection) => {
-    const entry = input.providers.find((item) => item.instanceId === candidate.instanceId);
-    return (
-      entry !== undefined &&
-      entry.enabled &&
-      entry.installed &&
-      entry.auth.status !== "unauthenticated" &&
-      isProviderAvailable(entry) &&
-      !exhaustedUsageWindow(entry, input.now, candidate.model) &&
-      (!input.settings ||
-        resolveProjectProviderInstanceEnabled(
-          input.settings,
-          input.projectId ?? null,
-          entry.instanceId,
-        ))
-    );
-  };
   const replacement =
-    (input.fallbackSelection && usable(input.fallbackSelection) ? input.fallbackSelection : null) ??
-    (input.settings?.fallbackToAvailableAccounts
-      ? automaticFallbackSelections(selection, provider, input.providers).find(usable)
-      : undefined);
+    (input.fallbackSelection && isUsableSelection(input.fallbackSelection, input)
+      ? input.fallbackSelection
+      : null) ?? availableAccountSelection({ ...input, selection, exhausted: true });
   if (!replacement) return unchanged;
   return {
     selection: replacement,
@@ -130,10 +156,19 @@ function automaticFallbackSelections(
     const windows = entry.usageLimits?.unavailable ? [] : (entry.usageLimits?.windows ?? []);
     return windows.length === 0 ? null : Math.min(...windows.map(remainingPercent));
   };
+  const exhaustedLogin = exhausted.usageLimits?.credentialFingerprint;
   return providers
     .flatMap((entry) => {
       const left = headroom(entry);
-      if (entry.instanceId === exhausted.instanceId || left === null) return [];
+      if (
+        entry.instanceId === exhausted.instanceId ||
+        left === null ||
+        // Two instances signed in to the same login share one quota.
+        (exhaustedLogin !== undefined &&
+          entry.usageLimits?.credentialFingerprint === exhaustedLogin)
+      ) {
+        return [];
+      }
       const sameDriver = entry.driver === exhausted.driver;
       const model =
         (sameDriver ? entry.models.find((item) => item.slug === selection.model) : undefined) ??
