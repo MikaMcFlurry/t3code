@@ -31,6 +31,7 @@ import { toastManager } from "../ui/toast";
 import { Switch } from "../ui/switch";
 import type { ProjectSettingsCategory } from "./ProjectSettingsPanel";
 import { AutoRoutingAllowedRow } from "./AutoRoutingAllowedRow";
+import { ResetPlannerRows } from "./ResetPlannerRows";
 import { searchableSetting } from "./settingsSearch";
 import { useSettingsScope } from "./SettingsScopeContext";
 import {
@@ -389,6 +390,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
           {fallbackRow}
           {autoModelRow}
           {autoModelRow ? <AutoRoutingAllowedRow /> : null}
+          {autoModelRow ? <ResetPlannerRows providers={providers} /> : null}
           {workspaceRow}
         </>
       ) : category === "general" ? (
@@ -397,6 +399,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
           {fallbackRow}
           {autoModelRow}
           {autoModelRow ? <AutoRoutingAllowedRow /> : null}
+          {autoModelRow ? <ResetPlannerRows providers={providers} /> : null}
           <SettingsRow
             serverScoped
             settingKeys={["defaultRuntimeMode"]}
