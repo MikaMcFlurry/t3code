@@ -31,6 +31,10 @@
       "types": "./src/server/runtimeModel.ts",
       "import": "./src/server/runtimeModel.ts"
     },
+    "./server/sharedMcpServers": {
+      "types": "./src/server/sharedMcpServers.ts",
+      "import": "./src/server/sharedMcpServers.ts"
+    },
     "./server/sessionConfig": {
       "types": "./src/server/sessionConfig.ts",
       "import": "./src/server/sessionConfig.ts"
