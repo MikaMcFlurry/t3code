@@ -15,6 +15,7 @@ import {
 } from "@t3tools/contracts";
 
 import { createModelSelection, modelSelectionsEqual } from "./model.ts";
+import { planUsageResets, type ResetPlan, resetPlanAdjustment } from "./resetPlanner.ts";
 import { exhaustedUsageWindow, resolveNewThreadModelSelection } from "./usageLimits.ts";
 
 export type AutoRoutingMode = Exclude<AutoModelSelectionMode, "off">;
@@ -155,7 +156,29 @@ function inferTaskProfile(provider: ServerProvider, selection: ModelSelection): 
 interface Candidate {
   readonly provider: ServerProvider;
   readonly selection: ModelSelection;
+  /** Headroom plus the reset plan's adjustment; ranks candidates. */
   readonly score: number;
+  /** Headroom alone; decides whether a provider counts as low. */
+  readonly headroom: number;
+  readonly planReasons: ReadonlyArray<string>;
+}
+
+// One plan per routing call: candidates of the same call share the context object.
+const resetPlans = new WeakMap<AutoModelRoutingContext, ResetPlan | null>();
+
+/** The reset plan when staggering or a forecast can change the choice; null otherwise. */
+function resetPlanFor(context: AutoModelRoutingContext): ResetPlan | null {
+  if (resetPlans.has(context)) return resetPlans.get(context) ?? null;
+  const settings = context.settings;
+  const plan =
+    settings &&
+    (settings.usageResetStaggering ||
+      settings.usageResetForecast.length > 0 ||
+      context.providers.some((provider) => provider.usageLimits?.resetCredits))
+      ? planUsageResets({ providers: context.providers, settings, now: context.now })
+      : null;
+  resetPlans.set(context, plan);
+  return plan;
 }
 
 function candidate(
@@ -163,9 +186,19 @@ function candidate(
   selection: ModelSelection | null,
   context: AutoModelRoutingContext,
 ): Candidate | null {
-  return selection && isUsable(provider, selection.model, context)
-    ? { provider, selection, score: headroomScore(provider, context.now) }
-    : null;
+  if (!selection || !isUsable(provider, selection.model, context)) return null;
+  const plan = resetPlanFor(context);
+  const adjustment = plan
+    ? resetPlanAdjustment(plan, provider.instanceId, context.now)
+    : { score: 0, reasons: [] };
+  const headroom = headroomScore(provider, context.now);
+  return {
+    provider,
+    selection,
+    score: headroom + adjustment.score,
+    headroom,
+    planReasons: adjustment.reasons,
+  };
 }
 
 /** Highest score wins; ties keep the preferred instance, then the lowest instance id. */
@@ -193,7 +226,10 @@ function describeHeadroom(provider: ServerProvider, now: number) {
 function toRoute(winner: Candidate, now: number, reason: string, crossProvider: boolean) {
   return {
     selection: winner.selection,
-    reason,
+    reason:
+      winner.planReasons.length > 0
+        ? `${reason} Reset plan: ${winner.planReasons.join(", ")}.`
+        : reason,
     headroom: instanceHeadroom(winner.provider, now),
     crossProvider,
   } satisfies AutoModelRoute;
@@ -205,7 +241,7 @@ function routeAcrossKinds(
   context: AutoModelRoutingContext,
   preferredLabel: string,
 ): AutoModelRoute | null {
-  const other = sameKind && sameKind.score >= LOW_HEADROOM ? null : best(otherKinds, null);
+  const other = sameKind && sameKind.headroom >= LOW_HEADROOM ? null : best(otherKinds, null);
   if (other && (!sameKind || other.score > sameKind.score)) {
     return toRoute(
       other,
