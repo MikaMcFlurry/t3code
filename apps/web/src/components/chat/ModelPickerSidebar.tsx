@@ -3,6 +3,12 @@ import { type ProviderInstanceId } from "@t3tools/contracts";
 import { memo, useLayoutEffect, useRef, useState } from "react";
 import { StarIcon } from "lucide-react";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
+import {
+  ProviderResetClock,
+  ProviderUsageHalo,
+  ProviderUsageTooltipDetails,
+  usageHeadroomLabel,
+} from "./ProviderUsageHalo";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
 import {
@@ -43,6 +49,8 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
   };
   const showFavorites = props.showFavorites ?? true;
   const [hoveredInstanceId, setHoveredInstanceId] = useState<ProviderInstanceId | null>(null);
+  // The picker is short-lived, so limits are judged against the time it opened.
+  const [now] = useState(() => Date.now());
   const sidebarContentRef = useRef<HTMLDivElement>(null);
   const [selectedIndicatorTop, setSelectedIndicatorTop] = useState<number | null>(null);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the selected provider item's DOM offset to position the selection indicator
@@ -58,7 +66,10 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
       setSelectedIndicatorTop(null);
       return;
     }
-    setSelectedIndicatorTop(selectedItem.offsetTop + selectedItem.offsetHeight / 2 - 10);
+    // Center on the icon button, not the reset time under it.
+    const button = selectedItem.firstElementChild;
+    const height = button instanceof HTMLElement ? button.offsetHeight : selectedItem.offsetHeight;
+    setSelectedIndicatorTop(selectedItem.offsetTop + height / 2 - 10);
   }, [
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Adding, removing or reordering providers moves the selected item, so the indicator re-measures.
     props.instanceEntries,
@@ -159,8 +170,22 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                 focusableWhenDisabled={!isDisabled}
                 aria-pressed={isSelected}
                 type="button"
-                aria-label={isUnavailable || isContextDisabled ? tooltip : entry.displayName}
+                aria-label={
+                  isUnavailable || isContextDisabled
+                    ? tooltip
+                    : [entry.displayName, usageHeadroomLabel(entry.snapshot, now)]
+                        .filter(Boolean)
+                        .join(", ")
+                }
               >
+                {isUnavailable ? null : (
+                  <ProviderUsageHalo
+                    provider={entry.snapshot}
+                    accentColor={entry.accentColor}
+                    now={now}
+                    className="z-20"
+                  />
+                )}
                 <ProviderInstanceIcon
                   driverKind={entry.driverKind}
                   displayName={entry.displayName}
@@ -202,8 +227,22 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                     align="center"
                   >
                     {tooltip}
+                    {isUnavailable ? null : (
+                      <ProviderUsageTooltipDetails
+                        provider={entry.snapshot}
+                        accentColor={entry.accentColor}
+                        now={now}
+                      />
+                    )}
                   </TooltipPopup>
                 </Tooltip>
+                {isUnavailable ? null : (
+                  <ProviderResetClock
+                    provider={entry.snapshot}
+                    now={now}
+                    className={cn("-mt-0.5 pb-1", isDisabled && "opacity-50")}
+                  />
+                )}
               </div>
             );
           })}
