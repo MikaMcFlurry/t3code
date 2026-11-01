@@ -495,6 +495,54 @@ describe("AcpSessionRuntime", () => {
     );
   });
 
+  it.effect.each([
+    ["without HTTP support", {}, false],
+    ["with HTTP support", { T3_ACP_MCP_HTTP: "1" }, true],
+  ] as const)("adds shared MCP servers next to t3-code %s", ([, env, expectsHttp]) => {
+    const requestEvents: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
+    const github = { type: "stdio" as const, name: "github", command: "npx", args: [], env: [] };
+    const docs = {
+      type: "http" as const,
+      name: "docs",
+      url: "https://docs.example/mcp",
+      headers: [],
+    };
+    return Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+
+      const created = requestEvents.find(
+        (event) => event.method === "session/new" && event.status === "started",
+      );
+      expect(created?.payload).toMatchObject({
+        mcpServers: [{ type: "acp", name: "t3-code" }, github, ...(expectsHttp ? [docs] : [])],
+      });
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: { T3_ACP_MCP_ACP: "1", ...env },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          authMethodId: "test",
+          mcpServers: [{ type: "stdio", name: "t3-code", command: "/usr/bin/node", args: [] }],
+          acpMcpServers: [{ type: "acp", name: "t3-code", serverId: "t3-code" }],
+          // A shared server may not take T3's own name.
+          sharedMcpServers: [github, docs, { ...github, name: "t3-code" }],
+          requestLogger: (event) =>
+            Effect.sync(() => {
+              requestEvents.push(event);
+            }),
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    );
+  });
+
   it.effect("supports v2 session deletion and secret-safe provider management", () => {
     const requestEvents: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
     return Effect.gen(function* () {

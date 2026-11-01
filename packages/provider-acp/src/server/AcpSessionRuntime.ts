@@ -28,6 +28,7 @@ import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/compat";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { withSharedMcpServers } from "./sharedMcpServers.ts";
 import { AgentScope, AgentScopeThreadId, RAISE_OOM_SCORE_LINE } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
@@ -137,6 +138,8 @@ export interface AcpSessionRuntimeOptions {
   ) => Effect.Effect<void, never>;
   readonly acpMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly httpMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
+  /** Added to whichever `t3-code` list the agent gets; see `withSharedMcpServers`. */
+  readonly sharedMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly requestLogger?: (event: AcpSessionRequestLogEvent) => Effect.Effect<void, never>;
   readonly protocolLogging?: {
     readonly logIncoming?: boolean;
@@ -1086,6 +1089,7 @@ export interface AcpSessionActivationOptions {
   readonly mcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly acpMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly httpMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
+  readonly sharedMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
 }
 
 export class AcpSessionRuntime extends Context.Service<
@@ -2097,15 +2101,18 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
     activationOptions?: AcpSessionActivationOptions,
   ): ReadonlyArray<EffectAcpSchema.McpServer> => {
     const mcpCapabilities = initializeResult.agentCapabilities?.mcpCapabilities;
+    const shared = activationOptions?.sharedMcpServers ?? options.sharedMcpServers;
+    const withShared = (servers: ReadonlyArray<EffectAcpSchema.McpServer>) =>
+      withSharedMcpServers(servers, shared, mcpCapabilities?.http === true);
     const acpServers = activationOptions?.acpMcpServers ?? options.acpMcpServers ?? [];
     if (mcpCapabilities?.acp === true && acpServers.length > 0) {
-      return acpServers;
+      return withShared(acpServers);
     }
     const httpServers = activationOptions?.httpMcpServers ?? options.httpMcpServers ?? [];
     if (mcpCapabilities?.http === true && httpServers.length > 0) {
-      return httpServers;
+      return withShared(httpServers);
     }
-    return activationOptions?.mcpServers ?? options.mcpServers ?? [];
+    return withShared(activationOptions?.mcpServers ?? options.mcpServers ?? []);
   };
 
   const startOnce = Effect.gen(function* () {

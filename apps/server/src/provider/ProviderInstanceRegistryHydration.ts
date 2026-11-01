@@ -4,11 +4,13 @@ import {
   ProviderInstanceId,
   providerInstanceConfigEnabledFlag,
   resolveProviderInstanceEnabled,
+  type CentralMcpServer,
   type ProviderInstanceConfig,
   type ProviderInstanceConfigMap,
   ServerSettings,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -23,6 +25,8 @@ import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
 import * as ProviderInstanceRegistryMutator from "./ProviderInstanceRegistryMutator.ts";
 import * as ProviderOrchestrationAdapterInfrastructure from "./ProviderOrchestrationAdapterInfrastructure.ts";
 import * as AcpRegistrySupport from "@t3tools/provider-acp-registry/server/AcpRegistrySupport";
+import { AcpSharedMcpServers } from "@t3tools/provider-acp/server/sharedMcpServers";
+import type * as EffectAcpSchema from "effect-acp/compat";
 import * as ProviderHostLive from "./ProviderHostLive.ts";
 import type * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import type * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
@@ -79,6 +83,72 @@ export const deriveProviderInstanceConfigMap = (
 
   return merged as ProviderInstanceConfigMap;
 };
+
+function acpCentralMcpServer(
+  server: CentralMcpServer,
+  spawn?: { readonly command: string; readonly args: ReadonlyArray<string> },
+): EffectAcpSchema.McpServer {
+  return server.transport.type === "stdio"
+    ? {
+        name: server.name,
+        command: spawn?.command ?? server.transport.command,
+        args: [...(spawn?.args ?? server.transport.args)],
+        env: Object.entries(server.transport.env).map(([name, value]) => ({ name, value })),
+      }
+    : {
+        type: "http" as const,
+        name: server.name,
+        url: server.transport.url,
+        headers: Object.entries(server.transport.headers).map(([name, value]) => ({
+          name,
+          value,
+        })),
+      };
+}
+
+/** Enabled central MCP servers in ACP's `session/new` shape. */
+export function acpCentralMcpServers(
+  servers: ReadonlyArray<CentralMcpServer> | undefined,
+): ReadonlyArray<EffectAcpSchema.McpServer> {
+  return (servers ?? [])
+    .filter((server) => server.enabled)
+    .map((server) => acpCentralMcpServer(server));
+}
+
+/**
+ * ACP agents spawn stdio servers without a shell and expect an absolute command, so resolve it
+ * the way T3 resolves its own processes. Windows `.cmd` shims such as `npx` run through cmd.exe.
+ */
+export const resolveAcpCentralMcpServers = Effect.fn(
+  "ProviderInstanceRegistryHydration.resolveAcpCentralMcpServers",
+)(function* (servers: ReadonlyArray<CentralMcpServer> | undefined) {
+  const environment = yield* HostProcess.Environment;
+  return yield* Effect.forEach(
+    (servers ?? []).filter((server) => server.enabled),
+    (server) => {
+      const transport = server.transport;
+      if (transport.type !== "stdio") return Effect.succeed(acpCentralMcpServer(server));
+      return resolveSpawnCommand(transport.command, transport.args, {
+        env: transport.env,
+        extendEnv: true,
+        bypassNpmShim: true,
+      }).pipe(
+        Effect.map((resolved) =>
+          acpCentralMcpServer(
+            server,
+            resolved.shell
+              ? {
+                  command: environment.ComSpec ?? "cmd.exe",
+                  // cmd.exe finds the shim on PATH itself; the agent quotes each argument.
+                  args: ["/d", "/c", transport.command, ...transport.args],
+                }
+              : resolved,
+          ),
+        ),
+      );
+    },
+  );
+});
 
 export const DEV_REPLAY_INSTANCE_ID = ProviderInstanceId.make("devReplay");
 
@@ -173,6 +243,14 @@ export const layer: Layer.Layer<
       Layer.provide(AcpRegistrySupport.layerFromHost),
       Layer.provide(ProviderHostLive.layer),
       Layer.provide(SecretResolver.layer),
+      Layer.provide(
+        Layer.succeed(AcpSharedMcpServers, {
+          read: serverSettings.getSettings.pipe(
+            Effect.flatMap((settings) => resolveAcpCentralMcpServers(settings.centralMcpServers)),
+            Effect.orElseSucceed(() => []),
+          ),
+        }),
+      ),
     );
 
     return layerSettingsWatcher(settingsChanges).pipe(Layer.provideMerge(layerMutable));
