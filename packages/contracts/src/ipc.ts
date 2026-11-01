@@ -1028,6 +1028,11 @@ export interface DesktopBridge {
    */
   revealWindow: () => Promise<void>;
   /**
+   * Opens the OS dictation panel for the focused field (Windows voice typing, Win+H). Resolves
+   * false where the OS has no such panel; the renderer focuses the composer first.
+   */
+  startSystemDictation: () => Promise<boolean>;
+  /**
    * The OS locale as a BCP-47 tag, which the renderer cannot read for itself:
    * the packaged app ships only the `en-US` Chromium locale pak, so
    * `navigator.language` and the default `Intl` locale are pinned to `en-US`
