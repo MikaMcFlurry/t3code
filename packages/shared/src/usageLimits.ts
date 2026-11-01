@@ -109,7 +109,9 @@ export function resolveNewThreadModelSelection(input: {
   };
   const replacement =
     (input.fallbackSelection && usable(input.fallbackSelection) ? input.fallbackSelection : null) ??
-    automaticFallbackSelections(selection, provider, input.providers).find(usable);
+    (input.settings?.fallbackToAvailableAccounts
+      ? automaticFallbackSelections(selection, provider, input.providers).find(usable)
+      : undefined);
   if (!replacement) return unchanged;
   return {
     selection: replacement,
