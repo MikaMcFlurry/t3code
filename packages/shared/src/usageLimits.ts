@@ -86,32 +86,66 @@ export function resolveNewThreadModelSelection(input: {
 }) {
   const selection = input.explicitSelection ?? input.defaultSelection;
   const unchanged = { selection, fallback: null };
-  if (input.explicitSelection || !selection || !input.fallbackSelection) return unchanged;
+  if (input.explicitSelection || !selection) return unchanged;
   const provider = input.providers.find((entry) => entry.instanceId === selection.instanceId);
   const window = exhaustedUsageWindow(provider, input.now, selection.model);
-  const fallback = input.providers.find(
-    (entry) => entry.instanceId === input.fallbackSelection?.instanceId,
-  );
-  if (
-    !provider ||
-    !window ||
-    !fallback?.enabled ||
-    !fallback.installed ||
-    fallback.auth.status === "unauthenticated" ||
-    !isProviderAvailable(fallback) ||
-    exhaustedUsageWindow(fallback, input.now, input.fallbackSelection.model) ||
-    (input.settings &&
-      !resolveProjectProviderInstanceEnabled(
-        input.settings,
-        input.projectId ?? null,
-        fallback.instanceId,
-      ))
-  )
-    return unchanged;
+  if (!provider || !window) return unchanged;
+  const usable = (candidate: ModelSelection) => {
+    const entry = input.providers.find((item) => item.instanceId === candidate.instanceId);
+    return (
+      entry !== undefined &&
+      entry.enabled &&
+      entry.installed &&
+      entry.auth.status !== "unauthenticated" &&
+      isProviderAvailable(entry) &&
+      !exhaustedUsageWindow(entry, input.now, candidate.model) &&
+      (!input.settings ||
+        resolveProjectProviderInstanceEnabled(
+          input.settings,
+          input.projectId ?? null,
+          entry.instanceId,
+        ))
+    );
+  };
+  const replacement =
+    (input.fallbackSelection && usable(input.fallbackSelection) ? input.fallbackSelection : null) ??
+    automaticFallbackSelections(selection, provider, input.providers).find(usable);
+  if (!replacement) return unchanged;
   return {
-    selection: input.fallbackSelection,
+    selection: replacement,
     fallback: { provider, resetsAt: window.resetsAt ?? null },
   };
+}
+
+/** Other accounts of the exhausted provider first, then other providers, most headroom first. */
+function automaticFallbackSelections(
+  selection: ModelSelection,
+  exhausted: ServerProvider,
+  providers: readonly ServerProvider[],
+): ModelSelection[] {
+  // Only accounts that report limits: an unknown balance could be pay-per-use or already spent.
+  const headroom = (entry: ServerProvider) => {
+    const windows = entry.usageLimits?.unavailable ? [] : (entry.usageLimits?.windows ?? []);
+    return windows.length === 0 ? null : Math.min(...windows.map(remainingPercent));
+  };
+  return providers
+    .flatMap((entry) => {
+      const left = headroom(entry);
+      if (entry.instanceId === exhausted.instanceId || left === null) return [];
+      const sameDriver = entry.driver === exhausted.driver;
+      const model =
+        (sameDriver ? entry.models.find((item) => item.slug === selection.model) : undefined) ??
+        entry.models.find((item) => item.isDefault) ??
+        entry.models[0];
+      if (!model) return [];
+      const candidate: ModelSelection =
+        sameDriver && model.slug === selection.model
+          ? { ...selection, instanceId: entry.instanceId }
+          : { instanceId: entry.instanceId, model: model.slug };
+      return [{ candidate, sameDriver, left }];
+    })
+    .sort((a, b) => Number(b.sameDriver) - Number(a.sameDriver) || b.left - a.left)
+    .map(({ candidate }) => candidate);
 }
 
 export const CHATGPT_USAGE_URL = "https://chatgpt.com/#settings/Usage";
