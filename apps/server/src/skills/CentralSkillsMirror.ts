@@ -7,8 +7,11 @@ import { CentralSkillName } from "@t3tools/contracts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
-/** Claude loads `<dir>/.claude/skills` from every `--add-dir`, so the library root is that dir. */
-export const centralSkillsEnabledDirectory = (path: Path.Path, skillsDir: string) =>
+/**
+ * Claude loads `<dir>/.claude/skills` from every `--add-dir`. T3 keeps mirrored copies of the
+ * library there; unmarked folders in it are skills installed before the library moved to the root.
+ */
+export const centralSkillsClaudeDirectory = (path: Path.Path, skillsDir: string) =>
   path.join(skillsDir, ".claude", "skills");
 
 export const centralSkillsDisabledDirectory = (path: Path.Path, skillsDir: string) =>
@@ -19,6 +22,42 @@ export const CENTRAL_SKILL_METADATA_FILE = ".t3-skill.json";
 export const CENTRAL_SKILL_MIRROR_MARKER = ".t3-central-skill";
 
 const isCentralSkillName = Schema.is(CentralSkillName);
+/** Folder names in the skills dir that are not skills. */
+const RESERVED_LIBRARY_NAMES: ReadonlySet<string> = new Set(["disabled"]);
+
+/**
+ * The enabled library: skill folders placed directly in the skills dir (where users drop them),
+ * plus unmarked folders left in `.claude/skills` by older versions. A root folder wins a name clash.
+ */
+export const collectCentralSkillFolders = Effect.fnUntraced(function* (
+  fileSystem: FileSystem.FileSystem,
+  path: Path.Path,
+  skillsDir: string,
+) {
+  const folders = new Map<string, string>();
+  const hasSkillFile = (directory: string) =>
+    fileSystem.exists(path.join(directory, "SKILL.md")).pipe(Effect.orElseSucceed(() => false));
+  for (const name of yield* fileSystem
+    .readDirectory(skillsDir)
+    .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []))) {
+    if (!isCentralSkillName(name) || RESERVED_LIBRARY_NAMES.has(name)) continue;
+    const directory = path.join(skillsDir, name);
+    if (yield* hasSkillFile(directory)) folders.set(name, directory);
+  }
+  const claudeDirectory = centralSkillsClaudeDirectory(path, skillsDir);
+  for (const name of yield* fileSystem
+    .readDirectory(claudeDirectory)
+    .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []))) {
+    if (!isCentralSkillName(name) || folders.has(name)) continue;
+    const directory = path.join(claudeDirectory, name);
+    const marker = yield* readOptionalFile(
+      fileSystem,
+      path.join(directory, CENTRAL_SKILL_MIRROR_MARKER),
+    );
+    if (marker === undefined && (yield* hasSkillFile(directory))) folders.set(name, directory);
+  }
+  return folders;
+});
 
 const readOptionalFile = (fileSystem: FileSystem.FileSystem, filePath: string) =>
   fileSystem.readFileString(filePath).pipe(Effect.orElseSucceed(() => undefined));
@@ -57,13 +96,10 @@ export const mirrorCentralSkills = Effect.fn("CentralSkills.mirror")(function* (
 }) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const source = centralSkillsEnabledDirectory(path, input.skillsDir);
+  const folders = yield* collectCentralSkillFolders(fileSystem, path, input.skillsDir);
   const wanted = new Map<string, string>();
-  for (const name of yield* fileSystem
-    .readDirectory(source)
-    .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []))) {
-    if (!isCentralSkillName(name)) continue;
-    const revision = yield* skillRevision(fileSystem, path, path.join(source, name));
+  for (const [name, directory] of folders) {
+    const revision = yield* skillRevision(fileSystem, path, directory);
     if (revision !== undefined) wanted.set(name, revision);
   }
 
@@ -105,7 +141,7 @@ export const mirrorCentralSkills = Effect.fn("CentralSkills.mirror")(function* (
         prefix: ".t3-staging-",
       });
       yield* Effect.gen(function* () {
-        yield* fileSystem.copy(path.join(source, name), staging, { overwrite: true });
+        yield* fileSystem.copy(folders.get(name) ?? "", staging, { overwrite: true });
         yield* fileSystem.writeFileString(
           path.join(staging, CENTRAL_SKILL_MIRROR_MARKER),
           revision,
@@ -147,6 +183,22 @@ export const mirrorCentralSkillsToCodexHome = Effect.fn("CentralSkills.mirrorToC
   },
   Effect.catch((cause) =>
     Effect.logWarning("Could not mirror central skills into a Codex home.", { cause }).pipe(
+      Effect.as({ mirrored: [], shadowed: [] } satisfies CentralSkillsMirrorResult),
+    ),
+  ),
+);
+
+/** Mirrors the library into the `.claude/skills` folder Claude loads. Never fails. */
+export const mirrorCentralSkillsForClaude = Effect.fn("CentralSkills.mirrorForClaude")(
+  function* (skillsDir: string) {
+    const path = yield* Path.Path;
+    return yield* mirrorCentralSkills({
+      skillsDir,
+      targetSkillsDir: centralSkillsClaudeDirectory(path, skillsDir),
+    });
+  },
+  Effect.catch((cause) =>
+    Effect.logWarning("Could not mirror central skills for Claude.", { cause }).pipe(
       Effect.as({ mirrored: [], shadowed: [] } satisfies CentralSkillsMirrorResult),
     ),
   ),
