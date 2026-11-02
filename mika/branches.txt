@@ -10,3 +10,5 @@ mika/central-skills
 mika/central-mcp
 mika/desktop-dictation
 mika/reset-planner
+# Temporary: upstream PR #28595 for the multi-account verification. Remove afterwards.
+mika/pr-28595
