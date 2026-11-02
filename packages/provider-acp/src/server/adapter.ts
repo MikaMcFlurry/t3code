@@ -897,8 +897,31 @@ function acpMcpContext(
   self: SelfInvocation,
   mcpOverHttp: boolean | undefined,
   deferMcpTools: boolean | undefined,
-  sharedServers: ReadonlyArray<EffectAcpSchema.McpServer> = [],
+  shared: ReadonlyArray<EffectAcpSchema.McpServer> = [],
+  driver = "acp",
 ): AcpMcpContext {
+  // Tell shared stdio servers which provider and thread they serve; their own env entries win.
+  const sessionEnvironment = Object.entries(
+    McpProviderSession.sharedMcpSessionEnvironment(driver, session),
+  );
+  const sharedServers = shared.map((server) => {
+    if (!("command" in server)) return server;
+    const own: ReadonlyArray<{ readonly name: string; readonly value: string }> = Array.isArray(
+      server.env,
+    )
+      ? server.env
+      : [];
+    const taken = new Set(own.map((entry) => entry.name));
+    return {
+      ...server,
+      env: [
+        ...sessionEnvironment
+          .filter(([name]) => !taken.has(name))
+          .map(([name, value]) => ({ name, value })),
+        ...own,
+      ],
+    };
+  });
   if (session === undefined) {
     return { servers: [], acpServers: [], httpServers: [], sharedServers };
   }
@@ -1791,7 +1814,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
       sharedMcpServers.read,
     ).pipe(
       Effect.map(([session, shared]) =>
-        acpMcpContext(session, self, flavor.mcpOverHttp, flavor.deferMcpTools, shared),
+        acpMcpContext(
+          session,
+          self,
+          flavor.mcpOverHttp,
+          flavor.deferMcpTools,
+          shared,
+          flavor.driver,
+        ),
       ),
     );
   const driver = flavor.driver;
