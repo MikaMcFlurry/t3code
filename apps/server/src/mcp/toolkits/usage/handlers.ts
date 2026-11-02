@@ -29,6 +29,8 @@ function toResult(plan: ResetPlan): typeof UsageResetPlanResult.Type {
         name: account.name,
         state: account.state,
         sessionResetAt: iso(account.sessionResetAt),
+        sessionRemainingPercent: account.sessionRemaining,
+        weeklyRemainingPercent: account.weeklyRemaining,
         weeklyResetAt: iso(account.weeklyResetAt),
         plannedStartAt: iso(account.plannedStartAt),
         bankedResets: account.credits

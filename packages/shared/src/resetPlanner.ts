@@ -33,6 +33,9 @@ export interface PlannedAccount {
   readonly driver: string;
   readonly state: PlannedAccountState;
   readonly sessionResetAt: number | null;
+  /** Remaining percent of the tightest session and weekly window; null when none is reported. */
+  readonly sessionRemaining: number | null;
+  readonly weeklyRemaining: number | null;
   /** Reset of the running weekly window, or the planned reset of an idle account. */
   readonly weeklyResetAt: number | null;
   /** Staggering only: when an idle account should start its weekly window. */
@@ -96,6 +99,21 @@ function weeklyState(provider: ServerProvider, now: number) {
   return running.length > 0
     ? { state: "running" as const, resetAt: upcomingReset(running, now) }
     : { state: "idle" as const, resetAt: null };
+}
+
+/** A window whose reset has passed counts as full, matching the headroom indicators. */
+function tightestRemaining(provider: ServerProvider, kind: "session" | "weekly", now: number) {
+  let tightest: number | null = null;
+  for (const window of provider.usageLimits?.windows ?? []) {
+    if (window.kind !== kind) continue;
+    const at = millis(window.resetsAt);
+    const remaining =
+      at !== null && at <= now
+        ? 100
+        : Math.round(100 - Math.max(0, Math.min(100, window.usedPercent)));
+    if (tightest === null || remaining < tightest) tightest = remaining;
+  }
+  return tightest;
 }
 
 function circularDistance(left: number, right: number) {
@@ -174,6 +192,8 @@ export function planUsageResets(input: {
           (provider.usageLimits?.windows ?? []).filter((window) => window.kind === "session"),
           now,
         ),
+        sessionRemaining: tightestRemaining(provider, "session", now),
+        weeklyRemaining: tightestRemaining(provider, "weekly", now),
         weeklyResetAt,
         plannedStartAt,
         credits:
