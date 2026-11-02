@@ -2,6 +2,7 @@ import { CentralMcpServer, EnvironmentId, ProviderInstanceId, ThreadId } from "@
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { sharedMcpSessionEnvironment } from "@t3tools/provider-core/server/mcpSession";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 
@@ -108,4 +109,38 @@ describe("central MCP servers", () => {
       ),
     ),
   );
+
+  it("tells shared stdio servers which provider, account and thread they serve", () => {
+    const session = {
+      threadId: ThreadId.make("thread-1"),
+      providerInstanceId: ProviderInstanceId.make("claude_work"),
+    };
+    const environment = sharedMcpSessionEnvironment("claudeAgent", session);
+    assert.deepStrictEqual(environment, {
+      T3CODE_PROVIDER: "claudeAgent",
+      T3CODE_PROVIDER_INSTANCE: "claude_work",
+      T3CODE_THREAD_ID: "thread-1",
+    });
+    const [ownEnv] = decodeServers([
+      {
+        name: "murmur",
+        transport: { type: "stdio", command: "mur", args: ["mcp"], env: { T3CODE_PROVIDER: "x" } },
+      },
+    ]);
+    const claude = claudeCentralMcpServers(ownEnv ? [ownEnv] : [], environment);
+    // A server's own env entries win over the session values.
+    assert.deepInclude(claude.murmur, {
+      env: {
+        T3CODE_PROVIDER: "x",
+        T3CODE_PROVIDER_INSTANCE: "claude_work",
+        T3CODE_THREAD_ID: "thread-1",
+      },
+    });
+    assert.deepStrictEqual(
+      codexCentralMcpConfig(servers, sharedMcpSessionEnvironment("codex", undefined))[
+        "mcp_servers.github"
+      ],
+      { command: "npx", args: ["-y", "gh-mcp"], env: { T3CODE_PROVIDER: "codex" } },
+    );
+  });
 });
