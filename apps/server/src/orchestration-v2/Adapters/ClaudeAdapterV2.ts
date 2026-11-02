@@ -2786,6 +2786,7 @@ export const CLAUDE_T3_MCP_TOOL_TIMEOUT_MS = 65 * 60 * 1_000;
 /** Enabled central MCP servers in Claude's query shape. T3's own server is added separately. */
 export function claudeCentralMcpServers(
   servers: ReadonlyArray<CentralMcpServer> | undefined,
+  sessionEnvironment: Readonly<Record<string, string>> = {},
 ): NonNullable<ClaudeQueryOptions["mcpServers"]> {
   return Object.fromEntries(
     (servers ?? [])
@@ -2797,7 +2798,7 @@ export function claudeCentralMcpServers(
               type: "stdio" as const,
               command: server.transport.command,
               args: [...server.transport.args],
-              env: { ...server.transport.env },
+              env: { ...sessionEnvironment, ...server.transport.env },
             }
           : {
               type: "http" as const,
@@ -2818,7 +2819,10 @@ export function claudeMcpQueryOverrides(input: {
   readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
 } {
   const session = input.mcpSession;
-  const central = claudeCentralMcpServers(input.centralMcpServers);
+  const central = claudeCentralMcpServers(
+    input.centralMcpServers,
+    McpProviderSession.sharedMcpSessionEnvironment("claudeAgent", session),
+  );
   if (session === undefined) {
     return {
       ...(input.allowedTools === undefined ? {} : { allowedTools: input.allowedTools }),
