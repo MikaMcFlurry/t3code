@@ -22,8 +22,8 @@ export function ComposerDictationButton(props: { readonly focusComposer: () => v
   const [starting, setStarting] = useState(false);
   const [failed, setFailed] = useState(false);
   const label = failed ? "Windows voice typing is not available" : "Dictate (Win+H)";
-  // Voice typing falls back to English until the language's speech files are downloaded.
-  const hint = failed ? null : "Wrong language? Settings → Accessibility → Speech";
+  // The window switches to the display language's input language first; see systemDictation.ts.
+  const hint = failed ? null : "Listens in your Windows display language";
   return (
     <Tooltip>
       <TooltipTrigger
