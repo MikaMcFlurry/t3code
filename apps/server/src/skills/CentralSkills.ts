@@ -24,7 +24,8 @@ import {
   CENTRAL_SKILL_METADATA_FILE,
   CENTRAL_SKILL_MIRROR_MARKER,
   centralSkillsDisabledDirectory,
-  centralSkillsEnabledDirectory,
+  collectCentralSkillFolders,
+  mirrorCentralSkillsForClaude,
 } from "./CentralSkillsMirror.ts";
 
 const GIT_CLONE_TIMEOUT_MS = 120_000;
@@ -99,17 +100,17 @@ const make = Effect.gen(function* () {
   const { skillsDir } = yield* ServerConfig.ServerConfig;
   const git = yield* GitVcsDriver.GitVcsDriver;
   const httpClient = yield* HttpClient.HttpClient;
-  const enabledDirectory = centralSkillsEnabledDirectory(path, skillsDir);
+  // Skills live directly in the skills dir, where users drop folders; see CentralSkillsMirror.
+  const enabledDirectory = skillsDir;
   const disabledDirectory = centralSkillsDisabledDirectory(path, skillsDir);
   // Installs, removals and toggles move whole folders; one at a time keeps them from interleaving.
   const mutations = yield* Semaphore.make(1);
 
   const readSkill = Effect.fnUntraced(function* (
-    directory: string,
+    skillPath: string,
     name: string,
     enabled: boolean,
   ) {
-    const skillPath = path.join(directory, name);
     const contents = yield* fileSystem
       .readFileString(path.join(skillPath, "SKILL.md"))
       .pipe(Effect.orElseSucceed(() => undefined));
@@ -130,25 +131,41 @@ const make = Effect.gen(function* () {
     } satisfies CentralSkill;
   });
 
-  const readSkills = Effect.fnUntraced(function* (directory: string, enabled: boolean) {
+  const readDisabledSkills = Effect.gen(function* () {
     const entries = yield* fileSystem
-      .readDirectory(directory)
+      .readDirectory(disabledDirectory)
       .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
     const skills: Array<CentralSkill> = [];
     for (const entry of entries) {
       if (!isCentralSkillName(entry)) continue;
-      const skill = yield* readSkill(directory, entry, enabled);
+      const skill = yield* readSkill(path.join(disabledDirectory, entry), entry, false);
+      if (skill) skills.push(skill);
+    }
+    return skills;
+  });
+
+  const readEnabledSkills = Effect.gen(function* () {
+    const skills: Array<CentralSkill> = [];
+    for (const [name, directory] of yield* collectCentralSkillFolders(
+      fileSystem,
+      path,
+      skillsDir,
+    )) {
+      const skill = yield* readSkill(directory, name, true);
       if (skill) skills.push(skill);
     }
     return skills;
   });
 
   const list = Effect.gen(function* () {
-    const enabled = yield* readSkills(enabledDirectory, true);
-    const enabledNames = new Set(enabled.map((skill) => skill.name));
-    const disabled = (yield* readSkills(disabledDirectory, false)).filter(
-      (skill) => !enabledNames.has(skill.name),
+    // Folders dropped into the library by hand reach Claude on the next list.
+    yield* mirrorCentralSkillsForClaude(skillsDir).pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
     );
+    const enabled = yield* readEnabledSkills;
+    const enabledNames = new Set(enabled.map((skill) => skill.name));
+    const disabled = (yield* readDisabledSkills).filter((skill) => !enabledNames.has(skill.name));
     return {
       directory: skillsDir,
       skills: [...enabled, ...disabled].sort((left, right) => left.name.localeCompare(right.name)),
@@ -156,11 +173,11 @@ const make = Effect.gen(function* () {
   }).pipe(Effect.withSpan("CentralSkills.list"));
 
   const locate = Effect.fnUntraced(function* (name: string) {
-    for (const directory of [enabledDirectory, disabledDirectory]) {
-      const candidate = path.join(directory, name);
-      if (yield* fileSystem.exists(candidate).pipe(Effect.orElseSucceed(() => false))) {
-        return { directory, path: candidate, enabled: directory === enabledDirectory };
-      }
+    const enabled = (yield* collectCentralSkillFolders(fileSystem, path, skillsDir)).get(name);
+    if (enabled !== undefined) return { path: enabled, enabled: true };
+    const disabled = path.join(disabledDirectory, name);
+    if (yield* fileSystem.exists(disabled).pipe(Effect.orElseSucceed(() => false))) {
+      return { path: disabled, enabled: false };
     }
     return undefined;
   });

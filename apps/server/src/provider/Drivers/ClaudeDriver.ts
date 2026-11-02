@@ -14,6 +14,7 @@ import { ChildProcessSpawner } from "effect/process";
 import { makeClaudeTextGeneration } from "../../textGeneration/ClaudeTextGeneration.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import { mirrorCentralSkillsForClaude } from "../../skills/CentralSkillsMirror.ts";
 import * as ServerConfig from "../../config.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
@@ -235,7 +236,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       Effect.map((result) => result.capabilities),
     );
 
+    // Folders dropped into the central library reach Claude before each probe and session.
+    const syncCentralSkills = mirrorCentralSkillsForClaude(skillsDir).pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
+    );
     const checkProvider = catalogService.refreshInBackground.pipe(
+      Effect.andThen(effectiveConfig.enabled ? syncCentralSkills : Effect.void),
       Effect.andThen(
         modelCatalog.pipe(
           Effect.flatMap((catalog) =>
@@ -384,7 +391,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       snapshot,
       invalidateCaches: Cache.invalidateAll(capabilitiesProbeCache),
       snapshotForCwd: (cwd: string) =>
-        snapshot.getSnapshot.pipe(
+        syncCentralSkills.pipe(
+          Effect.andThen(snapshot.getSnapshot),
           Effect.flatMap((machineSnapshot) =>
             probeClaudeWorkspaceSnapshot(effectiveConfig, machineSnapshot, cwd, processEnv, [
               skillsDir,
