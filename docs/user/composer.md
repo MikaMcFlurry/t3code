@@ -415,5 +415,8 @@ In the Windows desktop app, the microphone next to **Attach files** opens Window
 (the same panel as <kbd>Win</kbd>+<kbd>H</kbd>) for the composer. Windows adds punctuation and
 types the text at the cursor. Press the microphone again, or <kbd>Esc</kbd>, to stop.
 
-Windows may transcribe in English even when Windows itself is set to another language. Download
-your language's speech files under **Settings → Accessibility → Speech**, then try again.
+Voice typing listens in the window's input language. Before it opens the panel, T3 Code switches
+its window to the input language of your Windows display language, so a second language with the
+same keyboard layout (for example English next to German) can't take over unnoticed. If Windows
+still transcribes in the wrong language, download your language's speech files under
+**Settings → Accessibility → Speech**.

@@ -11,13 +11,21 @@ const VK_LWIN = 0x5b;
 const VK_H = 0x48;
 const KEYEVENTF_KEYUP = 0x2;
 
+const WM_INPUTLANGCHANGEREQUEST = 0x50;
+
 /**
- * Presses Win+H, which opens Windows voice typing for the focused control. Electron cannot send
- * the Windows key itself, so a short PowerShell call does it through user32 `keybd_event`.
+ * Presses Win+H (Electron can't send the Windows key) to open voice typing. It listens in the
+ * window's input language, so the window first switches to the display language's: a second
+ * language on the same keyboard layout can otherwise be active unnoticed.
  */
 export const WINDOWS_VOICE_TYPING_SCRIPT = [
   "$k = Add-Type -Name K -Namespace T3Dictation -PassThru -MemberDefinition",
-  "'[DllImport(\"user32.dll\")] public static extern void keybd_event(byte v, byte s, uint f, System.UIntPtr e);';",
+  '\'[DllImport("user32.dll")] public static extern void keybd_event(byte v, byte s, uint f, System.UIntPtr e);',
+  '[DllImport("user32.dll")] public static extern System.IntPtr GetForegroundWindow();',
+  '[DllImport("user32.dll")] public static extern System.IntPtr LoadKeyboardLayout(string id, uint flags);',
+  '[DllImport("user32.dll")] public static extern bool PostMessage(System.IntPtr h, uint m, System.IntPtr w, System.IntPtr l);\';',
+  "$layout = $k::LoadKeyboardLayout(('{0:X8}' -f [System.Globalization.CultureInfo]::CurrentUICulture.LCID), 0);",
+  `if ($layout -ne [IntPtr]::Zero) { [void]$k::PostMessage($k::GetForegroundWindow(), ${WM_INPUTLANGCHANGEREQUEST}, [IntPtr]::Zero, $layout); Start-Sleep -Milliseconds 150 };`,
   `$k::keybd_event(${VK_LWIN}, 0, 0, [UIntPtr]::Zero);`,
   `$k::keybd_event(${VK_H}, 0, 0, [UIntPtr]::Zero);`,
   `$k::keybd_event(${VK_H}, 0, ${KEYEVENTF_KEYUP}, [UIntPtr]::Zero);`,
