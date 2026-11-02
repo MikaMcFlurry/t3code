@@ -7,8 +7,10 @@ import * as Path from "effect/Path";
 import { parseGitSkillUrl } from "./CentralSkills.ts";
 import {
   CENTRAL_SKILL_MIRROR_MARKER,
-  centralSkillsEnabledDirectory,
+  centralSkillsClaudeDirectory,
+  collectCentralSkillFolders,
   mirrorCentralSkills,
+  mirrorCentralSkillsForClaude,
 } from "./CentralSkillsMirror.ts";
 
 const writeSkill = Effect.fnUntraced(function* (directory: string, name: string, body: string) {
@@ -34,7 +36,7 @@ describe("mirrorCentralSkills", () => {
   it.effect("copies enabled skills and keeps user-owned skills untouched", () =>
     Effect.gen(function* () {
       const { fileSystem, path, skillsDir, targetSkillsDir } = yield* setup;
-      const library = centralSkillsEnabledDirectory(path, skillsDir);
+      const library = skillsDir;
       yield* writeSkill(library, "review", "Central review");
       yield* writeSkill(library, "deploy", "Central deploy");
       yield* writeSkill(targetSkillsDir, "deploy", "User deploy");
@@ -59,7 +61,7 @@ describe("mirrorCentralSkills", () => {
   it.effect("removes mirrored copies once the central skill is gone", () =>
     Effect.gen(function* () {
       const { fileSystem, path, skillsDir, targetSkillsDir } = yield* setup;
-      const library = centralSkillsEnabledDirectory(path, skillsDir);
+      const library = skillsDir;
       yield* writeSkill(library, "review", "Central review");
       yield* writeSkill(targetSkillsDir, "notes", "User notes");
       yield* mirrorCentralSkills({ skillsDir, targetSkillsDir });
@@ -71,6 +73,44 @@ describe("mirrorCentralSkills", () => {
       assert.isFalse(yield* fileSystem.exists(path.join(targetSkillsDir, "review")));
       assert.isTrue(yield* fileSystem.exists(path.join(targetSkillsDir, "notes", "SKILL.md")));
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+});
+
+describe("central skill library layout", () => {
+  it.effect(
+    "reads skill folders placed directly in the skills dir and mirrors them for Claude",
+    () =>
+      Effect.gen(function* () {
+        const { fileSystem, path, skillsDir } = yield* setup;
+        yield* writeSkill(skillsDir, "mika-dev-studio", "Dropped in by hand");
+        yield* writeSkill(skillsDir, "disabled", "Reserved folder name");
+        yield* fileSystem.makeDirectory(path.join(skillsDir, "no-skill-file"), { recursive: true });
+        const claudeDirectory = centralSkillsClaudeDirectory(path, skillsDir);
+        // Installed by an older version straight into the Claude folder: still part of the library.
+        yield* writeSkill(claudeDirectory, "legacy", "Old location");
+
+        const folders = yield* collectCentralSkillFolders(fileSystem, path, skillsDir);
+        assert.deepStrictEqual([...folders.keys()].sort(), ["legacy", "mika-dev-studio"]);
+
+        const result = yield* mirrorCentralSkillsForClaude(skillsDir);
+        assert.deepStrictEqual(result, { mirrored: ["mika-dev-studio"], shadowed: ["legacy"] });
+        const copy = path.join(claudeDirectory, "mika-dev-studio");
+        assert.include(
+          yield* fileSystem.readFileString(path.join(copy, "SKILL.md")),
+          "Dropped in by hand",
+        );
+        assert.isTrue(yield* fileSystem.exists(path.join(copy, CENTRAL_SKILL_MIRROR_MARKER)));
+        // A mirrored copy is not a second library entry.
+        assert.deepStrictEqual(
+          [...(yield* collectCentralSkillFolders(fileSystem, path, skillsDir)).keys()].sort(),
+          ["legacy", "mika-dev-studio"],
+        );
+
+        yield* fileSystem.remove(path.join(skillsDir, "mika-dev-studio"), { recursive: true });
+        yield* mirrorCentralSkillsForClaude(skillsDir);
+        assert.isFalse(yield* fileSystem.exists(copy));
+        assert.isTrue(yield* fileSystem.exists(path.join(claudeDirectory, "legacy", "SKILL.md")));
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });
 
