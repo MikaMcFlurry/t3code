@@ -358,3 +358,26 @@ describe("reset plan and provider switching", () => {
     expect(route?.reason).toContain("Reset plan: held back until its planned start.");
   });
 });
+
+describe("remaining percent in the plan", () => {
+  it("reports the tightest weekly window, counting a passed reset as full", () => {
+    const plan = planUsageResets({
+      providers: [
+        account("codex_a", { used: 62.4, resetsIn: DAY }),
+        account("codex_b", { used: 100, resetsIn: -HOUR }),
+      ],
+      settings: settings(),
+      now,
+    });
+    expect(
+      plan.groups[0]?.accounts.map((entry) => [
+        entry.instanceId,
+        entry.weeklyRemaining,
+        entry.sessionRemaining,
+      ]),
+    ).toEqual([
+      ["codex_a", 38, null],
+      ["codex_b", 100, null],
+    ]);
+  });
+});
