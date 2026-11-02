@@ -412,6 +412,8 @@ Android opens a compatible installed file viewer.
 ## Voice input on Windows
 
 In the Windows desktop app, the microphone next to **Attach files** opens Windows voice typing
-(the same panel as <kbd>Win</kbd>+<kbd>H</kbd>) for the composer. Windows transcribes in the
-language set under **Settings → Time & language → Speech**, adds punctuation, and types the text
-at the cursor. Press the microphone again, or <kbd>Esc</kbd>, to stop.
+(the same panel as <kbd>Win</kbd>+<kbd>H</kbd>) for the composer. Windows adds punctuation and
+types the text at the cursor. Press the microphone again, or <kbd>Esc</kbd>, to stop.
+
+Windows may transcribe in English even when Windows itself is set to another language. Download
+your language's speech files under **Settings → Accessibility → Speech**, then try again.

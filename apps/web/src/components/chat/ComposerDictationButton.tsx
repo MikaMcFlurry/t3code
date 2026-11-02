@@ -22,6 +22,8 @@ export function ComposerDictationButton(props: { readonly focusComposer: () => v
   const [starting, setStarting] = useState(false);
   const [failed, setFailed] = useState(false);
   const label = failed ? "Windows voice typing is not available" : "Dictate (Win+H)";
+  // Voice typing falls back to English until the language's speech files are downloaded.
+  const hint = failed ? null : "Wrong language? Settings → Accessibility → Speech";
   return (
     <Tooltip>
       <TooltipTrigger
@@ -45,7 +47,12 @@ export function ComposerDictationButton(props: { readonly focusComposer: () => v
       >
         {starting ? <LoaderCircleIcon className="animate-spin" /> : <MicIcon />}
       </TooltipTrigger>
-      <TooltipPopup>{label}</TooltipPopup>
+      <TooltipPopup>
+        <div className="flex flex-col gap-0.5">
+          <span>{label}</span>
+          {hint ? <span className="text-muted-foreground">{hint}</span> : null}
+        </div>
+      </TooltipPopup>
     </Tooltip>
   );
 }
