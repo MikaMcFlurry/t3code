@@ -20,6 +20,8 @@ export const UsageResetPlanResult = Schema.Struct({
           name: Schema.String,
           state: Schema.Literals(["running", "idle", "unknown"]),
           sessionResetAt: IsoOrNull,
+          sessionRemainingPercent: Schema.NullOr(Schema.Number),
+          weeklyRemainingPercent: Schema.NullOr(Schema.Number),
           weeklyResetAt: IsoOrNull,
           plannedStartAt: IsoOrNull,
           bankedResets: Schema.NullOr(
