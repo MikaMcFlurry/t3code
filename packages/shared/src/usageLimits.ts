@@ -121,6 +121,44 @@ export function availableAccountSelection(
   );
 }
 
+/** Below this headroom the account a thread left is not worth going back to yet. */
+const RETURN_MIN_HEADROOM = 10;
+
+/**
+ * The selection a usage-limit switch moved a thread away from, once its account has usage again
+ * (every window at least `RETURN_MIN_HEADROOM` percent left). Null unless the thread is still on
+ * the account the switch picked, so a later manual model change wins.
+ */
+export function limitSwitchReturnSelection(
+  input: AccountChoiceInput & {
+    readonly origin: ModelSelection;
+    readonly switchedTo: ProviderInstanceId;
+    readonly current: ModelSelection;
+  },
+): ModelSelection | null {
+  if (!input.settings?.fallbackToAvailableAccounts) return null;
+  if (
+    input.current.instanceId !== input.switchedTo ||
+    input.origin.instanceId === input.current.instanceId ||
+    !isUsableSelection(input.origin, input)
+  ) {
+    return null;
+  }
+  const origin = input.providers.find((entry) => entry.instanceId === input.origin.instanceId);
+  const tightest = Math.min(
+    100,
+    ...(origin?.usageLimits?.windows ?? [])
+      .filter(
+        (window) =>
+          !window.resetsAt ||
+          !Number.isFinite(Date.parse(window.resetsAt)) ||
+          Date.parse(window.resetsAt) > input.now,
+      )
+      .map((window) => 100 - (window.usedPercent ?? 0)),
+  );
+  return tightest >= RETURN_MIN_HEADROOM ? input.origin : null;
+}
+
 export function resolveNewThreadModelSelection(
   input: AccountChoiceInput & {
     readonly defaultSelection: ModelSelection | null;

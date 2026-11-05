@@ -27,6 +27,7 @@ import {
   usesChatGptSharing,
   resolveNewThreadModelSelection,
   availableAccountSelection,
+  limitSwitchReturnSelection,
 } from "./usageLimits.ts";
 
 const now = Date.parse("2026-09-03T12:00:00.000Z");
@@ -1850,5 +1851,85 @@ describe("account choice when the quota of another account is about to reset", (
   it("falls back to most headroom when nothing resets soon or the soon-resetting account is low", () => {
     expect(choose(claude("web", 35, 57, 72 * HOUR_MS))).toBe("support");
     expect(choose(claude("web", 35, 90, 18 * HOUR_MS))).toBe("support");
+  });
+});
+
+describe("going back to the account a usage-limit switch left", () => {
+  const HOUR_MS = 3_600_000;
+  const at = (offset: number) => DateTime.formatIso(DateTime.makeUnsafe(now + offset));
+  const model = "claude-opus-5-5";
+  const claude = (id: string, sessionUsed: number, sessionResetIn: number, weeklyUsed = 50) =>
+    provider({
+      instanceId: ProviderInstanceId.make(id),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      models: [{ slug: model, name: "Opus", isCustom: false, isDefault: true, capabilities: null }],
+      usageLimits: {
+        checkedAt: at(-HOUR_MS),
+        windows: [
+          { ...window, id: "five_hour", usedPercent: sessionUsed, resetsAt: at(sessionResetIn) },
+          {
+            id: "seven_day",
+            kind: "weekly",
+            label: "Weekly",
+            usedPercent: weeklyUsed,
+            windowDurationMins: 7 * 24 * 60,
+            resetsAt: at(19 * HOUR_MS),
+          },
+        ],
+      },
+    });
+  const web = { instanceId: ProviderInstanceId.make("web"), model };
+  const support = { instanceId: ProviderInstanceId.make("support"), model };
+  const back = (
+    providers: ServerProvider[],
+    options: { current?: typeof web; enabled?: boolean } = {},
+  ) =>
+    limitSwitchReturnSelection({
+      origin: web,
+      switchedTo: support.instanceId,
+      current: options.current ?? support,
+      providers,
+      now,
+      settings: {
+        ...DEFAULT_SERVER_SETTINGS,
+        fallbackToAvailableAccounts: options.enabled ?? true,
+        providerInstances: Object.fromEntries(
+          providers.map((entry) => [
+            entry.instanceId,
+            { driver: entry.driver, enabled: true, config: {} },
+          ]),
+        ),
+      },
+    });
+
+  it("goes back once the 5-hour window of the account it left has reset", () => {
+    // The stale bar still says 100%, but its reset time has passed.
+    expect(back([claude("web", 100, -HOUR_MS), claude("support", 40, HOUR_MS)])).toEqual(web);
+  });
+
+  it("stays while the account it left is still out of usage", () => {
+    expect(back([claude("web", 100, HOUR_MS), claude("support", 40, HOUR_MS)])).toBeNull();
+  });
+
+  it("stays while the account it left has almost no headroom", () => {
+    expect(back([claude("web", 0, HOUR_MS, 95), claude("support", 40, HOUR_MS)])).toBeNull();
+  });
+
+  it("leaves a thread alone that the user moved to another account since", () => {
+    const gmail = { instanceId: ProviderInstanceId.make("gmail"), model };
+    expect(
+      back(
+        [claude("web", 0, HOUR_MS), claude("support", 40, HOUR_MS), claude("gmail", 0, HOUR_MS)],
+        {
+          current: gmail,
+        },
+      ),
+    ).toBeNull();
+  });
+
+  it("does nothing when switching accounts is off", () => {
+    expect(
+      back([claude("web", 0, -HOUR_MS), claude("support", 40, HOUR_MS)], { enabled: false }),
+    ).toBeNull();
   });
 });

@@ -8015,6 +8015,41 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
     }),
   );
 
+  it.effect("finds the account a usage-limit switch moved the thread away from", () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = yield* addRolledBackRecoveryCandidate("limit-switch-origin");
+      assert.isNull(yield* store.getLatestLimitSwitch(threadId));
+      const original = (yield* store.getThreadProjection(threadId)).runs[0]!;
+      const now = yield* DateTime.now;
+      const switchedTo = ProviderInstanceId.make("claude-support");
+      const addRun = (ordinal: number, userMessageId: string) =>
+        store.apply({
+          id: EventId.make(`event:limit-switch-origin:run:${ordinal}`),
+          type: "run.created",
+          threadId,
+          occurredAt: now,
+          payload: {
+            ...original,
+            id: RunId.make(`${original.id}:switch:${ordinal}`),
+            ordinal,
+            providerInstanceId: switchedTo,
+            modelSelection: { ...original.modelSelection, instanceId: switchedTo },
+            userMessageId: MessageId.make(userMessageId),
+            status: "completed",
+          },
+        });
+      // An ordinary later message is not a switch.
+      yield* addRun(original.ordinal + 1, "limit-switch-origin:ordinary");
+      assert.isNull(yield* store.getLatestLimitSwitch(threadId));
+      yield* addRun(original.ordinal + 2, `limit-switch:${threadId}:${original.id}`);
+      assert.deepEqual(yield* store.getLatestLimitSwitch(threadId), {
+        origin: original.modelSelection,
+        switchedTo,
+      });
+    }),
+  );
+
   it.effect("projects only the latest failed root turn's limit into SQL and memory shells", () =>
     Effect.gen(function* () {
       const store = yield* ProjectionStore.ProjectionStoreV2;

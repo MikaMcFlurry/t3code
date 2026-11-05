@@ -601,6 +601,17 @@ export interface ProjectionStoreV2Shape {
     /** Also returns limits hit since then whose window has not reset, to move to another account. */
     readonly switchAccountsSince?: DateTime.Utc;
   }) => Effect.Effect<ReadonlyArray<ProjectionLimitRecoveryCandidate>, ProjectionStoreV2Error>;
+  /**
+   * The thread's newest usage-limit account switch: the selection of the run that hit the limit
+   * and the account the switch moved the thread to. Null when the thread never switched.
+   */
+  readonly getLatestLimitSwitch: (threadId: ThreadId) => Effect.Effect<
+    {
+      readonly origin: OrchestrationV2Run["modelSelection"];
+      readonly switchedTo: ProviderInstanceId;
+    } | null,
+    ProjectionStoreV2Error
+  >;
   /** Epoch ms of the next armed reset or snooze end after `now`, when a waiting thread becomes a candidate. */
   readonly getLimitRecoveryWakeAt: (
     now: DateTime.Utc,
@@ -4686,6 +4697,35 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           (value): value is number => value != null,
         );
         return wakes.length === 0 ? null : Math.round(Math.min(...wakes));
+      },
+      Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+    );
+
+    const getLatestLimitSwitch = Effect.fn("ProjectionStore.getLatestLimitSwitch")(
+      function* (threadId: ThreadId) {
+        // A switch run starts with message `limit-switch:<thread>:<run that hit the limit>`.
+        const prefix = `limit-switch:${threadId}:`;
+        const rows = yield* sql<{
+          readonly switched_payload: string;
+          readonly origin_payload: string;
+        }>`
+          SELECT switched.payload_json AS switched_payload, origin.payload_json AS origin_payload
+          FROM orchestration_v2_projection_runs AS switched
+          JOIN orchestration_v2_projection_runs AS origin
+            ON origin.thread_id = switched.thread_id
+            AND origin.run_id = substr(json_extract(switched.payload_json, '$.userMessageId'), ${prefix.length + 1})
+          WHERE switched.thread_id = ${threadId}
+            AND substr(json_extract(switched.payload_json, '$.userMessageId'), 1, ${prefix.length}) = ${prefix}
+          ORDER BY switched.ordinal DESC
+          LIMIT 1
+        `;
+        const row = rows[0];
+        if (row === undefined) return null;
+        const [switched, origin] = yield* Effect.all([
+          decodeRunPayload(row.switched_payload),
+          decodeRunPayload(row.origin_payload),
+        ]);
+        return { origin: origin.modelSelection, switchedTo: switched.providerInstanceId };
       },
       Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
     );
@@ -9012,6 +9052,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getPlan: readOnReader(getPlan),
       getProviderControlContext: readOnReader(getProviderControlContext),
       getLimitRecoveryCandidates: readOnReader(getLimitRecoveryCandidates),
+      getLatestLimitSwitch: readOnReader(getLatestLimitSwitch),
       getLimitRecoveryWakeAt: readOnReader(getLimitRecoveryWakeAt),
       getRecoveryThreadIds: readOnReader(getRecoveryThreadIds),
       getUnreadableThreadIds: readOnReader(getUnreadableThreadIds),

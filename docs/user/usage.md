@@ -143,7 +143,9 @@ on another account of that provider with usage left, or to another provider's de
 none has any. A thread that hits a 5-hour or weekly limit while working continues the same way
 right away instead of waiting for the reset; the thread shows the account switch. Only accounts
 that report limits under **Usage → Limits** are picked, and an account that just hit a limit is
-skipped until it resets. Pick the account in the model picker to move back.
+skipped until it resets. Once the account the thread left has usage again, the thread's next
+turn goes back to it; a running turn is never moved. If you pick another account in the model
+picker after a switch, the thread stays on your choice.
 
 Opening Limits checks the selected connected environments automatically. Each client waits at
 least five minutes between automatic checks of an environment, including after a failed check.
