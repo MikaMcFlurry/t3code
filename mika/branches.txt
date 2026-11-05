@@ -11,5 +11,7 @@ mika/central-mcp
 mika/desktop-dictation
 mika/reset-planner
 mika/environment-load
+# Upstream PR #28390 (BluePhi09), take a photo from the attachment menu; waits for approval in #7931.
+mika/mobile-camera
 # Upstream PR #28595 (account switch at the usage limit). Verified live; keep until it is merged upstream.
 mika/pr-28595
