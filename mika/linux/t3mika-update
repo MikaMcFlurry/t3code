@@ -46,8 +46,9 @@ if [ ! -f "$REL/.built" ]; then
 fi
 
 # Nur im Leerlauf umschalten; der Timer versucht es sonst spaeter erneut.
-TURNS=$("$NODE" "$M/bin/running-turns.cjs" "$M/home/userdata/statev2.sqlite" 2>/dev/null || echo fehler)
-[ "$TURNS" = 0 ] || { log "warte: $TURNS laufende Turns"; exit 0; }
+IDLE=$M/bin/t3mika-idle.cjs; [ -f "$IDLE" ] || IDLE=$M/bin/running-turns.cjs
+TURNS=$("$NODE" "$IDLE" "$M/home/userdata/statev2.sqlite" 2>/dev/null || echo fehler)
+[ "$TURNS" = 0 ] || { log "warte: $TURNS laufende oder wartende Laeufe"; exit 0; }
 
 EXP=$(cat "$M/home/userdata/environment-id")
 PREV=$(readlink -f "$M/current")
