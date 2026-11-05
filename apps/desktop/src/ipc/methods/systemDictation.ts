@@ -48,7 +48,10 @@ export const startSystemDictation = DesktopIpc.makeIpcMethod({
   handler: Effect.fn("desktop.ipc.startSystemDictation")(function* () {
     if ((yield* HostProcess.Platform) !== "win32") return false;
     const powershell = windowsPowerShellPath(yield* HostProcess.Environment);
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    // Optional, so IPC methods keep needing nothing beyond what the app always provides.
+    const spawnerOption = yield* Effect.serviceOption(ChildProcessSpawner.ChildProcessSpawner);
+    if (spawnerOption._tag === "None") return false;
+    const spawner = spawnerOption.value;
     return yield* Effect.scoped(
       Effect.gen(function* () {
         const handle = yield* spawner.spawn(
