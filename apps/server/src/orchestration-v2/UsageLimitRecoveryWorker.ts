@@ -25,6 +25,10 @@ export const MAX_OVERDUE_ARM_MS = 24 * 60 * 60 * 1000;
 // Only limits hit this recently move accounts, so turning the setting on never wakes old threads.
 const ACCOUNT_SWITCH_WINDOW_MS = 10 * 60 * 1000;
 
+// The turn stopped at the limit, maybe mid-command; the new account must not blindly repeat it.
+export const LIMIT_SWITCH_PROMPT =
+  "Continue where you left off. Your last turn stopped at a usage limit, so this turn continues on another account with usage left. A command or other action the last turn started may have finished or may still be running. Before you repeat one that changes state, confirm it did not take effect and is not still running; if you cannot tell, say so instead of repeating it.";
+
 /** Continues a thread that just hit a usage limit on another account with usage left. */
 export function limitSwitchCommand(
   thread: ProjectionStore.ProjectionLimitRecoveryCandidate,
@@ -70,10 +74,11 @@ export function limitSwitchCommand(
     threadId: thread.id,
     manualContinuationOfRunId: thread.latestRunId,
     modelSelection: next,
-    text: "Continue where you left off.",
+    text: LIMIT_SWITCH_PROMPT,
     attachments: [],
     dispatchMode: { type: "start_immediately" },
-    createdBy: "user",
+    // Shown as a T3 Code notice, not as something the user typed.
+    createdBy: "agent",
     creationSource: "server",
   };
 }
