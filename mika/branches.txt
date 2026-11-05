@@ -13,5 +13,6 @@ mika/reset-planner
 mika/environment-load
 # Upstream PR #28390 (BluePhi09), take a photo from the attachment menu; waits for approval in #7931.
 mika/mobile-camera
-# Upstream PR #28595 (account switch at the usage limit). Verified live; keep until it is merged upstream.
-mika/pr-28595
+# Upstream PR #28595 (account switch at the usage limit) plus our follow-ups: going back to the
+# original account, a clearer switch notice. Keep until #28595 is merged upstream.
+mika/limit-switch-back
