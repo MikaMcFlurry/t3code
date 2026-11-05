@@ -5,7 +5,7 @@
 mika/tooling
 mika/side-by-side
 mika/usage-rings
-mika/dictation-locale
+# mika/dictation-locale: replaced by upstream #29689 (iPhone dictation language); not merged.
 mika/central-skills
 mika/central-mcp
 mika/desktop-dictation
