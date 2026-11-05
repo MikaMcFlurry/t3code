@@ -11,6 +11,7 @@ import {
   type ModelSelection,
   NodeId,
   type OrchestrationV2Run,
+  type OrchestrationV2Command,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
