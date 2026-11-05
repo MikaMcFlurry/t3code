@@ -7263,10 +7263,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       const pause = (yield* Queue.take(harness.systemNoticeReceipts)).turnItem;
       assert.equal(pause.type, "system_notice");
       if (pause.type !== "system_notice") return;
-      assert.equal(
-        pause.message,
-        "Claude usage limit reached. This turn is paused until the 5-hour limit resets in 2h.",
-      );
+      assert.equal(pause.message, "Claude usage limit reached. The 5-hour limit resets in 2h.");
       assert.lengthOf(harness.terminalEvents(), 0);
       yield* Queue.offerAll(harness.sdkMessages, [
         limit(),
@@ -14990,7 +14987,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           const pause = yield* Queue.take(harness.systemNoticeReceipts);
           assert.equal(pause.turnItem.type, "system_notice");
           if (pause.turnItem.type !== "system_notice") return;
-          assert.include(pause.turnItem.message, "This turn is paused until the 5-hour limit");
+          assert.include(pause.turnItem.message, "The 5-hour limit resets");
         }
       }).pipe(
         Effect.provide(

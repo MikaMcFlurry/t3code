@@ -24,7 +24,11 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
-import { limitRecoveryCommand, limitSwitchCommand } from "./UsageLimitRecoveryWorker.ts";
+import {
+  LIMIT_SWITCH_PROMPT,
+  limitRecoveryCommand,
+  limitSwitchCommand,
+} from "./UsageLimitRecoveryWorker.ts";
 
 it.effect("idle sweeps skip SQL until the next wake time or a relevant event", () =>
   Effect.gen(function* () {
@@ -178,6 +182,10 @@ describe("limitSwitchCommand", () => {
         instanceId: ProviderInstanceId.make("claude_personal"),
         model: "claude-opus-5-5",
       },
+      // A T3 Code notice, and a prompt that keeps the new account from repeating cut-off work.
+      createdBy: "agent",
+      creationSource: "server",
+      text: LIMIT_SWITCH_PROMPT,
     });
   });
 

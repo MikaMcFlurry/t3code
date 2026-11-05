@@ -4645,9 +4645,10 @@ function describeClaudeUsageLimit(
     waitMs !== undefined && waitMs > 0 && waitMs <= CLAUDE_USAGE_LIMIT_MAX_WAIT_MS
       ? formatClaudeUsageLimitWait(waitMs)
       : undefined;
-  return `Claude usage limit reached. This turn is paused until the ${
-    label ? `${label} ` : ""
-  }limit resets${wait ? ` in ${wait}` : ""}.`;
+  // Stays true whether the thread waits for the reset or continues on another account.
+  return `Claude usage limit reached. The ${label ? `${label} ` : ""}limit resets${
+    wait ? ` in ${wait}` : " later"
+  }.`;
 }
 
 function formatClaudeUsageLimitWait(waitMs: number): string {
