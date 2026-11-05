@@ -577,7 +577,8 @@ it.effect("goes back to the account a usage-limit switch left once it has usage 
               getLatestLimitSwitch: () =>
                 Effect.succeed({
                   origin: at("claude_web"),
-                  originResetAt: null,
+                  originResetAt: "1969-12-31T00:00:00.000Z",
+                  originLimitedAt: "1969-12-30T23:00:00.000Z",
                   switchedTo: at("claude_support"),
                   busy: input.busy ?? false,
                 }),
