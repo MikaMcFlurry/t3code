@@ -4,10 +4,13 @@
 .DESCRIPTION
   Meant for the scheduled task "T3 Mika Safe Update" (see -Register). Each run:
   1. checks whether upstream or a Mika branch moved since the last build; if not, it stops;
-  2. counts running or queued runs in D:\T3-Mika\home (t3mika-idle.cjs); if any, it stops and the task
-     tries again later, so no run is interrupted;
-  3. closes T3 Code Mika, runs Update-T3Mika.ps1 and starts T3 Code Mika again. If the update
-     fails, the last working mika/main is rebuilt so the app always comes back.
+  2. counts running or queued runs in D:\T3-Mika\home (t3mika-idle.cjs); if any, it stops and the
+     task tries again later, so no run is interrupted;
+  3. rebases the branches and regenerates mika/main (Update-T3Mika.ps1 -NoBuild) while the app keeps
+     running. On a conflict the app stays open, UPDATE-KONFLIKT.txt names the branches, and the same
+     upstream is not tried again until it moves or the conflict is resolved;
+  4. only then closes T3 Code Mika, builds, and starts it again. A failed build rebuilds the last
+     working mika/main.
   Log: D:\T3-Mika\logs\safe-update.log
 .PARAMETER Register
   Registers the scheduled task: nightly from 03:30, retrying every 30 minutes until 07:30.
@@ -56,11 +59,36 @@ try {
   $lastBuilt = if (Test-Path $stateFile) { (Get-Content $stateFile -Raw).Trim() } else { '' }
   if (-not $Force -and $upstream -eq $main -and $current -eq $lastBuilt) { return }
 
-  $database = Join-Path $T3Mika.Home 'userdata\statev2.sqlite'
-  $turns = node (Join-Path $PSScriptRoot 't3mika-idle.cjs') $database 2>$null
-  if ("$turns".Trim() -ne '0') { Write-Log "warte: $turns laufende oder wartende Laeufe"; return }
+  # A conflict needs a person or an agent; don't retry the same upstream every 30 minutes.
+  $failedFile = Join-Path $T3Mika.Root 'update-failed-upstream.txt'
+  $noteFile = Join-Path $T3Mika.Root 'UPDATE-KONFLIKT.txt'
+  $failedUpstream = if (Test-Path $failedFile) { (Get-Content $failedFile -Raw).Trim() } else { '' }
+  if (-not $Force -and $upstream -eq $failedUpstream) { return }
 
+  $database = Join-Path $T3Mika.Home 'userdata\statev2.sqlite'
+  $idle = { "$(node (Join-Path $PSScriptRoot 't3mika-idle.cjs') $database 2>$null)".Trim() }
+  $turns = & $idle
+  if ($turns -ne '0') { Write-Log "warte: $turns laufende oder wartende Laeufe"; return }
+
+  # Rebase and regenerate mika/main while the app keeps running: it runs from build output,
+  # which git leaves alone. Only a clean result closes the app for the build.
   Write-Log "Update startet (upstream $($upstream.Substring(0,10)), mika/main $($current.Substring(0,10)))"
+  $before = $current
+  try {
+    & (Join-Path $PSScriptRoot 'Update-T3Mika.ps1') -NoBuild *>> $log
+  } catch {
+    Set-Content $failedFile $upstream
+    Set-Content $noteFile ("$(Get-Date -Format s): Update auf upstream $($upstream.Substring(0,10)) gestoppt, " +
+      "T3 Code Mika laeuft unveraendert weiter. $_ Konflikte loesen (Agent oder von Hand), " +
+      "dann mika\Update-T3Mika.ps1 ausfuehren oder diese Datei und update-failed-upstream.txt loeschen.")
+    Write-Log "Konflikt, App bleibt offen: $_"
+    return
+  }
+  Remove-Item $failedFile, $noteFile -ErrorAction SilentlyContinue
+  $after = git rev-parse mika/main
+  if (-not $Force -and $after -eq $lastBuilt) { return }
+  if ((& $idle) -ne '0') { Write-Log 'neuer Stand bereit, warte auf Leerlauf zum Bauen'; return }
+
   $mikaProcesses = Get-Process electron -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -and $_.Path.StartsWith($T3Mika.Repo) }
   $mikaProcesses | ForEach-Object { [void]$_.CloseMainWindow() }
@@ -74,17 +102,17 @@ try {
   $closedByUpdate = $true
   Write-Log 'T3 Code Mika geschlossen'
 
-  $before = git rev-parse mika/main
-  try {
-    & (Join-Path $PSScriptRoot 'Update-T3Mika.ps1') *>> $log
-    git rev-parse mika/main | Set-Content $stateFile
-    Write-Log "Update fertig: mika/main $((git rev-parse mika/main).Substring(0,10))"
-  } catch {
-    Write-Log "FEHLER beim Update: $_ -> baue letzten funktionierenden Stand $($before.Substring(0,10))"
-    git rebase --abort 2>$null; git merge --abort 2>$null
+  vp run build:desktop *>> $log
+  if ($LASTEXITCODE -eq 0) {
+    Set-Content $stateFile $after
+    Write-Log "Update fertig: mika/main $($after.Substring(0,10))"
+  } else {
+    Write-Log "FEHLER beim Bauen von $($after.Substring(0,10)) -> baue letzten funktionierenden Stand $($before.Substring(0,10))"
     git switch -q mika/main 2>$null
     git reset -q --hard $before
     vp run build:desktop *>> $log
+    Set-Content $stateFile $before
+    Set-Content $failedFile $upstream
   }
 } finally {
   # Only reopen the app this run closed; a user who quit it on purpose keeps it closed.
