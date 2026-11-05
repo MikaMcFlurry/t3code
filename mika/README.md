@@ -113,3 +113,12 @@ Dann in einem T3-Code-Thread im Projekt `D:\T3-Dev\t3code`:
 > Rebase `mika/xyz` auf `main`, löse die Konflikte so, dass die Funktion erhalten bleibt und zu den neuen
 > Upstream-Änderungen passt. Danach `vp run check:changed` und die Tests des Branches ausführen, dann
 > `mika\Update-T3Mika.ps1 -SkipFetch` starten.
+
+## Automatische Updates
+
+- **Windows:** `mika\Invoke-T3MikaSafeUpdate.ps1 -Register` legt den geplanten Task "T3 Mika Safe Update" an
+  (täglich ab 03:30, alle 30 min bis 07:30). Er aktualisiert nur, wenn sich upstream oder ein Mika-Branch
+  geändert hat und keine Turns laufen, schließt T3 Code Mika, ruft `Update-T3Mika.ps1` auf und startet die
+  App wieder. Schlägt das Update fehl, wird der letzte funktionierende Stand gebaut. Log:
+  `D:\T3-Mika\logs\safe-update.log`. Sofort ausführen: `Start-ScheduledTask "T3 Mika Safe Update"`.
+- **iMacs (Linux):** siehe `mika/linux/README.md`. Sie holen den von Windows gepushten `mika/main`.
