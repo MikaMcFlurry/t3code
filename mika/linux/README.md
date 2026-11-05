@@ -9,6 +9,6 @@ Laeuft als `t3mika.service` (siehe `~/T3-Mika/bin/t3-variante`). Updates:
 
 Einrichten (ohne sudo):
 
-    install -m 755 t3mika-update ~/T3-Mika/bin/
+    install -m 755 t3mika-update ~/T3-Mika/bin/ && install -m 644 t3mika-idle.cjs ~/T3-Mika/bin/
     install -m 644 t3mika-update.service t3mika-update.timer ~/.config/systemd/user/
     systemctl --user daemon-reload && systemctl --user enable --now t3mika-update.timer

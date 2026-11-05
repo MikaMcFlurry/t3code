@@ -4,7 +4,7 @@
 .DESCRIPTION
   Meant for the scheduled task "T3 Mika Safe Update" (see -Register). Each run:
   1. checks whether upstream or a Mika branch moved since the last build; if not, it stops;
-  2. counts running turns in D:\T3-Mika\home (running-turns.cjs); if any, it stops and the task
+  2. counts running or queued runs in D:\T3-Mika\home (t3mika-idle.cjs); if any, it stops and the task
      tries again later, so no run is interrupted;
   3. closes T3 Code Mika, runs Update-T3Mika.ps1 and starts T3 Code Mika again. If the update
      fails, the last working mika/main is rebuilt so the app always comes back.
@@ -57,8 +57,8 @@ try {
   if (-not $Force -and $upstream -eq $main -and $current -eq $lastBuilt) { return }
 
   $database = Join-Path $T3Mika.Home 'userdata\statev2.sqlite'
-  $turns = node (Join-Path $PSScriptRoot 'running-turns.cjs') $database 2>$null
-  if ("$turns".Trim() -ne '0') { Write-Log "warte: $turns laufende Turns"; return }
+  $turns = node (Join-Path $PSScriptRoot 't3mika-idle.cjs') $database 2>$null
+  if ("$turns".Trim() -ne '0') { Write-Log "warte: $turns laufende oder wartende Laeufe"; return }
 
   Write-Log "Update startet (upstream $($upstream.Substring(0,10)), mika/main $($current.Substring(0,10)))"
   $mikaProcesses = Get-Process electron -ErrorAction SilentlyContinue |
