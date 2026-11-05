@@ -166,17 +166,14 @@ interface Candidate {
 // One plan per routing call: candidates of the same call share the context object.
 const resetPlans = new WeakMap<AutoModelRoutingContext, ResetPlan | null>();
 
-/** The reset plan when staggering or a forecast can change the choice; null otherwise. */
+/** The reset plan for this routing call; null without settings. */
 function resetPlanFor(context: AutoModelRoutingContext): ResetPlan | null {
   if (resetPlans.has(context)) return resetPlans.get(context) ?? null;
   const settings = context.settings;
-  const plan =
-    settings &&
-    (settings.usageResetStaggering ||
-      settings.usageResetForecast.length > 0 ||
-      context.providers.some((provider) => provider.usageLimits?.resetCredits))
-      ? planUsageResets({ providers: context.providers, settings, now: context.now })
-      : null;
+  // Always planned: quota that resets within a day matters even without staggering or forecasts.
+  const plan = settings
+    ? planUsageResets({ providers: context.providers, settings, now: context.now })
+    : null;
   resetPlans.set(context, plan);
   return plan;
 }
