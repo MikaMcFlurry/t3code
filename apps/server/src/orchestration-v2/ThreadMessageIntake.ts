@@ -6,11 +6,15 @@ import {
   type ModelSelection,
   type OrchestrationV2Command,
   type ProjectId,
+  type ServerProvider,
+  type ServerSettings as ServerSettingsValue,
+  type ThreadId,
 } from "@t3tools/contracts";
-import { availableAccountSelection } from "@t3tools/shared/usageLimits";
+import { availableAccountSelection, limitSwitchReturnSelection } from "@t3tools/shared/usageLimits";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import { rpcAuthorizationError } from "../auth/RpcAuthorization.ts";
@@ -18,6 +22,7 @@ import * as ServerConfig from "../config.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as Orchestrator from "./Orchestrator.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
 
 import * as AttachmentClaims from "./AttachmentClaims.ts";
 import { isProviderSignOutPrompt } from "./CommandPolicy.ts";
@@ -108,8 +113,9 @@ const readAccountChoice = Effect.fn("ThreadMessageIntake.readAccountChoice")(fun
     Effect.flatMap((registry) => registry.getProviders),
   );
   const now = DateTime.toEpochMillis(yield* DateTime.now);
-  return (selection: ModelSelection, projectId: ProjectId) =>
+  const choose = (selection: ModelSelection, projectId: ProjectId) =>
     availableAccountSelection({ selection, providers, now, settings, projectId }) ?? selection;
+  return Object.assign(choose, { providers, now, settings });
 });
 
 const withAvailableAccount = Effect.fn("ThreadMessageIntake.withAvailableAccount")(function* (
@@ -133,8 +139,43 @@ const withAvailableAccount = Effect.fn("ThreadMessageIntake.withAvailableAccount
   if (window === null) return command;
   const { thread } = window.projection;
   const selection = command.modelSelection ?? thread.modelSelection;
-  const next = choose(selection, thread.projectId);
+  const returned = yield* returnAfterLimitSwitch(
+    command.threadId,
+    selection,
+    thread.projectId,
+    choose,
+  );
+  const next = choose(returned ?? selection, thread.projectId);
   return next === selection ? command : { ...command, modelSelection: next };
+});
+
+/**
+ * The account a usage-limit switch moved this thread away from, once it has usage again. Only
+ * at the start of a turn, so a running turn is never cut off to move it back.
+ */
+const returnAfterLimitSwitch = Effect.fn("ThreadMessageIntake.returnAfterLimitSwitch")(function* (
+  threadId: ThreadId,
+  current: ModelSelection,
+  projectId: ProjectId,
+  choice: {
+    readonly providers: ReadonlyArray<ServerProvider>;
+    readonly now: number;
+    readonly settings: ServerSettingsValue;
+  },
+) {
+  const projections = yield* Effect.serviceOption(ProjectionStore.ProjectionStoreV2);
+  if (Option.isNone(projections)) return null;
+  const latest = yield* projections.value
+    .getLatestLimitSwitch(threadId)
+    .pipe(Effect.orElseSucceed(() => null));
+  if (latest === null) return null;
+  return limitSwitchReturnSelection({
+    ...choice,
+    projectId,
+    origin: latest.origin,
+    switchedTo: latest.switchedTo,
+    current,
+  });
 });
 
 /**
