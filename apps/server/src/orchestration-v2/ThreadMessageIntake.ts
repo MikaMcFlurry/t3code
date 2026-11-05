@@ -161,6 +161,7 @@ const returnAfterLimitSwitch = Effect.fn("ThreadMessageIntake.returnAfterLimitSw
     projectId,
     origin: latest.origin,
     originResetAt: latest.originResetAt,
+    originLimitedAt: latest.originLimitedAt,
     switchedTo: latest.switchedTo,
     current,
   });

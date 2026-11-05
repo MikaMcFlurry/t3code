@@ -1,4 +1,5 @@
 import type { ProjectThreadAwarenessV2Input } from "@t3tools/shared/agentAwareness";
+import { sameModelSelection } from "@t3tools/shared/usageLimits";
 import { pendingGuestMessageCount } from "@t3tools/contracts";
 import { applyThreadPullRequestLinkUpdate } from "../sourceControl/threadPullRequests.ts";
 import { projectTurnItemForWire } from "./WireProjection.ts";
@@ -182,6 +183,8 @@ export interface ProjectionLimitSwitch {
   readonly origin: OrchestrationV2Run["modelSelection"];
   /** When the origin account's limit resets, from the failure that started the chain. */
   readonly originResetAt: string | null;
+  /** When that failure ended the run; a usage reading must be newer when the reset is unknown. */
+  readonly originLimitedAt: string | null;
   readonly switchedTo: OrchestrationV2Run["modelSelection"];
   readonly busy: boolean;
 }
@@ -4720,11 +4723,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             switched.payload_json AS switched_payload,
             origin.payload_json AS origin_payload,
             (
-              SELECT MAX(json_extract(item.payload_json, '$.failure.resetAt'))
+              -- The root turn's latest failure is the one that moved the thread.
+              SELECT json_extract(item.payload_json, '$.failure.resetAt')
               FROM orchestration_v2_projection_turn_items AS item
               WHERE item.run_id = origin.run_id
+                AND item.node_id IS json_extract(origin.payload_json, '$.rootNodeId')
                 AND item.type = 'error'
                 AND json_extract(item.payload_json, '$.failure.class') = 'usage_limit'
+              ORDER BY item.ordinal DESC
+              LIMIT 1
             ) AS origin_reset_at,
             EXISTS (
               SELECT 1 FROM orchestration_v2_projection_runs AS active
@@ -4746,17 +4753,24 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             decodeRunPayload(row.origin_payload),
           ]),
         );
-        // Walk back while each switch left the account the previous one moved to: A→B, B→C.
+        // Walk back while each switch left exactly the selection the previous one picked: A→B,
+        // B→C. A manual account or model change in between ends the chain.
         let start = 0;
         while (
           start + 1 < switches.length &&
-          switches[start]![1].providerInstanceId === switches[start + 1]![0].providerInstanceId
+          sameModelSelection(
+            switches[start]![1].modelSelection,
+            switches[start + 1]![0].modelSelection,
+          )
         ) {
           start += 1;
         }
+        const origin = switches[start]![1];
         return {
-          origin: switches[start]![1].modelSelection,
+          origin: origin.modelSelection,
           originResetAt: rows[start]!.origin_reset_at,
+          originLimitedAt:
+            origin.completedAt === null ? null : DateTime.formatIso(origin.completedAt),
           switchedTo: switches[0]![0].modelSelection,
           busy: rows[0]!.busy === 1,
         } satisfies ProjectionLimitSwitch;

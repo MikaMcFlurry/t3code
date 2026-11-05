@@ -131,6 +131,21 @@ export function availableAccountSelection(
   );
 }
 
+/** Same account, model and options, whatever order the options came in. */
+export function sameModelSelection(left: ModelSelection, right: ModelSelection): boolean {
+  const options = (selection: ModelSelection) =>
+    JSON.stringify(
+      (selection.options ?? [])
+        .map((option) => [option.id, option.value] as const)
+        .sort(([a], [b]) => a.localeCompare(b)),
+    );
+  return (
+    left.instanceId === right.instanceId &&
+    left.model === right.model &&
+    options(left) === options(right)
+  );
+}
+
 /** Below this headroom the account a thread left is not worth going back to yet. */
 const RETURN_MIN_HEADROOM = 10;
 
@@ -143,6 +158,7 @@ export function limitSwitchReturnSelection(
   input: AccountChoiceInput & {
     readonly origin: ModelSelection;
     readonly originResetAt: string | null;
+    readonly originLimitedAt: string | null;
     readonly switchedTo: ModelSelection;
     readonly current: ModelSelection;
   },
@@ -150,8 +166,7 @@ export function limitSwitchReturnSelection(
   if (!input.settings?.fallbackToAvailableAccounts) return null;
   const resetMs = input.originResetAt === null ? Number.NaN : Date.parse(input.originResetAt);
   if (
-    input.current.instanceId !== input.switchedTo.instanceId ||
-    input.current.model !== input.switchedTo.model ||
+    !sameModelSelection(input.current, input.switchedTo) ||
     input.origin.instanceId === input.current.instanceId ||
     // The failure's own reset time beats a usage snapshot that may predate the limit.
     (Number.isFinite(resetMs) && resetMs > input.now) ||
@@ -160,8 +175,15 @@ export function limitSwitchReturnSelection(
     return null;
   }
   const origin = input.providers.find((entry) => entry.instanceId === input.origin.instanceId);
-  // Without a reading there is no evidence the account recovered.
+  // Without a reading there is no evidence the account recovered; with an unknown reset time,
+  // only a reading taken after the limit counts.
   if ((origin?.usageLimits?.windows ?? []).length === 0) return null;
+  if (!Number.isFinite(resetMs)) {
+    const checkedMs = Date.parse(origin?.usageLimits?.checkedAt ?? "");
+    const limitedMs =
+      input.originLimitedAt === null ? Number.NaN : Date.parse(input.originLimitedAt);
+    if (!Number.isFinite(checkedMs) || !(checkedMs > limitedMs)) return null;
+  }
   // Only windows that apply to the model count, as when deciding the account was exhausted.
   const tooLittleLeft = (used: number) => 100 - used < RETURN_MIN_HEADROOM;
   return blockingUsageWindow(origin, input.now, input.origin.model, tooLittleLeft)

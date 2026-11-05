@@ -3,6 +3,7 @@ import {
   EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ModelSelection,
   type ServerProvider,
   UsageLimitSourceId,
 } from "@t3tools/contracts";
@@ -1883,7 +1884,7 @@ describe("going back to the account a usage-limit switch left", () => {
   const back = (
     providers: ServerProvider[],
     options: {
-      current?: { instanceId: ProviderInstanceId; model: string };
+      current?: ModelSelection;
       originResetAt?: string | null;
       enabled?: boolean;
     } = {},
@@ -1891,6 +1892,7 @@ describe("going back to the account a usage-limit switch left", () => {
     limitSwitchReturnSelection({
       origin: web,
       originResetAt: options.originResetAt === undefined ? at(-HOUR_MS) : options.originResetAt,
+      originLimitedAt: at(-2 * HOUR_MS),
       switchedTo: support,
       current: options.current ?? support,
       providers,
@@ -1966,6 +1968,31 @@ describe("going back to the account a usage-limit switch left", () => {
   it("goes back at exactly 10% left, not below", () => {
     expect(back([claude("web", 0, HOUR_MS, 90), claude("support", 40, HOUR_MS)])).toEqual(web);
     expect(back([claude("web", 0, HOUR_MS, 91), claude("support", 40, HOUR_MS)])).toBeNull();
+  });
+
+  it("leaves a thread alone whose model options the user changed since", () => {
+    expect(
+      back([claude("web", 0, HOUR_MS), claude("support", 40, HOUR_MS)], {
+        current: { ...support, options: [{ id: "effort", value: "max" }] },
+      }),
+    ).toBeNull();
+  });
+
+  it("needs a usage reading taken after the limit when the limit's reset time is unknown", () => {
+    const providers = [claude("web", 0, HOUR_MS), claude("support", 40, HOUR_MS)];
+    // The reading (an hour ago) is newer than the limit (two hours ago).
+    expect(back(providers, { originResetAt: null })).toEqual(web);
+    const stale = [
+      provider({
+        ...claude("web", 0, HOUR_MS),
+        usageLimits: {
+          ...claude("web", 0, HOUR_MS).usageLimits!,
+          checkedAt: at(-3 * HOUR_MS),
+        },
+      }),
+      claude("support", 40, HOUR_MS),
+    ];
+    expect(back(stale, { originResetAt: null })).toBeNull();
   });
 
   it("does nothing when switching accounts is off", () => {

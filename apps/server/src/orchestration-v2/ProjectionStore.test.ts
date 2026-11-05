@@ -8085,7 +8085,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const onWeb = yield* addRun(base + 1, "web", "limit-switch-origin:ordinary", "failed");
       yield* limitHit(onWeb, "2099-01-01T05:00:00.000Z");
       yield* addRun(base + 2, "support", `limit-switch:${threadId}:${onWeb}`);
-      assert.deepEqual(yield* store.getLatestLimitSwitch(threadId), {
+      assert.deepInclude(yield* store.getLatestLimitSwitch(threadId), {
         origin: on("web"),
         originResetAt: "2099-01-01T05:00:00.000Z",
         switchedTo: on("support"),
