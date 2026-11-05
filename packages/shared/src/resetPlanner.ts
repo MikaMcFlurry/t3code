@@ -24,6 +24,10 @@ const HOLD_BACK_PENALTY = 50;
 const START_ON_SCHEDULE_BONUS = 10;
 const FORECAST_BONUS = 20;
 const EXPIRING_CREDIT_BONUS = 10;
+/** Weekly quota resetting within a day is lost unless it is used first. */
+const EXPIRING_QUOTA_WINDOW = DAY;
+const EXPIRING_QUOTA_MIN_HEADROOM = 25;
+const EXPIRING_QUOTA_BONUS = 30;
 
 export type PlannedAccountState = "running" | "idle" | "unknown";
 
@@ -275,6 +279,16 @@ export function resetPlanAdjustment(
   ) {
     score += EXPIRING_CREDIT_BONUS;
     reasons.push("a banked reset expires soon");
+  }
+  if (
+    account.state === "running" &&
+    account.weeklyResetAt !== null &&
+    account.weeklyResetAt - now <= EXPIRING_QUOTA_WINDOW &&
+    (account.weeklyRemaining ?? 0) >= EXPIRING_QUOTA_MIN_HEADROOM &&
+    (account.sessionRemaining ?? 100) >= EXPIRING_QUOTA_MIN_HEADROOM
+  ) {
+    score += EXPIRING_QUOTA_BONUS;
+    reasons.push("its weekly quota resets within a day");
   }
   return { score, reasons };
 }
