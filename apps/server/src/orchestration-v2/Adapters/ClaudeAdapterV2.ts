@@ -182,6 +182,7 @@ import * as ServerConfig from "../../config.ts";
 import * as PortScanner from "../../preview/PortScanner.ts";
 import * as ProcessRunner from "../../processRunner.ts";
 import * as ServerSettings from "../../serverSettings.ts";
+import { syncClaudeProjectMemory } from "../../provider/Drivers/ClaudeProjectMemory.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import { spawnAndCollect } from "@t3tools/provider-core/server/snapshotProbe";
 import { signalProcessGroup } from "@t3tools/provider-core/server/processGroup";
@@ -5269,6 +5270,38 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
     adapterOptions.settings.homePath.trim().length > 0 ||
     adapterOptions.environment.CLAUDE_CONFIG_DIR !== hostEnvironment.CLAUDE_CONFIG_DIR;
   const announcedBypassDowngrades = new Set<ThreadId>();
+  // A thread that moves between Claude accounts (by hand or after a usage limit) gets a fresh
+  // config dir; bring the project's auto-memory over from the other accounts before it starts.
+  const syncProjectMemory = Effect.fn("ClaudeAdapterV2.syncProjectMemory")(
+    function* (cwd: string) {
+      if (Option.isNone(serverSettings)) return;
+      const settings = yield* serverSettings.value.getSettings;
+      const otherHomePaths = yield* Effect.forEach(
+        Object.entries(settings.providerInstances ?? {}).filter(
+          ([id, instance]) => id !== adapterOptions.instanceId && instance.driver === "claudeAgent",
+        ),
+        ([, instance]) => {
+          const config = instance.config as { readonly homePath?: unknown } | undefined;
+          return resolveClaudeHomePath(
+            { homePath: typeof config?.homePath === "string" ? config.homePath : "" },
+            hostEnvironment,
+          );
+        },
+      );
+      const written = yield* syncClaudeProjectMemory({ cwd, homePath, otherHomePaths });
+      if (written.length > 0) {
+        yield* Effect.logInfo("claude.project-memory.synced", { cwd, files: written });
+      }
+    },
+    (effect, cwd) =>
+      effect.pipe(
+        Effect.provideService(Path.Path, path),
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("claude.project-memory.sync-failed", { cwd, cause }),
+        ),
+      ),
+  );
   const readBypassSettings = (filePath: string) =>
     fileSystem.readFileString(filePath).pipe(
       Effect.flatMap(decodeClaudeBypassSettings),
@@ -12082,6 +12115,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             return yield* new ClaudeBackgroundWorkBlocksQueryReplacementError();
           }
 
+          if (turnInput.runtimePolicy.cwd) {
+            yield* syncProjectMemory(turnInput.runtimePolicy.cwd);
+          }
           // Read before closing the live process so a bad path leaves it running.
           const appendSystemPromptFileText = yield* readClaudeAppendSystemPromptFile({
             settings: adapterOptions.settings,
