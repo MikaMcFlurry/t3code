@@ -8,6 +8,8 @@
     ".": {
       // Keep vendored reference repositories outside the root project.
       "project": ["*.{js,mjs,cjs,ts,mts,cts}", ".github/**/*.cjs"],
+      // Each workspace's typecheck script runs the `effect-tsgo` binary hoisted from here.
+      "ignoreDependencies": ["@effect/tsgo"],
       "entry": [
         // CodeRabbit loads its configuration by filename.
         ".coderabbit.config.ts",
