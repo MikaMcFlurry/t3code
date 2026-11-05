@@ -10,12 +10,16 @@ import {
   EventId,
   GuestMessageId,
   MessageId,
+  ProjectId,
+  ProviderDriverKind,
+  ProviderInstanceId,
   RuntimeRequestId,
   ThreadId,
   TurnItemId,
   type OrchestrationV2Command,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2StoredEvent,
+  type ServerProvider,
   type UserInputAttachments,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -27,6 +31,7 @@ import {
   resolveAttachmentPath,
 } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
   OrchestratorCommandPreviouslyRejectedError,
@@ -40,6 +45,9 @@ const layerIntakeTest = ServerConfig.layerTest(process.cwd(), {
 }).pipe(
   Layer.provideMerge(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
   Layer.provideMerge(ServerSettings.layerTest()),
+  Layer.provideMerge(
+    Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+  ),
 );
 
 const layerFailingDispatchHandler =
@@ -424,5 +432,211 @@ it.effect("sends a guest message with the guest's files, never ones the client n
     expect(command.attachments).toHaveLength(1);
     // The guest's file, which is already the thread's.
     expect(command.attachments).toEqual([guestFile]);
+  }).pipe(Effect.provide(layerIntakeTest)),
+);
+
+it.effect("sends on another account of the same provider when the chosen one is out of usage", () =>
+  Effect.gen(function* () {
+    const claude = (id: string, usedPercent: number): ServerProvider => ({
+      instanceId: ProviderInstanceId.make(id),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      enabled: true,
+      installed: true,
+      version: null,
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-09-13T00:00:00.000Z",
+      models: [{ slug: "claude-opus-5-5", name: "Opus 5.5", isCustom: false, capabilities: null }],
+      slashCommands: [],
+      skills: [],
+      usageLimits: {
+        checkedAt: "2026-09-13T00:00:00.000Z",
+        windows: [
+          {
+            id: "five_hour",
+            kind: "session",
+            label: "Session",
+            usedPercent,
+            resetsAt: "2099-01-01T00:00:00.000Z",
+          },
+        ],
+      },
+    });
+    const captured: OrchestrationV2ServerCommand[] = [];
+    const selection = {
+      instanceId: ProviderInstanceId.make("claude_work"),
+      model: "claude-opus-5-5",
+    };
+    yield* dispatchCommand({
+      type: "message.dispatch",
+      commandId: CommandId.make("send-limited"),
+      threadId: ThreadId.make("thread-limited"),
+      messageId: MessageId.make("message-limited"),
+      text: "go",
+      attachments: [],
+      dispatchMode: { type: "start_immediately" },
+      createdBy: "user",
+      creationSource: "web",
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            dispatch: layerFailingDispatchHandler(captured),
+            getThreadSnapshotWindow: () =>
+              Effect.succeed({
+                projection: {
+                  thread: {
+                    projectId: ProjectId.make("project-limited"),
+                    modelSelection: selection,
+                  },
+                },
+              } as never),
+            getLatestLimitSwitch: () => Effect.succeed(null),
+          }),
+          Layer.mock(ProviderRegistry.ProviderRegistry)({
+            getProviders: Effect.succeed([
+              claude("claude_work", 100),
+              claude("claude_personal", 30),
+            ]),
+          }),
+          ServerSettings.layerTest({
+            fallbackToAvailableAccounts: true,
+            providerInstances: Object.fromEntries(
+              ["claude_work", "claude_personal"].map((id) => [
+                ProviderInstanceId.make(id),
+                { driver: ProviderDriverKind.make("claudeAgent"), enabled: true },
+              ]),
+            ),
+          }),
+        ),
+      ),
+      Effect.result,
+    );
+    expect(captured[0]).toMatchObject({
+      modelSelection: { instanceId: "claude_personal", model: "claude-opus-5-5" },
+    });
+  }).pipe(Effect.provide(layerIntakeTest)),
+);
+
+it.effect("goes back to the account a usage-limit switch left once it has usage again", () =>
+  Effect.gen(function* () {
+    const claude = (id: string, usedPercent: number, resetsAt: string): ServerProvider => ({
+      instanceId: ProviderInstanceId.make(id),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      enabled: true,
+      installed: true,
+      version: null,
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-09-13T00:00:00.000Z",
+      models: [{ slug: "claude-opus-5-5", name: "Opus 5.5", isCustom: false, capabilities: null }],
+      slashCommands: [],
+      skills: [],
+      usageLimits: {
+        checkedAt: "2026-09-13T00:00:00.000Z",
+        windows: [{ id: "five_hour", kind: "session", label: "Session", usedPercent, resetsAt }],
+      },
+    });
+    const at = (id: string) => ({
+      instanceId: ProviderInstanceId.make(id),
+      model: "claude-opus-5-5",
+    });
+    const send = Effect.fnUntraced(function* (input: {
+      readonly current: ReturnType<typeof at>;
+      readonly webResetsAt: string;
+      readonly dispatchMode?: "start_immediately" | "steer_active";
+      readonly deliveryIntent?: "auto" | "steer" | "restart";
+      readonly busy?: boolean;
+    }) {
+      const captured: OrchestrationV2ServerCommand[] = [];
+      yield* dispatchCommand({
+        type: "message.dispatch",
+        commandId: CommandId.make("send-after-switch"),
+        threadId: ThreadId.make("thread-switched"),
+        messageId: MessageId.make("message-after-switch"),
+        text: "next",
+        attachments: [],
+        dispatchMode: { type: input.dispatchMode ?? "start_immediately" },
+        ...(input.deliveryIntent === undefined ? {} : { deliveryIntent: input.deliveryIntent }),
+        createdBy: "user",
+        creationSource: "web",
+      } as OrchestrationV2Command).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.mock(ThreadManagementService.ThreadManagementService)({
+              dispatch: layerFailingDispatchHandler(captured),
+              getThreadSnapshotWindow: () =>
+                Effect.succeed({
+                  projection: {
+                    thread: {
+                      projectId: ProjectId.make("project-switched"),
+                      modelSelection: input.current,
+                    },
+                  },
+                } as never),
+              getLatestLimitSwitch: () =>
+                Effect.succeed({
+                  origin: at("claude_web"),
+                  originResetAt: "1969-12-31T00:00:00.000Z",
+                  originLimitedAt: "1969-12-30T23:00:00.000Z",
+                  switchedTo: at("claude_support"),
+                  busy: input.busy ?? false,
+                }),
+            }),
+            Layer.mock(ProviderRegistry.ProviderRegistry)({
+              getProviders: Effect.succeed([
+                claude("claude_web", 100, input.webResetsAt),
+                claude("claude_support", 40, "2099-01-01T00:00:00.000Z"),
+                claude("claude_gmail", 10, "2099-01-01T00:00:00.000Z"),
+              ]),
+            }),
+            ServerSettings.layerTest({
+              fallbackToAvailableAccounts: true,
+              providerInstances: Object.fromEntries(
+                ["claude_web", "claude_support", "claude_gmail"].map((id) => [
+                  ProviderInstanceId.make(id),
+                  { driver: ProviderDriverKind.make("claudeAgent"), enabled: true },
+                ]),
+              ),
+            }),
+          ),
+        ),
+        Effect.result,
+      );
+      return captured[0] as { readonly modelSelection?: { readonly instanceId: string } };
+    });
+    // The test clock starts at the epoch.
+    const reset = "1969-12-31T00:00:00.000Z";
+    const notYet = "2099-01-01T00:00:00.000Z";
+
+    // The 5-hour window of the account the thread left has reset: the next turn goes back.
+    expect(
+      (yield* send({ current: at("claude_support"), webResetsAt: reset })).modelSelection,
+    ).toMatchObject({ instanceId: "claude_web" });
+    // Still out of usage there: stay.
+    expect(
+      (yield* send({ current: at("claude_support"), webResetsAt: notYet })).modelSelection,
+    ).toBeUndefined();
+    // The user picked another account since the switch: their choice wins.
+    expect(
+      (yield* send({ current: at("claude_gmail"), webResetsAt: reset })).modelSelection,
+    ).toBeUndefined();
+    // A running or queued turn is never moved, whatever the send resolves to.
+    expect(
+      (yield* send({ current: at("claude_support"), webResetsAt: reset, busy: true }))
+        .modelSelection,
+    ).toBeUndefined();
+    expect(
+      (yield* send({ current: at("claude_support"), webResetsAt: reset, deliveryIntent: "steer" }))
+        .modelSelection,
+    ).toBeUndefined();
+    // Steering the running turn never moves it.
+    expect(
+      (yield* send({
+        current: at("claude_support"),
+        webResetsAt: reset,
+        dispatchMode: "steer_active",
+      })).modelSelection,
+    ).toBeUndefined();
   }).pipe(Effect.provide(layerIntakeTest)),
 );
