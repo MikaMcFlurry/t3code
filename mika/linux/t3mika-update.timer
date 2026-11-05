@@ -1,0 +1,10 @@
+[Unit]
+Description=T3 Mika Update alle 30 Minuten pruefen
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
