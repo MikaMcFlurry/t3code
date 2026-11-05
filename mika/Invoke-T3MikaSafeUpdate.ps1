@@ -102,6 +102,9 @@ try {
   $closedByUpdate = $true
   Write-Log 'T3 Code Mika geschlossen'
 
+  # Install while the app is closed: its electron.exe lives in node_modules. Upstream adds or
+  # bumps dependencies often, and a build on a stale node_modules fails.
+  vp i *>> $log
   vp run build:desktop *>> $log
   if ($LASTEXITCODE -eq 0) {
     Set-Content $stateFile $after
@@ -110,6 +113,7 @@ try {
     Write-Log "FEHLER beim Bauen von $($after.Substring(0,10)) -> baue letzten funktionierenden Stand $($before.Substring(0,10))"
     git switch -q mika/main 2>$null
     git reset -q --hard $before
+    vp i *>> $log
     vp run build:desktop *>> $log
     Set-Content $stateFile $before
     Set-Content $failedFile $upstream
