@@ -1809,8 +1809,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
   const sharedMcpServers = yield* AcpSharedMcpServers;
   const readMcpContext = (threadId: ThreadId | null) =>
     Effect.zip(
-      // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
-      threadId === null ? Effect.succeed(undefined) : mcpSessions.read(threadId),
+      threadId === null ? Effect.undefined : mcpSessions.read(threadId),
       sharedMcpServers.read,
     ).pipe(
       Effect.map(([session, shared]) =>
