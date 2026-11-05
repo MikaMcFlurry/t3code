@@ -6,6 +6,7 @@ import {
   type ServerProvider,
   UsageLimitSourceId,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -25,6 +26,7 @@ import {
   paceRemainingPercent,
   usesChatGptSharing,
   resolveNewThreadModelSelection,
+  availableAccountSelection,
 } from "./usageLimits.ts";
 
 const now = Date.parse("2026-09-03T12:00:00.000Z");
@@ -1784,5 +1786,69 @@ describe("ChatGPT sharing presentation", () => {
         auth: { status: "unauthenticated", subscriptionSharing: true },
       }),
     ).toBe(false);
+  });
+});
+
+describe("account choice when the quota of another account is about to reset", () => {
+  const HOUR_MS = 3_600_000;
+  const at = (offset: number) => DateTime.formatIso(DateTime.makeUnsafe(now + offset));
+  const model = {
+    slug: "claude-opus-5-5",
+    name: "Opus",
+    isCustom: false,
+    isDefault: true,
+    capabilities: null,
+  };
+  const claude = (id: string, sessionUsed: number, weeklyUsed: number, weeklyResetIn: number) =>
+    provider({
+      instanceId: ProviderInstanceId.make(id),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      models: [model],
+      usageLimits: {
+        checkedAt: at(-HOUR_MS),
+        windows: [
+          { ...window, id: "five_hour", usedPercent: sessionUsed, resetsAt: at(HOUR_MS) },
+          {
+            id: "seven_day",
+            kind: "weekly",
+            label: "Weekly",
+            usedPercent: weeklyUsed,
+            windowDurationMins: 7 * 24 * 60,
+            resetsAt: at(weeklyResetIn),
+          },
+        ],
+      },
+    });
+  // Real snapshot: Gmail spent, Support 78%/73% left resetting in 3 days, Web 65%/43% in 18 hours.
+  const choose = (web: ServerProvider) => {
+    const providers = [
+      claude("gmail", 100, 93, 56 * HOUR_MS),
+      claude("support", 22, 27, 75 * HOUR_MS),
+      web,
+    ];
+    return availableAccountSelection({
+      selection: { instanceId: ProviderInstanceId.make("gmail"), model: model.slug },
+      providers,
+      now,
+      settings: {
+        ...DEFAULT_SERVER_SETTINGS,
+        fallbackToAvailableAccounts: true,
+        providerInstances: Object.fromEntries(
+          providers.map((entry) => [
+            entry.instanceId,
+            { driver: entry.driver, enabled: true, config: {} },
+          ]),
+        ),
+      },
+    })?.instanceId;
+  };
+
+  it("uses the account whose weekly quota resets within a day before the one with most headroom", () => {
+    expect(choose(claude("web", 35, 57, 18 * HOUR_MS))).toBe("web");
+  });
+
+  it("falls back to most headroom when nothing resets soon or the soon-resetting account is low", () => {
+    expect(choose(claude("web", 35, 57, 72 * HOUR_MS))).toBe("support");
+    expect(choose(claude("web", 35, 90, 18 * HOUR_MS))).toBe("support");
   });
 });

@@ -115,8 +115,8 @@ export function availableAccountSelection(
     return null;
   }
   return (
-    automaticFallbackSelections(input.selection, provider, input.providers).find((candidate) =>
-      isUsableSelection(candidate, input),
+    automaticFallbackSelections(input.selection, provider, input.providers, input.now).find(
+      (candidate) => isUsableSelection(candidate, input),
     ) ?? null
   );
 }
@@ -146,11 +146,32 @@ export function resolveNewThreadModelSelection(
 }
 
 /** Other accounts of the exhausted provider first, then other providers, most headroom first. */
+/** Weekly quota that resets within this window is lost unless it is used first. */
+const EXPIRING_QUOTA_WINDOW = DAY;
+/** Below this headroom an account is not worth moving work to just because it resets soon. */
+const EXPIRING_QUOTA_MIN_HEADROOM = 25;
+
+/**
+ * Other accounts of the exhausted provider first, then other providers. Within each, an account
+ * with real headroom whose weekly window resets within a day goes first (soonest reset first):
+ * its remaining quota is lost at the reset, while other accounts keep theirs. The rest follow by
+ * headroom.
+ */
 function automaticFallbackSelections(
   selection: ModelSelection,
   exhausted: ServerProvider,
   providers: readonly ServerProvider[],
+  now: number,
 ): ModelSelection[] {
+  const weeklyResetSoon = (entry: ServerProvider) => {
+    let soonest: number | null = null;
+    for (const window of entry.usageLimits?.windows ?? []) {
+      if (window.kind !== "weekly" || !window.resetsAt) continue;
+      const at = Date.parse(window.resetsAt);
+      if (Number.isFinite(at) && at > now && (soonest === null || at < soonest)) soonest = at;
+    }
+    return soonest !== null && soonest - now <= EXPIRING_QUOTA_WINDOW ? soonest : null;
+  };
   // Only accounts that report limits: an unknown balance could be pay-per-use or already spent.
   const headroom = (entry: ServerProvider) => {
     const windows = entry.usageLimits?.unavailable ? [] : (entry.usageLimits?.windows ?? []);
@@ -179,9 +200,16 @@ function automaticFallbackSelections(
         sameDriver && model.slug === selection.model
           ? { ...selection, instanceId: entry.instanceId }
           : { instanceId: entry.instanceId, model: model.slug };
-      return [{ candidate, sameDriver, left }];
+      const expiresAt = left >= EXPIRING_QUOTA_MIN_HEADROOM ? weeklyResetSoon(entry) : null;
+      return [{ candidate, sameDriver, left, expiresAt }];
     })
-    .sort((a, b) => Number(b.sameDriver) - Number(a.sameDriver) || b.left - a.left)
+    .sort(
+      (a, b) =>
+        Number(b.sameDriver) - Number(a.sameDriver) ||
+        Number(b.expiresAt !== null) - Number(a.expiresAt !== null) ||
+        (a.expiresAt ?? 0) - (b.expiresAt ?? 0) ||
+        b.left - a.left,
+    )
     .map(({ candidate }) => candidate);
 }
 
