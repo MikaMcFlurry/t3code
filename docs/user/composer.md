@@ -389,3 +389,15 @@ including filenames or folders containing `#` or `?`.
 
 On mobile, select a PDF attachment or link to open it. iOS uses the native viewer;
 Android opens a compatible installed file viewer.
+
+## Voice input on Windows
+
+In the Windows desktop app, the microphone next to **Attach files** opens Windows voice typing
+(the same panel as <kbd>Win</kbd>+<kbd>H</kbd>) for the composer. Windows adds punctuation and
+types the text at the cursor. Press the microphone again, or <kbd>Esc</kbd>, to stop.
+
+Voice typing listens in the window's input language. Before it opens the panel, T3 Code switches
+its window to the input language of your Windows display language, so a second language with the
+same keyboard layout (for example English next to German) can't take over unnoticed. If Windows
+still transcribes in the wrong language, download your language's speech files under
+**Settings → Accessibility → Speech**.
