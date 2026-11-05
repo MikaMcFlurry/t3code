@@ -381,3 +381,24 @@ describe("remaining percent in the plan", () => {
     ]);
   });
 });
+
+describe("quota that resets soon", () => {
+  it("prefers an account whose weekly quota resets within a day, when it still has headroom", () => {
+    const providers = [
+      account("claude_support", { used: 27, resetsIn: 3 * DAY }),
+      account("claude_web", { used: 57, resetsIn: 18 * HOUR }),
+      account("claude_low", { used: 90, resetsIn: 10 * HOUR }),
+    ];
+    const plan = planUsageResets({
+      providers,
+      settings: settings({ usageResetStaggering: false }),
+      now,
+    });
+    expect(resetPlanAdjustment(plan, "claude_web", now)).toEqual({
+      score: 30,
+      reasons: ["its weekly quota resets within a day"],
+    });
+    expect(resetPlanAdjustment(plan, "claude_support", now).score).toBe(0);
+    expect(resetPlanAdjustment(plan, "claude_low", now).score).toBe(0);
+  });
+});
