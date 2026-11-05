@@ -1944,6 +1944,30 @@ describe("going back to the account a usage-limit switch left", () => {
     expect(back(providers, { current: { ...support, model: "claude-sonnet-5-5" } })).toBeNull();
   });
 
+  it("counts only the usage windows that apply to the model it goes back to", () => {
+    // Found by an independent test pass: an Antigravity account whose Gemini pool is spent
+    // still runs Claude models from its third-party pool.
+    const antigravity = (geminiUsed: number, thirdPartyUsed: number) =>
+      provider({
+        instanceId: ProviderInstanceId.make("web"),
+        driver: ProviderDriverKind.make("antigravity"),
+        usageLimits: {
+          checkedAt: at(-HOUR_MS),
+          windows: [
+            { ...window, id: "gemini-weekly", usedPercent: geminiUsed, resetsAt: at(HOUR_MS) },
+            { ...window, id: "3p-weekly", usedPercent: thirdPartyUsed, resetsAt: at(HOUR_MS) },
+          ],
+        },
+      });
+    expect(back([antigravity(100, 20), claude("support", 40, HOUR_MS)])).toEqual(web);
+    expect(back([antigravity(10, 95), claude("support", 40, HOUR_MS)])).toBeNull();
+  });
+
+  it("goes back at exactly 10% left, not below", () => {
+    expect(back([claude("web", 0, HOUR_MS, 90), claude("support", 40, HOUR_MS)])).toEqual(web);
+    expect(back([claude("web", 0, HOUR_MS, 91), claude("support", 40, HOUR_MS)])).toBeNull();
+  });
+
   it("does nothing when switching accounts is off", () => {
     expect(
       back([claude("web", 0, -HOUR_MS), claude("support", 40, HOUR_MS)], { enabled: false }),

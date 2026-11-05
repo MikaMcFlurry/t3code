@@ -28,10 +28,20 @@ export function exhaustedUsageWindow(
   now: number,
   model?: string,
 ) {
+  return blockingUsageWindow(provider, now, model, (used) => used >= 100);
+}
+
+/** The current window that keeps `model` from running, with `blocks` deciding by percent used. */
+function blockingUsageWindow(
+  provider: ServerProvider | undefined,
+  now: number,
+  model: string | undefined,
+  blocks: (usedPercent: number) => boolean,
+) {
   const windows = provider?.usageLimits?.windows ?? [];
   const exhausted = windows.filter(
     (window) =>
-      (window.usedPercent ?? 0) >= 100 &&
+      blocks(window.usedPercent ?? 0) &&
       (model === undefined || window.modelIds === undefined || window.modelIds.includes(model)) &&
       (model === undefined ||
         window.providerIds === undefined ||
@@ -150,16 +160,13 @@ export function limitSwitchReturnSelection(
     return null;
   }
   const origin = input.providers.find((entry) => entry.instanceId === input.origin.instanceId);
-  const current = (origin?.usageLimits?.windows ?? []).filter(
-    (window) =>
-      !window.resetsAt ||
-      !Number.isFinite(Date.parse(window.resetsAt)) ||
-      Date.parse(window.resetsAt) > input.now,
-  );
   // Without a reading there is no evidence the account recovered.
   if ((origin?.usageLimits?.windows ?? []).length === 0) return null;
-  const tightest = Math.min(100, ...current.map((window) => 100 - (window.usedPercent ?? 0)));
-  return tightest >= RETURN_MIN_HEADROOM ? input.origin : null;
+  // Only windows that apply to the model count, as when deciding the account was exhausted.
+  const tooLittleLeft = (used: number) => 100 - used < RETURN_MIN_HEADROOM;
+  return blockingUsageWindow(origin, input.now, input.origin.model, tooLittleLeft)
+    ? null
+    : input.origin;
 }
 
 export function resolveNewThreadModelSelection(
