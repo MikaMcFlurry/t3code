@@ -8015,38 +8015,99 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
     }),
   );
 
-  it.effect("finds the account a usage-limit switch moved the thread away from", () =>
+  it.effect("finds where a chain of usage-limit account switches started", () =>
     Effect.gen(function* () {
       const store = yield* ProjectionStore.ProjectionStoreV2;
       const threadId = yield* addRolledBackRecoveryCandidate("limit-switch-origin");
       assert.isNull(yield* store.getLatestLimitSwitch(threadId));
       const original = (yield* store.getThreadProjection(threadId)).runs[0]!;
       const now = yield* DateTime.now;
-      const switchedTo = ProviderInstanceId.make("claude-support");
-      const addRun = (ordinal: number, userMessageId: string) =>
+      const on = (id: string) => ({
+        ...original.modelSelection,
+        instanceId: ProviderInstanceId.make(id),
+      });
+      const addRun = (
+        ordinal: number,
+        account: string,
+        userMessageId: string,
+        status: typeof original.status = "completed",
+      ) =>
+        store
+          .apply({
+            id: EventId.make(`event:limit-switch-origin:run:${ordinal}:${status}`),
+            type: ordinal === original.ordinal ? "run.updated" : "run.created",
+            threadId,
+            occurredAt: now,
+            payload: {
+              ...original,
+              id: RunId.make(`${original.id}:${ordinal}`),
+              ordinal,
+              providerInstanceId: ProviderInstanceId.make(account),
+              modelSelection: on(account),
+              userMessageId: MessageId.make(userMessageId),
+              status,
+            },
+          })
+          .pipe(Effect.as(RunId.make(`${original.id}:${ordinal}`)));
+      const limitHit = (runId: RunId, resetAt: string) =>
         store.apply({
-          id: EventId.make(`event:limit-switch-origin:run:${ordinal}`),
-          type: "run.created",
+          id: EventId.make(`event:limit-switch-origin:limit:${runId}`),
+          type: "turn-item.updated",
           threadId,
           occurredAt: now,
           payload: {
-            ...original,
-            id: RunId.make(`${original.id}:switch:${ordinal}`),
-            ordinal,
-            providerInstanceId: switchedTo,
-            modelSelection: { ...original.modelSelection, instanceId: switchedTo },
-            userMessageId: MessageId.make(userMessageId),
-            status: "completed",
+            id: TurnItemId.make(`${runId}:limit`),
+            threadId,
+            runId,
+            nodeId: original.rootNodeId,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            status: "failed",
+            title: "Usage limit reached",
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            type: "error",
+            failure: {
+              class: "usage_limit",
+              message: "Limit reached.",
+              resetAt,
+              code: null,
+              retryable: null,
+            },
           },
         });
-      // An ordinary later message is not a switch.
-      yield* addRun(original.ordinal + 1, "limit-switch-origin:ordinary");
-      assert.isNull(yield* store.getLatestLimitSwitch(threadId));
-      yield* addRun(original.ordinal + 2, `limit-switch:${threadId}:${original.id}`);
+      const base = original.ordinal * 10;
+      // An ordinary run on web hits its limit; the thread moves to support.
+      const onWeb = yield* addRun(base + 1, "web", "limit-switch-origin:ordinary", "failed");
+      yield* limitHit(onWeb, "2099-01-01T05:00:00.000Z");
+      yield* addRun(base + 2, "support", `limit-switch:${threadId}:${onWeb}`);
       assert.deepEqual(yield* store.getLatestLimitSwitch(threadId), {
-        origin: original.modelSelection,
-        switchedTo,
+        origin: on("web"),
+        originResetAt: "2099-01-01T05:00:00.000Z",
+        switchedTo: on("support"),
+        busy: false,
       });
+      // Support runs out too and the thread moves on to gmail: web is still where it started.
+      const supportLimited = yield* addRun(
+        base + 3,
+        "support",
+        "limit-switch-origin:next",
+        "failed",
+      );
+      yield* limitHit(supportLimited, "2099-01-01T06:00:00.000Z");
+      yield* addRun(base + 4, "gmail", `limit-switch:${threadId}:${supportLimited}`);
+      assert.deepInclude(yield* store.getLatestLimitSwitch(threadId), {
+        origin: on("web"),
+        originResetAt: "2099-01-01T05:00:00.000Z",
+        switchedTo: on("gmail"),
+      });
+      // A queued turn keeps the thread where it is.
+      yield* addRun(base + 5, "gmail", "limit-switch-origin:queued", "queued");
+      assert.deepInclude(yield* store.getLatestLimitSwitch(threadId), { busy: true });
     }),
   );
 

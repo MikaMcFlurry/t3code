@@ -178,6 +178,14 @@ export type ProjectionRecoveryKind =
   | "subagent-results"
   | "delegated-completions";
 
+export interface ProjectionLimitSwitch {
+  readonly origin: OrchestrationV2Run["modelSelection"];
+  /** When the origin account's limit resets, from the failure that started the chain. */
+  readonly originResetAt: string | null;
+  readonly switchedTo: OrchestrationV2Run["modelSelection"];
+  readonly busy: boolean;
+}
+
 export type ProjectionLimitRecoveryCandidate = Pick<
   OrchestrationV2ThreadShell,
   | "id"
@@ -602,16 +610,13 @@ export interface ProjectionStoreV2Shape {
     readonly switchAccountsSince?: DateTime.Utc;
   }) => Effect.Effect<ReadonlyArray<ProjectionLimitRecoveryCandidate>, ProjectionStoreV2Error>;
   /**
-   * The thread's newest usage-limit account switch: the selection of the run that hit the limit
-   * and the account the switch moved the thread to. Null when the thread never switched.
+   * Where the thread's latest chain of usage-limit account switches started (A in A→B→C) and
+   * the selection it runs on now, with A's limit reset and whether a run is active or queued.
+   * Null when the thread never switched.
    */
-  readonly getLatestLimitSwitch: (threadId: ThreadId) => Effect.Effect<
-    {
-      readonly origin: OrchestrationV2Run["modelSelection"];
-      readonly switchedTo: ProviderInstanceId;
-    } | null,
-    ProjectionStoreV2Error
-  >;
+  readonly getLatestLimitSwitch: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ProjectionLimitSwitch | null, ProjectionStoreV2Error>;
   /** Epoch ms of the next armed reset or snooze end after `now`, when a waiting thread becomes a candidate. */
   readonly getLimitRecoveryWakeAt: (
     now: DateTime.Utc,
@@ -4708,8 +4713,24 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         const rows = yield* sql<{
           readonly switched_payload: string;
           readonly origin_payload: string;
+          readonly origin_reset_at: string | null;
+          readonly busy: number;
         }>`
-          SELECT switched.payload_json AS switched_payload, origin.payload_json AS origin_payload
+          SELECT
+            switched.payload_json AS switched_payload,
+            origin.payload_json AS origin_payload,
+            (
+              SELECT MAX(json_extract(item.payload_json, '$.failure.resetAt'))
+              FROM orchestration_v2_projection_turn_items AS item
+              WHERE item.run_id = origin.run_id
+                AND item.type = 'error'
+                AND json_extract(item.payload_json, '$.failure.class') = 'usage_limit'
+            ) AS origin_reset_at,
+            EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_runs AS active
+              WHERE active.thread_id = ${threadId}
+                AND active.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+            ) AS busy
           FROM orchestration_v2_projection_runs AS switched
           JOIN orchestration_v2_projection_runs AS origin
             ON origin.thread_id = switched.thread_id
@@ -4717,15 +4738,28 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           WHERE switched.thread_id = ${threadId}
             AND substr(json_extract(switched.payload_json, '$.userMessageId'), 1, ${prefix.length}) = ${prefix}
           ORDER BY switched.ordinal DESC
-          LIMIT 1
         `;
-        const row = rows[0];
-        if (row === undefined) return null;
-        const [switched, origin] = yield* Effect.all([
-          decodeRunPayload(row.switched_payload),
-          decodeRunPayload(row.origin_payload),
-        ]);
-        return { origin: origin.modelSelection, switchedTo: switched.providerInstanceId };
+        if (rows.length === 0) return null;
+        const switches = yield* Effect.forEach(rows, (row) =>
+          Effect.all([
+            decodeRunPayload(row.switched_payload),
+            decodeRunPayload(row.origin_payload),
+          ]),
+        );
+        // Walk back while each switch left the account the previous one moved to: A→B, B→C.
+        let start = 0;
+        while (
+          start + 1 < switches.length &&
+          switches[start]![1].providerInstanceId === switches[start + 1]![0].providerInstanceId
+        ) {
+          start += 1;
+        }
+        return {
+          origin: switches[start]![1].modelSelection,
+          originResetAt: rows[start]!.origin_reset_at,
+          switchedTo: switches[0]![0].modelSelection,
+          busy: rows[0]!.busy === 1,
+        } satisfies ProjectionLimitSwitch;
       },
       Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
     );

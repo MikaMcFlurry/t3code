@@ -3541,6 +3541,110 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
       }),
     );
 
+    it.effect(
+      "tracks a child's continuation on another account after a usage limit as a follow-up",
+      () =>
+        Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const eventSink = yield* EventSink.EventSinkV2;
+          const now = yield* DateTime.now;
+          const parentThreadId = ThreadId.make("thread:limit-switch-parent");
+          const projectId = ProjectId.make("project:limit-switch");
+          const parentRunId = RunId.make("run:limit-switch-parent");
+          const rootNodeId = NodeId.make("node:limit-switch-parent");
+          yield* seedParentWithTerminalTask({
+            threadId: parentThreadId,
+            projectId,
+            runId: parentRunId,
+            rootNodeId,
+            taskId: NodeId.make("node:limit-switch-seed"),
+            deliveryState: "acknowledged",
+            now,
+          });
+          const child = yield* seedRestartCancelledChild({
+            parentThreadId,
+            projectId,
+            parentRunId,
+            rootNodeId,
+            name: "limit-switch-child",
+            completionWake: "always",
+            continuationPending: false,
+            runStatus: "completed",
+            now,
+          });
+          const childRun = (yield* orchestrator.getThreadProjection(child.childThreadId)).runs[0]!;
+          yield* eventSink.write({
+            commandId: reconcileCommandId("limit-switch-child-limited"),
+            events: [
+              {
+                id: EventId.make("event:limit-switch-child-failed"),
+                type: "run.updated",
+                threadId: child.childThreadId,
+                runId: childRun.id,
+                occurredAt: now,
+                payload: { ...childRun, status: "failed", completedAt: now },
+              },
+              {
+                id: EventId.make("event:limit-switch-child-error"),
+                type: "turn-item.updated",
+                threadId: child.childThreadId,
+                occurredAt: now,
+                payload: {
+                  id: TurnItemId.make("turn-item:limit-switch-child-error"),
+                  type: "error",
+                  threadId: child.childThreadId,
+                  runId: childRun.id,
+                  nodeId: childRun.rootNodeId,
+                  providerThreadId: null,
+                  providerTurnId: null,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal: 1,
+                  status: "failed",
+                  title: "Usage limit reached",
+                  startedAt: now,
+                  completedAt: now,
+                  updatedAt: now,
+                  failure: {
+                    class: "usage_limit",
+                    message: "Plan limit reached.",
+                    code: "usageLimitExceeded",
+                    retryable: null,
+                    resetAt: DateTime.formatIso(DateTime.add(now, { minutes: 1 })),
+                  },
+                },
+              },
+            ],
+          });
+          yield* orchestrator.recoverDelegatedTasks;
+          // What UsageLimitRecoveryWorker dispatches: a T3 Code notice continuing the limited run.
+          const resume = {
+            type: "message.dispatch",
+            commandId: CommandId.make(`limit-switch:${child.childThreadId}:${childRun.id}`),
+            messageId: MessageId.make(`limit-switch:${child.childThreadId}:${childRun.id}`),
+            threadId: child.childThreadId,
+            manualContinuationOfRunId: childRun.id,
+            modelSelection: childRun.modelSelection,
+            text: "Continue where you left off.",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "agent",
+            creationSource: "server",
+          } satisfies OrchestrationV2Command;
+          yield* orchestrator.dispatch(resume);
+
+          const resumed = (yield* orchestrator.getThreadProjection(child.childThreadId)).runs.find(
+            (run) => run.userMessageId === resume.messageId,
+          );
+          assert.isDefined(resumed?.delegatedTaskId);
+          const followup = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+            (task) => task.id === resumed?.delegatedTaskId,
+          );
+          assert.equal(followup?.childThreadId, child.childThreadId);
+          assert.isNull(followup?.result);
+        }),
+    );
+
     it.effect("serializes a recovered child answer with its parent and tracks the follow-up", () =>
       Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;

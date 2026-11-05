@@ -32,7 +32,6 @@ import {
 } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
-import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
   OrchestratorCommandPreviouslyRejectedError,
@@ -492,6 +491,7 @@ it.effect("sends on another account of the same provider when the chosen one is 
                   },
                 },
               } as never),
+            getLatestLimitSwitch: () => Effect.succeed(null),
           }),
           Layer.mock(ProviderRegistry.ProviderRegistry)({
             getProviders: Effect.succeed([
@@ -545,6 +545,8 @@ it.effect("goes back to the account a usage-limit switch left once it has usage 
       readonly current: ReturnType<typeof at>;
       readonly webResetsAt: string;
       readonly dispatchMode?: "start_immediately" | "steer_active";
+      readonly deliveryIntent?: "auto" | "steer" | "restart";
+      readonly busy?: boolean;
     }) {
       const captured: OrchestrationV2ServerCommand[] = [];
       yield* dispatchCommand({
@@ -555,6 +557,7 @@ it.effect("goes back to the account a usage-limit switch left once it has usage 
         text: "next",
         attachments: [],
         dispatchMode: { type: input.dispatchMode ?? "start_immediately" },
+        ...(input.deliveryIntent === undefined ? {} : { deliveryIntent: input.deliveryIntent }),
         createdBy: "user",
         creationSource: "web",
       } as OrchestrationV2Command).pipe(
@@ -571,12 +574,12 @@ it.effect("goes back to the account a usage-limit switch left once it has usage 
                     },
                   },
                 } as never),
-            }),
-            Layer.mock(ProjectionStore.ProjectionStoreV2)({
               getLatestLimitSwitch: () =>
                 Effect.succeed({
                   origin: at("claude_web"),
-                  switchedTo: ProviderInstanceId.make("claude_support"),
+                  originResetAt: null,
+                  switchedTo: at("claude_support"),
+                  busy: input.busy ?? false,
                 }),
             }),
             Layer.mock(ProviderRegistry.ProviderRegistry)({
@@ -616,6 +619,15 @@ it.effect("goes back to the account a usage-limit switch left once it has usage 
     // The user picked another account since the switch: their choice wins.
     expect(
       (yield* send({ current: at("claude_gmail"), webResetsAt: reset })).modelSelection,
+    ).toBeUndefined();
+    // A running or queued turn is never moved, whatever the send resolves to.
+    expect(
+      (yield* send({ current: at("claude_support"), webResetsAt: reset, busy: true }))
+        .modelSelection,
+    ).toBeUndefined();
+    expect(
+      (yield* send({ current: at("claude_support"), webResetsAt: reset, deliveryIntent: "steer" }))
+        .modelSelection,
     ).toBeUndefined();
     // Steering the running turn never moves it.
     expect(

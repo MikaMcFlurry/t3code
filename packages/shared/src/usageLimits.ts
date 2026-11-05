@@ -125,37 +125,40 @@ export function availableAccountSelection(
 const RETURN_MIN_HEADROOM = 10;
 
 /**
- * The selection a usage-limit switch moved a thread away from, once its account has usage again
- * (every window at least `RETURN_MIN_HEADROOM` percent left). Null unless the thread is still on
- * the account the switch picked, so a later manual model change wins.
+ * The selection a usage-limit switch moved a thread away from, once the limit that caused it
+ * has reset and its account reports at least `RETURN_MIN_HEADROOM` percent left in every window.
+ * Null unless the thread still runs the model the switch picked, so a later manual change wins.
  */
 export function limitSwitchReturnSelection(
   input: AccountChoiceInput & {
     readonly origin: ModelSelection;
-    readonly switchedTo: ProviderInstanceId;
+    readonly originResetAt: string | null;
+    readonly switchedTo: ModelSelection;
     readonly current: ModelSelection;
   },
 ): ModelSelection | null {
   if (!input.settings?.fallbackToAvailableAccounts) return null;
+  const resetMs = input.originResetAt === null ? Number.NaN : Date.parse(input.originResetAt);
   if (
-    input.current.instanceId !== input.switchedTo ||
+    input.current.instanceId !== input.switchedTo.instanceId ||
+    input.current.model !== input.switchedTo.model ||
     input.origin.instanceId === input.current.instanceId ||
+    // The failure's own reset time beats a usage snapshot that may predate the limit.
+    (Number.isFinite(resetMs) && resetMs > input.now) ||
     !isUsableSelection(input.origin, input)
   ) {
     return null;
   }
   const origin = input.providers.find((entry) => entry.instanceId === input.origin.instanceId);
-  const tightest = Math.min(
-    100,
-    ...(origin?.usageLimits?.windows ?? [])
-      .filter(
-        (window) =>
-          !window.resetsAt ||
-          !Number.isFinite(Date.parse(window.resetsAt)) ||
-          Date.parse(window.resetsAt) > input.now,
-      )
-      .map((window) => 100 - (window.usedPercent ?? 0)),
+  const current = (origin?.usageLimits?.windows ?? []).filter(
+    (window) =>
+      !window.resetsAt ||
+      !Number.isFinite(Date.parse(window.resetsAt)) ||
+      Date.parse(window.resetsAt) > input.now,
   );
+  // Without a reading there is no evidence the account recovered.
+  if ((origin?.usageLimits?.windows ?? []).length === 0) return null;
+  const tightest = Math.min(100, ...current.map((window) => 100 - (window.usedPercent ?? 0)));
   return tightest >= RETURN_MIN_HEADROOM ? input.origin : null;
 }
 

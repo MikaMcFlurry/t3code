@@ -1882,11 +1882,16 @@ describe("going back to the account a usage-limit switch left", () => {
   const support = { instanceId: ProviderInstanceId.make("support"), model };
   const back = (
     providers: ServerProvider[],
-    options: { current?: typeof web; enabled?: boolean } = {},
+    options: {
+      current?: { instanceId: ProviderInstanceId; model: string };
+      originResetAt?: string | null;
+      enabled?: boolean;
+    } = {},
   ) =>
     limitSwitchReturnSelection({
       origin: web,
-      switchedTo: support.instanceId,
+      originResetAt: options.originResetAt === undefined ? at(-HOUR_MS) : options.originResetAt,
+      switchedTo: support,
       current: options.current ?? support,
       providers,
       now,
@@ -1911,20 +1916,32 @@ describe("going back to the account a usage-limit switch left", () => {
     expect(back([claude("web", 100, HOUR_MS), claude("support", 40, HOUR_MS)])).toBeNull();
   });
 
-  it("stays while the account it left has almost no headroom", () => {
-    expect(back([claude("web", 0, HOUR_MS, 95), claude("support", 40, HOUR_MS)])).toBeNull();
+  it("trusts the limit's own reset time over a usage reading taken before the limit", () => {
+    expect(
+      back([claude("web", 20, HOUR_MS), claude("support", 40, HOUR_MS)], {
+        originResetAt: at(HOUR_MS),
+      }),
+    ).toBeNull();
   });
 
-  it("leaves a thread alone that the user moved to another account since", () => {
+  it("stays while the account it left has almost no headroom or reports no limits", () => {
+    expect(back([claude("web", 0, HOUR_MS, 95), claude("support", 40, HOUR_MS)])).toBeNull();
+    const unreported = provider({
+      instanceId: ProviderInstanceId.make("web"),
+      driver: ProviderDriverKind.make("claudeAgent"),
+    });
+    expect(back([unreported, claude("support", 40, HOUR_MS)])).toBeNull();
+  });
+
+  it("leaves a thread alone whose account or model the user changed since", () => {
+    const providers = [
+      claude("web", 0, HOUR_MS),
+      claude("support", 40, HOUR_MS),
+      claude("gmail", 0, HOUR_MS),
+    ];
     const gmail = { instanceId: ProviderInstanceId.make("gmail"), model };
-    expect(
-      back(
-        [claude("web", 0, HOUR_MS), claude("support", 40, HOUR_MS), claude("gmail", 0, HOUR_MS)],
-        {
-          current: gmail,
-        },
-      ),
-    ).toBeNull();
+    expect(back(providers, { current: gmail })).toBeNull();
+    expect(back(providers, { current: { ...support, model: "claude-sonnet-5-5" } })).toBeNull();
   });
 
   it("does nothing when switching accounts is off", () => {

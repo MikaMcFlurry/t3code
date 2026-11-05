@@ -7,19 +7,16 @@ import type {
   ProjectId,
   ServerProvider,
   ServerSettings as ServerSettingsValue,
-  ThreadId,
 } from "@t3tools/contracts";
 import { availableAccountSelection, limitSwitchReturnSelection } from "@t3tools/shared/usageLimits";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as Orchestrator from "./Orchestrator.ts";
-import * as ProjectionStore from "./ProjectionStore.ts";
 
 import * as AttachmentClaims from "./AttachmentClaims.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
@@ -134,22 +131,17 @@ const withAvailableAccount = Effect.fn("ThreadMessageIntake.withAvailableAccount
   if (window === null) return command;
   const { thread } = window.projection;
   const selection = command.modelSelection ?? thread.modelSelection;
-  const returned = yield* returnAfterLimitSwitch(
-    command.threadId,
-    selection,
-    thread.projectId,
-    choose,
-  );
+  const returned = yield* returnAfterLimitSwitch(command, selection, thread.projectId, choose);
   const next = choose(returned ?? selection, thread.projectId);
   return next === selection ? command : { ...command, modelSelection: next };
 });
 
 /**
  * The account a usage-limit switch moved this thread away from, once it has usage again. Only
- * at the start of a turn, so a running turn is never cut off to move it back.
+ * for a turn that starts now: never while a run is active or queued, so no turn is cut off.
  */
 const returnAfterLimitSwitch = Effect.fn("ThreadMessageIntake.returnAfterLimitSwitch")(function* (
-  threadId: ThreadId,
+  command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
   current: ModelSelection,
   projectId: ProjectId,
   choice: {
@@ -158,16 +150,17 @@ const returnAfterLimitSwitch = Effect.fn("ThreadMessageIntake.returnAfterLimitSw
     readonly settings: ServerSettingsValue;
   },
 ) {
-  const projections = yield* Effect.serviceOption(ProjectionStore.ProjectionStoreV2);
-  if (Option.isNone(projections)) return null;
-  const latest = yield* projections.value
-    .getLatestLimitSwitch(threadId)
+  if (command.deliveryIntent === "steer" || command.deliveryIntent === "restart") return null;
+  const threads = yield* ThreadManagement.ThreadManagementService;
+  const latest = yield* threads
+    .getLatestLimitSwitch(command.threadId)
     .pipe(Effect.orElseSucceed(() => null));
-  if (latest === null) return null;
+  if (latest === null || latest.busy) return null;
   return limitSwitchReturnSelection({
     ...choice,
     projectId,
     origin: latest.origin,
+    originResetAt: latest.originResetAt,
     switchedTo: latest.switchedTo,
     current,
   });

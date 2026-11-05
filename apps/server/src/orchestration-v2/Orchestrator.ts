@@ -162,6 +162,7 @@ import {
   applyToProjection,
   emptyProjection,
   threadShellFromProjection,
+  type ProjectionLimitSwitch,
   ProjectionStoreV2,
   type ProjectionRecordField,
   type ProjectionTimelinePage,
@@ -443,6 +444,9 @@ export interface OrchestratorV2Shape {
     fields: ReadonlyArray<K>,
     filter?: ProjectionRecordFilter,
   ) => Effect.Effect<ProjectionRecords<K>, OrchestratorV2Error>;
+  readonly getLatestLimitSwitch: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ProjectionLimitSwitch | null, OrchestratorV2Error>;
   readonly listAppOwnedChildThreadIds: (
     threadId: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ThreadId>, OrchestratorV2Error>;
@@ -760,7 +764,8 @@ function mayStartSubagentFollowup(
   return (
     command.createdBy === "user" ||
     command.creationSource === "mcp" ||
-    command.usageLimitContinuationOfRunId !== undefined
+    command.usageLimitContinuationOfRunId !== undefined ||
+    command.manualContinuationOfRunId !== undefined
   );
 }
 
@@ -9303,6 +9308,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       (command.notification === undefined &&
         command.createdBy !== "user" &&
         command.usageLimitContinuationOfRunId === undefined &&
+        command.manualContinuationOfRunId === undefined &&
         command.senderThreadId !== undefined &&
         command.senderThreadId !== parentThreadId)
     )
@@ -15714,6 +15720,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
       },
     ),
+    getLatestLimitSwitch: Effect.fn("OrchestratorV2.getLatestLimitSwitch")(function (threadId) {
+      return projectionStore
+        .getLatestLimitSwitch(threadId)
+        .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
+    }),
     listAppOwnedChildThreadIds: Effect.fn("OrchestratorV2.listAppOwnedChildThreadIds")(
       function (threadId) {
         return projectionStore
