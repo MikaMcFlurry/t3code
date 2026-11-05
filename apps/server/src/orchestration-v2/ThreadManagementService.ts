@@ -452,6 +452,7 @@ export interface ThreadManagementServiceShape {
     ServerEnvironment.ServerEnvironmentIdentity
   >;
   readonly getThreadSnapshotWindow: Orchestrator.OrchestratorV2["Service"]["getThreadSnapshotWindow"];
+  readonly getLatestLimitSwitch: Orchestrator.OrchestratorV2["Service"]["getLatestLimitSwitch"];
   readonly getProjectThreadRecords: <K extends ProjectionRecordField>(
     input: { readonly projectId: ProjectId; readonly threadId: ThreadId },
     fields: ReadonlyArray<K>,
@@ -1882,6 +1883,7 @@ const make = Effect.gen(function* () {
     getThreadSnapshot,
     getThreadTranscript,
     getThreadSnapshotWindow,
+    getLatestLimitSwitch: orchestrator.getLatestLimitSwitch,
     getProjectThreadRecords,
     getAgentAwarenessSnapshot: orchestrator.getAgentAwarenessSnapshot,
     getShellSnapshot: orchestrator.getShellSnapshot,
