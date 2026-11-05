@@ -6,6 +6,8 @@ import * as Settings from "../../../serverSettings.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { readCaller, unavailable } from "../../threadAccess.ts";
+import { environmentAvailability } from "@t3tools/shared/environmentSchedule";
+import * as DateTime from "effect/DateTime";
 import * as HostResources from "../../../resourceTelemetry/HostResources.ts";
 import * as PeerForwarding from "../../../peer/PeerForwarding.ts";
 import { type EnvironmentLoad, EnvironmentReadTool, EnvironmentToolkit } from "./tools.ts";
@@ -121,10 +123,54 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
             ),
         { concurrency: "unbounded" },
       );
+      const { settings } = yield* access;
+      const schedules = (yield* settings.getSettings.pipe(Effect.mapError(unavailable)))
+        .environmentSchedules;
+      const now = DateTime.toEpochMillis(yield* DateTime.now);
       const environments = [...entries, ...remote]
-        .map((entry) => ({ ...entry, busy: environmentBusyScore(entry.load) }))
-        .sort((left, right) => (left.busy ?? 2) - (right.busy ?? 2));
+        .map((entry) => {
+          const availability = environmentAvailability(
+            schedules.find((schedule) => schedule.environmentId === entry.environmentId),
+            now,
+          );
+          return {
+            ...entry,
+            busy: environmentBusyScore(entry.load),
+            availableNow: availability.availableNow,
+            changesAt:
+              availability.changesAt === null
+                ? null
+                : DateTime.formatIso(DateTime.makeUnsafe(availability.changesAt)),
+          };
+        })
+        .sort(
+          (left, right) =>
+            Number(right.availableNow) - Number(left.availableNow) ||
+            (left.busy ?? 2) - (right.busy ?? 2),
+        );
       return { environments };
+    }),
+  ),
+  t3_environment_schedule_set: McpToolAccess.writesEnvironment((input, check) =>
+    Effect.gen(function* () {
+      yield* check;
+      const { settings } = yield* access;
+      const current = yield* settings.getSettings.pipe(Effect.mapError(unavailable));
+      const schedule = {
+        environmentId: input.machineEnvironmentId,
+        alwaysOn: input.alwaysOn,
+        offline: input.alwaysOn ? [] : [...(input.offline ?? [])],
+      };
+      const environmentSchedules = [
+        ...current.environmentSchedules.filter(
+          (entry) => entry.environmentId !== input.machineEnvironmentId,
+        ),
+        schedule,
+      ];
+      const updated = yield* settings
+        .updateSettings({ environmentSchedules })
+        .pipe(Effect.mapError(unavailable));
+      return { schedules: updated.environmentSchedules };
     }),
   ),
   t3_environment_preferences_update: McpToolAccess.writesEnvironment((patch, check) =>

@@ -1,4 +1,6 @@
 import {
+  EnvironmentOfflineWindow,
+  EnvironmentSchedule,
   BackgroundActivityProfile,
   BackgroundActivityProfileSelection,
   ExecutionEnvironmentDescriptor,
@@ -82,7 +84,7 @@ const EnvironmentLoadsTool = Tool.make("t3_environment_loads", {
   ...shared,
   dependencies: [...shared.dependencies, PeerForwarding.PeerForwarding],
   description:
-    "CPU and memory load of this machine and every reachable linked one, least busy first. Before delegating heavy work or subagents with `delegate_task`, prefer the least busy environment that has the project. `load` is null where the server doesn't report it.",
+    "CPU and memory load of this machine and every reachable linked one: available machines first, then least busy. Before delegating heavy work or subagents with `delegate_task`, prefer an available, least busy environment; for long work avoid one whose `changesAt` (planned off time) is soon. If it lacks the project, clone it there with `t3_project_clone` and register it with `t3_project_create`. `load` is null where the server doesn't report it.",
   parameters: Tool.EmptyParams,
   success: Schema.Struct({
     environments: Schema.Array(
@@ -93,14 +95,32 @@ const EnvironmentLoadsTool = Tool.make("t3_environment_loads", {
         load: Schema.NullOr(EnvironmentLoad),
         /** 0 idle to 1 saturated: CPU weighted 0.6, memory in use 0.4. */
         busy: Schema.NullOr(Schema.Number),
+        /** From the machine's schedule (`t3_environment_schedule_set`); true without one. */
+        availableNow: Schema.Boolean,
+        /** When availability changes next (planned off or back on); null if never. */
+        changesAt: Schema.NullOr(Schema.String),
       }),
     ),
   }),
 })
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);
+const EnvironmentScheduleTool = Tool.make("t3_environment_schedule_set", {
+  ...shared,
+  description:
+    "Record when a machine (this one or a linked one) is usually off, so work is not placed on it just before it shuts down. `alwaysOn: true` clears planned off times. Times are this server's local time; a window ending before it starts runs past midnight. Only when the user says so.",
+  parameters: Schema.Struct({
+    machineEnvironmentId: Schema.String.annotate({
+      description: "environmentId from t3_environment_links or t3_environment_read.",
+    }),
+    alwaysOn: Schema.Boolean,
+    offline: Schema.optional(Schema.Array(EnvironmentOfflineWindow)),
+  }),
+  success: Schema.Struct({ schedules: Schema.Array(EnvironmentSchedule) }),
+}).annotate(Tool.Destructive, false);
 export const EnvironmentToolkit = Toolkit.make(
   EnvironmentReadTool,
   EnvironmentPreferencesTool,
   EnvironmentLoadsTool,
+  EnvironmentScheduleTool,
 );

@@ -12,6 +12,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import {
   EnvironmentId,
+  ForwardCompatibleArray,
   ForwardCompatibleNullable,
   ForwardCompatibleOptional,
   OmittedWhenNull,
@@ -1198,6 +1199,26 @@ export const ProjectProviderInstanceOverride = Schema.Struct({
 });
 export type ProjectProviderInstanceOverride = typeof ProjectProviderInstanceOverride.Type;
 
+/** A weekly window in which a linked machine is usually off, in this server's local time. */
+export const EnvironmentOfflineWindow = Schema.Struct({
+  /** 0 Sunday to 6 Saturday; the day the window starts. */
+  days: Schema.Array(Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 6 }))),
+  /** "HH:MM"; a window whose end is before its start runs past midnight. */
+  from: Schema.String.check(Schema.isPattern(/^([01]\d|2[0-3]):[0-5]\d$/)),
+  to: Schema.String.check(Schema.isPattern(/^([01]\d|2[0-3]):[0-5]\d$/)),
+});
+export type EnvironmentOfflineWindow = typeof EnvironmentOfflineWindow.Type;
+
+/** When a machine is expected to be reachable, so placement avoids one that is about to go off. */
+export const EnvironmentSchedule = Schema.Struct({
+  environmentId: TrimmedNonEmptyString,
+  alwaysOn: Schema.Boolean,
+  offline: Schema.Array(EnvironmentOfflineWindow).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+});
+export type EnvironmentSchedule = typeof EnvironmentSchedule.Type;
+
 /** Absent keys inherit; null is a value for nullable settings.
  * providerInstances overrides fields per instance; other keys replace the whole setting. */
 export const ProjectSettingsOverrides = Schema.Struct({
@@ -1413,6 +1434,9 @@ export const ServerSettings = Schema.Struct({
   ),
   fallbackModelSelection: Schema.NullOr(ModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  environmentSchedules: ForwardCompatibleArray(EnvironmentSchedule).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
   ),
   defaultRuntimeMode: RuntimeMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE)),
@@ -1856,6 +1880,7 @@ export const ServerSettingsPatch = Schema.Struct({
   defaultModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   defaultRuntimeMode: Schema.optionalKey(RuntimeMode),
   fallbackModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
+  environmentSchedules: Schema.optionalKey(Schema.Array(EnvironmentSchedule)),
   /** Replaces each project's override set; null removes it. Omitted providerInstances retains its stored value. */
   projectSettingsOverrides: Schema.optionalKey(
     Schema.Record(
