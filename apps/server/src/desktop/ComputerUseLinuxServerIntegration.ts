@@ -82,6 +82,7 @@ class ComputerUseLinuxBoundSession {
       "providerInstanceId" | "providerSessionId" | "threadId"
     >,
     lifecycle: ComputerUseLinuxApprovalRevocationShape,
+    generation: number,
   ) {
     this.adapter = adapter;
     this.identity = { ...identity };
@@ -89,6 +90,7 @@ class ComputerUseLinuxBoundSession {
       close: () => this.close(),
       providerSessionId: identity.providerSessionId,
       threadId: ThreadId.make(identity.threadId),
+      generation,
     });
     this.unregister = registration.unregister;
     if (registration.revoked) {
@@ -135,6 +137,8 @@ export const startComputerUseLinuxForCurrentMcpInvocation = Effect.fn(
   yield* McpInvocationContext.requireMcpCapability("desktop");
   const approvalSurface = yield* ComputerUseLinuxApprovalSurfaceService;
   const lifecycle = yield* ComputerUseLinuxApprovalRevocation;
+  // Read before anything awaits: a Stop while this call sets up voids it, even after resume.
+  const generation = lifecycle.generation(ThreadId.make(scoped.thread.threadId));
   const upstreamFactory = yield* ComputerUseLinuxUpstreamFactoryService;
   const leaseFactory = yield* ComputerUseLinuxLeaseFactory;
   const platform = yield* HostProcess.Platform;
@@ -162,5 +166,5 @@ export const startComputerUseLinuxForCurrentMcpInvocation = Effect.fn(
       }),
     catch: (cause) => new ComputerUseLinuxStartError({ cause }),
   });
-  return new ComputerUseLinuxBoundSession(adapter, identity, lifecycle);
+  return new ComputerUseLinuxBoundSession(adapter, identity, lifecycle, generation);
 });
