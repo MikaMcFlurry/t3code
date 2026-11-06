@@ -13,6 +13,7 @@ import {
   __testing,
   ComputerUseLinuxApprovalSurfaceService,
   ComputerUseLinuxLeaseFactory,
+  ComputerUseLinuxUserLeaseKey,
   ComputerUseLinuxUpstreamFactoryService,
   startComputerUseLinuxForCurrentMcpInvocation,
 } from "./ComputerUseLinuxServerIntegration.ts";
@@ -43,6 +44,11 @@ const threadInvocation: McpInvocationContext.McpThreadInvocationScope = {
     providerSessionId: "provider-session-authorized",
     threadId: ThreadId.make("thread-authorized"),
   },
+};
+
+// The secret-store fallback; userLeaseScopeKey has its own test in ComputerUseLinuxHostLease.test.ts.
+const noUserLeaseKey = async (): Promise<string> => {
+  throw new Error("no user lease key in this test");
 };
 
 describe("ComputerUseLinuxServerIntegration", () => {
@@ -86,6 +92,7 @@ describe("ComputerUseLinuxServerIntegration", () => {
             secretStore((name, bytes) => secretReads.push({ name, bytes })),
           ),
           Effect.provideService(HostProcess.Platform, "linux"),
+          Effect.provideService(ComputerUseLinuxUserLeaseKey, { resolve: noUserLeaseKey }),
           Effect.provideService(ComputerUseLinuxLeaseFactory, {
             make: (input) => {
               leaseInputs.push(input);
@@ -183,6 +190,7 @@ describe("ComputerUseLinuxServerIntegration", () => {
             }),
           ),
           Effect.provideService(HostProcess.Platform, "linux"),
+          Effect.provideService(ComputerUseLinuxUserLeaseKey, { resolve: noUserLeaseKey }),
           Effect.provideService(ComputerUseLinuxLeaseFactory, {
             make: () => ({ withLease: (operation) => operation() }),
           }),
@@ -224,6 +232,7 @@ describe("ComputerUseLinuxServerIntegration", () => {
         registerSession: broker.registerSession,
         revokeSession: broker.revokeSessionAndWait,
         revokeThread: broker.revokeThreadAndWait,
+        interruptThread: broker.interruptThreadAndWait,
       });
       broker.activateSession({
         providerSessionId: threadInvocation.thread.providerSessionId,
@@ -237,6 +246,7 @@ describe("ComputerUseLinuxServerIntegration", () => {
         ),
         Effect.provideService(HostProcess.Platform, "linux"),
         Effect.provideService(ComputerUseLinuxApprovalRevocation, lifecycle),
+        Effect.provideService(ComputerUseLinuxUserLeaseKey, { resolve: noUserLeaseKey }),
         Effect.provideService(ComputerUseLinuxLeaseFactory, {
           make: () => ({ withLease: (operation) => operation() }),
         }),
@@ -312,6 +322,7 @@ describe("ComputerUseLinuxServerIntegration", () => {
         registerSession: broker.registerSession,
         revokeSession: broker.revokeSessionAndWait,
         revokeThread: broker.revokeThreadAndWait,
+        interruptThread: broker.interruptThreadAndWait,
       });
       broker.activateSession({
         providerSessionId: threadInvocation.thread.providerSessionId,
@@ -334,6 +345,7 @@ describe("ComputerUseLinuxServerIntegration", () => {
         Effect.provideService(ServerSecretStore.ServerSecretStore, delayedSecretStore),
         Effect.provideService(HostProcess.Platform, "linux"),
         Effect.provideService(ComputerUseLinuxApprovalRevocation, lifecycle),
+        Effect.provideService(ComputerUseLinuxUserLeaseKey, { resolve: noUserLeaseKey }),
         Effect.provideService(ComputerUseLinuxLeaseFactory, {
           make: () => ({ withLease: (operation) => operation() }),
         }),
