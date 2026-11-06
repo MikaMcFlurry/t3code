@@ -221,7 +221,8 @@ export type ProjectionLimitRecoveryCandidate = Pick<
   | "updatedAt"
   | "limitRecovery"
   | "snoozedUntil"
->;
+> &
+  Partial<Pick<OrchestrationV2ThreadShell, "createdBy">>;
 
 export type ProjectionThreadPullRequests = Pick<
   OrchestrationV2AppThread,
@@ -5129,6 +5130,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             pendingRuntimeRequest: null,
             limitRecovery: thread.limitRecovery ?? null,
             snoozedUntil: thread.snoozedUntil ?? null,
+            createdBy: thread.createdBy,
           });
         }
         return candidates;
