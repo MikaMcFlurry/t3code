@@ -2587,6 +2587,7 @@ it.effect(
           },
           revokeThread: async () => undefined,
           interruptThread: async () => undefined,
+          resumeThread: () => undefined,
         }),
       );
       const effect = Effect.gen(function* () {

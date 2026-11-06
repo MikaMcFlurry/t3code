@@ -4,7 +4,6 @@ import * as Schema from "effect/Schema";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { ThreadId } from "@t3tools/contracts";
 
-import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import {
   ComputerUseLinuxApprovalRevocation,
@@ -25,9 +24,6 @@ import type {
   ComputerUseLinuxMcpAdapter,
   ComputerUseLinuxMcpTool,
 } from "./ComputerUseLinuxMcpAdapter.ts";
-
-const COMPUTER_USE_LINUX_LEASE_SECRET = "computer-use-linux-lease-scope-v1";
-const COMPUTER_USE_LINUX_LEASE_SECRET_BYTES = 32;
 
 export class ComputerUseLinuxApprovalSurfaceService extends Context.Service<
   ComputerUseLinuxApprovalSurfaceService,
@@ -137,26 +133,18 @@ export const startComputerUseLinuxForCurrentMcpInvocation = Effect.fn(
     "Computer Use for Linux",
   );
   yield* McpInvocationContext.requireMcpCapability("desktop");
-  const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const approvalSurface = yield* ComputerUseLinuxApprovalSurfaceService;
   const lifecycle = yield* ComputerUseLinuxApprovalRevocation;
   const upstreamFactory = yield* ComputerUseLinuxUpstreamFactoryService;
   const leaseFactory = yield* ComputerUseLinuxLeaseFactory;
   const platform = yield* HostProcess.Platform;
-  const environment = yield* HostProcess.Environment;
-  const homeDirectory = yield* HostProcess.HomeDirectory;
   const userLeaseKey = yield* ComputerUseLinuxUserLeaseKey;
-  // Shared by this user's T3 servers; this installation's own secret only when the file fails.
+  // Shared by this user's T3 servers. Without it there is no safe lease, so the desktop stays off:
+  // a per-installation key would let two servers drive the one desktop at once.
   const leaseScopeKey = yield* Effect.tryPromise({
-    try: () => userLeaseKey.resolve({ platform, environment, homeDirectory }),
+    try: () => userLeaseKey.resolve({ platform }),
     catch: (cause) => new ComputerUseLinuxStartError({ cause }),
-  }).pipe(
-    Effect.catch(() =>
-      secretStore
-        .getOrCreateRandom(COMPUTER_USE_LINUX_LEASE_SECRET, COMPUTER_USE_LINUX_LEASE_SECRET_BYTES)
-        .pipe(Effect.map((secret) => Buffer.from(secret).toString("base64url"))),
-    ),
-  );
+  });
   const identity = {
     providerInstanceId: scoped.thread.providerInstanceId,
     providerSessionId: scoped.thread.providerSessionId,
@@ -176,8 +164,3 @@ export const startComputerUseLinuxForCurrentMcpInvocation = Effect.fn(
   });
   return new ComputerUseLinuxBoundSession(adapter, identity, lifecycle);
 });
-
-export const __testing = {
-  leaseSecretBytes: COMPUTER_USE_LINUX_LEASE_SECRET_BYTES,
-  leaseSecretName: COMPUTER_USE_LINUX_LEASE_SECRET,
-};
