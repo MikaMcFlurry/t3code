@@ -1123,6 +1123,17 @@ export const BackgroundActivitySettings = Schema.Struct({
 }).pipe(Schema.withDecodingDefault(Effect.succeed({})));
 export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 
+/**
+ * When an agent's desktop interaction waits for the user: every time, never in threads that
+ * run in full access, or never (a standing grant for every thread with desktop access).
+ */
+export const AgentDesktopApproval = Schema.Literals([
+  "every-action",
+  "full-access-threads",
+  "standing",
+]);
+export type AgentDesktopApproval = typeof AgentDesktopApproval.Type;
+
 export const ResponseStreamingMode = Schema.Literals(["turn", "paragraph"]);
 export type ResponseStreamingMode = typeof ResponseStreamingMode.Type;
 
@@ -1444,8 +1455,12 @@ export const ServerSettings = Schema.Struct({
   speechPostProcessingModelSelection: Schema.NullOr(ModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
-  /** Linux desktop control is high impact and must be explicitly enabled for a new session. */
+  /** Desktop control is high impact and must be explicitly enabled for a new session. */
   enableAgentDesktopAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  agentDesktopApproval: AgentDesktopApproval.pipe(
+    Schema.catchDecoding(() => Effect.succeedSome("every-action" as const)),
+    Schema.withDecodingDefault(Effect.succeed("every-action" as const)),
+  ),
   projectAgentBrowserAccessOverrides: Schema.Record(ProjectId, Schema.Boolean).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
@@ -1897,6 +1912,7 @@ export const ServerSettingsPatch = Schema.Struct({
   speechProjectCustomWords: Schema.optionalKey(SpeechCustomWords),
   speechPostProcessingModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   enableAgentDesktopAccess: Schema.optionalKey(Schema.Boolean),
+  agentDesktopApproval: Schema.optionalKey(AgentDesktopApproval),
   projectAgentBrowserAccessOverrides: Schema.optionalKey(
     Schema.Record(ProjectId, Schema.NullOr(Schema.Boolean)),
   ),

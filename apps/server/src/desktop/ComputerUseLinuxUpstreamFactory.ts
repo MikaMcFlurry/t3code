@@ -19,6 +19,32 @@ import type {
 const EXECUTABLE = "computer-use-linux";
 const ARGS = ["mcp"] as const;
 
+// Windows hosts run Windows-MCP (MIT, UI Automation) through uv, pinned so an update cannot
+// change which tools exist. The policy allowlist only passes its screen and input tools.
+const WINDOWS_EXECUTABLE = "uvx";
+const WINDOWS_ARGS = ["windows-mcp==0.8.8", "serve"] as const;
+const WINDOWS_ENVIRONMENT_ALLOWLIST = [
+  "APPDATA",
+  "COMPUTERNAME",
+  "ComSpec",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "LOCALAPPDATA",
+  "NUMBER_OF_PROCESSORS",
+  "PATH",
+  "PATHEXT",
+  "PROCESSOR_ARCHITECTURE",
+  "ProgramData",
+  "ProgramFiles",
+  "SystemDrive",
+  "SystemRoot",
+  "TEMP",
+  "TMP",
+  "USERNAME",
+  "USERPROFILE",
+  "windir",
+] as const;
+
 // Keep the child tied to the current graphical login without inheriting arbitrary loader,
 // downloader, backend-selection, or T3 identity variables from the server process.
 const DESKTOP_ENVIRONMENT_ALLOWLIST = [
@@ -79,9 +105,12 @@ export interface ComputerUseLinuxUpstreamDependencies {
   readonly transportFactory?: (parameters: StdioServerParameters) => StdioClientTransport;
 }
 
-function inheritedDesktopEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {
+function inheritedDesktopEnvironment(
+  environment: NodeJS.ProcessEnv,
+  allowlist: ReadonlyArray<string> = DESKTOP_ENVIRONMENT_ALLOWLIST,
+): Record<string, string> {
   const inherited = getDefaultEnvironment();
-  for (const name of DESKTOP_ENVIRONMENT_ALLOWLIST) {
+  for (const name of allowlist) {
     const value = environment[name];
     if (value !== undefined) inherited[name] = value;
   }
@@ -97,29 +126,33 @@ export function makeComputerUseLinuxUpstreamFactory(
 ): ComputerUseLinuxUpstreamFactoryService["Service"] {
   return ComputerUseLinuxUpstreamFactoryService.of({
     start: async ({ environment: controlledEnvironment, signal }) => {
-      if (dependencies.platform !== "linux") {
+      const windows = dependencies.platform === "win32";
+      if (dependencies.platform !== "linux" && !windows) {
         throw new ComputerUseLinuxUpstreamStartError({
           cause: new Error(`Unsupported platform: ${dependencies.platform}`),
         });
       }
       const hostEnvironment = dependencies.environment ?? process.env;
+      const command = windows ? WINDOWS_EXECUTABLE : EXECUTABLE;
       const executable = dependencies.resolveExecutable(
-        EXECUTABLE,
+        command,
         dependencies.platform,
         hostEnvironment,
       );
       if (executable === undefined) {
-        throw new ComputerUseLinuxExecutableUnavailableError({ command: EXECUTABLE });
+        throw new ComputerUseLinuxExecutableUnavailableError({ command });
       }
       const transport = (
         dependencies.transportFactory ?? ((parameters) => new StdioClientTransport(parameters))
       )({
         command: executable,
-        args: [...ARGS],
-        env: {
-          ...inheritedDesktopEnvironment(hostEnvironment),
-          ...controlledEnvironment,
-        },
+        args: windows ? [...WINDOWS_ARGS] : [...ARGS],
+        env: windows
+          ? inheritedDesktopEnvironment(hostEnvironment, WINDOWS_ENVIRONMENT_ALLOWLIST)
+          : {
+              ...inheritedDesktopEnvironment(hostEnvironment),
+              ...controlledEnvironment,
+            },
         // Do not let untrusted desktop/tool content or terminal controls reach server logs, and
         // do not leave an unread pipe that can fill and deadlock the MCP child.
         stderr: "ignore",

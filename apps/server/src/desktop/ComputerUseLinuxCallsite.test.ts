@@ -117,14 +117,14 @@ describe("startComputerUseLinuxCallsite", () => {
     assert.isTrue(upstreamClosed);
   });
 
-  it("fails before starting the upstream outside Linux", async () => {
+  it("fails before starting the upstream outside Linux and Windows", async () => {
     let upstreamStarted = false;
 
     await expect(
       startComputerUseLinuxCallsite({
         approvalSurface: { request: async () => true },
         leaseScopeKey: "stable-installation-secret",
-        platform: "win32",
+        platform: "darwin",
         providerInstanceId: "codex-office",
         providerSessionId: "provider-session-authorized",
         threadId: "thread-authorized",

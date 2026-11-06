@@ -5,6 +5,7 @@ import type {
   ComputerUseLinuxInteractionApproval,
 } from "./ComputerUseLinuxBridge.ts";
 import {
+  COMPUTER_USE_PLATFORMS,
   ComputerUseLinuxHostLease,
   ComputerUseLinuxLeasePlatformError,
   type ComputerUseLinuxLease,
@@ -90,7 +91,7 @@ function lazyUpstream(factory: ComputerUseLinuxUpstreamFactory): ComputerUseLinu
 export async function startComputerUseLinuxCallsite(
   options: ComputerUseLinuxCallsiteOptions,
 ): Promise<ComputerUseLinuxMcpAdapter> {
-  if (options.platform !== "linux") {
+  if (!COMPUTER_USE_PLATFORMS.has(options.platform)) {
     throw new ComputerUseLinuxLeasePlatformError({ platform: options.platform });
   }
   if (options.leaseScopeKey.trim().length === 0) {

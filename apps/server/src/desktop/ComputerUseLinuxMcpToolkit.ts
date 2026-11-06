@@ -38,7 +38,7 @@ const isOrchestratorMcpFailure = Schema.is(OrchestratorMcpFailure);
 
 const ComputerUseLinuxTool = Tool.make("computer_use_linux", {
   description:
-    "Use T3's mediated Linux desktop bridge. Observation tools inspect the desktop; interaction tools require a separate user approval for every call.",
+    "Use T3's mediated desktop bridge for this machine: computer-use-linux tools (snake_case) on Linux, Windows-MCP tools (PascalCase) on Windows. Observation tools inspect the desktop; interaction tools wait for the user's approval unless their settings grant it standing.",
   parameters: Schema.Struct({
     toolName: ComputerUseLinuxToolName,
     arguments: Schema.optionalKey(Schema.Unknown),
