@@ -83,7 +83,7 @@ describe("ComputerUseLinuxServerIntegration", () => {
         const upstreamEnvironments: Array<Readonly<Record<string, string>>> = [];
         let upstreamClosed = false;
 
-        const program = startComputerUseLinuxForCurrentMcpInvocation().pipe(
+        const program = startComputerUseLinuxForCurrentMcpInvocation(0).pipe(
           Effect.provideService(McpInvocationContext.McpInvocationContext, threadInvocation),
           Effect.provideService(
             ServerSecretStore.ServerSecretStore,
@@ -176,7 +176,7 @@ describe("ComputerUseLinuxServerIntegration", () => {
           },
           thread: undefined,
         };
-        const program = startComputerUseLinuxForCurrentMcpInvocation().pipe(
+        const program = startComputerUseLinuxForCurrentMcpInvocation(0).pipe(
           Effect.provideService(McpInvocationContext.McpInvocationContext, clientInvocation),
           Effect.provideService(
             ServerSecretStore.ServerSecretStore,
@@ -235,7 +235,7 @@ describe("ComputerUseLinuxServerIntegration", () => {
         providerSessionId: threadInvocation.thread.providerSessionId,
         threadId: threadInvocation.thread.threadId,
       });
-      const program = startComputerUseLinuxForCurrentMcpInvocation().pipe(
+      const program = startComputerUseLinuxForCurrentMcpInvocation(0).pipe(
         Effect.provideService(McpInvocationContext.McpInvocationContext, threadInvocation),
         Effect.provideService(
           ServerSecretStore.ServerSecretStore,
@@ -332,7 +332,7 @@ describe("ComputerUseLinuxServerIntegration", () => {
         await secretReleased;
         return USER_LEASE_KEY;
       };
-      const program = startComputerUseLinuxForCurrentMcpInvocation().pipe(
+      const program = startComputerUseLinuxForCurrentMcpInvocation(0).pipe(
         Effect.provideService(McpInvocationContext.McpInvocationContext, threadInvocation),
         Effect.provideService(
           ServerSecretStore.ServerSecretStore,
