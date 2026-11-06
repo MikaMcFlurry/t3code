@@ -37,6 +37,7 @@ describe("ComputerUseLinuxUpstreamFactory", () => {
         T3_PROVIDER_SESSION_ID: "attacker-controlled",
       },
       resolveExecutable: (command, platform, environment) => {
+        if (command === "gnome-screenshot") return undefined;
         assert.equal(command, "computer-use-linux");
         assert.equal(platform, "linux");
         assert.equal(environment.PATH, "/safe/bin");
@@ -71,6 +72,8 @@ describe("ComputerUseLinuxUpstreamFactory", () => {
     assert.equal(parameters[0]?.env?.WAYLAND_DISPLAY, "wayland-1");
     assert.equal(parameters[0]?.env?.XDG_RUNTIME_DIR, "/run/user/1000");
     assert.equal(parameters[0]?.env?.COMPUTER_USE_LINUX_ENABLE_SHELL, "0");
+    assert.equal(parameters[0]?.env?.COMPUTER_USE_LINUX_SCREENSHOT_BACKEND, "portal");
+    assert.equal(parameters[0]?.env?.COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP, "1");
     assert.notProperty(parameters[0]?.env ?? {}, "LD_PRELOAD");
     assert.notProperty(parameters[0]?.env ?? {}, "T3_PROVIDER_SESSION_ID");
     assert.notProperty(parameters[0]?.env ?? {}, "COMPUTER_USE_LINUX_BIN");
@@ -85,6 +88,31 @@ describe("ComputerUseLinuxUpstreamFactory", () => {
     await upstream.close();
     assert.isTrue(closed);
     assert.deepStrictEqual(__testing.args, ["mcp"]);
+  });
+
+  it("captures through gnome-screenshot when it is installed", async () => {
+    const parameters: Array<{ readonly env?: Record<string, string> }> = [];
+    const factory = makeComputerUseLinuxUpstreamFactory({
+      platform: "linux",
+      environment: { PATH: "/safe/bin" },
+      resolveExecutable: (command) => `/safe/bin/${command}`,
+      transportFactory: (input) => {
+        parameters.push(input);
+        return { close: async () => undefined } as never;
+      },
+      clientFactory: () => ({
+        connect: async () => undefined,
+        listTools: async () => ({ tools: [] }),
+        callTool: async () => ({ content: [] }),
+        close: async () => undefined,
+      }),
+    });
+    const upstream = await factory.start({
+      environment: COMPUTER_USE_LINUX_PORTAL_ONLY_ENVIRONMENT,
+    });
+    assert.equal(parameters[0]?.env?.COMPUTER_USE_LINUX_SCREENSHOT_BACKEND, "gnome-screenshot");
+    assert.equal(parameters[0]?.env?.COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER, "1");
+    await upstream.close();
   });
 
   it("fails closed before making a client when the binary is unavailable", async () => {
@@ -147,7 +175,9 @@ describe("ComputerUseLinuxUpstreamFactory", () => {
       }),
     });
 
-    const upstream = await factory.start({ environment: COMPUTER_USE_LINUX_PORTAL_ONLY_ENVIRONMENT });
+    const upstream = await factory.start({
+      environment: COMPUTER_USE_LINUX_PORTAL_ONLY_ENVIRONMENT,
+    });
     assert.equal(parameters[0]?.command, "C:/safe/bin/uvx.exe");
     assert.deepStrictEqual(parameters[0]?.args, ["windows-mcp==0.8.8", "serve"]);
     assert.equal(parameters[0]?.env?.USERPROFILE, "C:/Users/me");
@@ -204,7 +234,8 @@ describe("ComputerUseLinuxUpstreamFactory", () => {
         PATH: process.env.PATH,
         T3_PROVIDER_SESSION_ID: "must-not-cross-process-boundary",
       },
-      resolveExecutable: () => "/test/bin/computer-use-linux",
+      resolveExecutable: (command) =>
+        command === "computer-use-linux" ? "/test/bin/computer-use-linux" : undefined,
       transportFactory: (parameters) => {
         assert.equal(parameters.command, "/test/bin/computer-use-linux");
         assert.deepStrictEqual(parameters.args, ["mcp"]);
