@@ -76,6 +76,8 @@ export class ComputerUseLinuxApprovalBroker extends Context.Service<
     readonly revokeThreadAndWait: (threadId: ThreadId) => Promise<void>;
     /** Stop: refuse the thread's pending approvals and close its desktop sessions, keeping its credential. */
     readonly interruptThreadAndWait: (threadId: ThreadId) => Promise<void>;
+    /** A new turn: the thread may use the desktop again after a Stop. */
+    readonly resumeThread: (threadId: ThreadId) => void;
     readonly revokeAllAndWait: () => Promise<void>;
     readonly credentialCount: () => number;
     readonly snapshot: () => DesktopApprovalSnapshot;
@@ -117,9 +119,16 @@ export const make = (options: ComputerUseLinuxApprovalBrokerOptions) =>
       return true;
     };
 
+    // Threads stopped since their last turn started: no desktop session registers and no
+    // request is asked or granted until the next turn re-activates the thread.
+    const stoppedThreads = new Set<string>();
     const isLive = (input: ComputerUseLinuxBridgeRequest) => {
       const credential = credentials.get(input.providerSessionId);
-      return credential?.status === "active" && credential.threadId === input.threadId;
+      return (
+        credential?.status === "active" &&
+        credential.threadId === input.threadId &&
+        !stoppedThreads.has(input.threadId)
+      );
     };
 
     const request = (
@@ -128,6 +137,7 @@ export const make = (options: ComputerUseLinuxApprovalBrokerOptions) =>
     ): Promise<boolean> => {
       if (requestOptions.signal.aborted) return Promise.resolve(false);
       if (
+        stoppedThreads.has(input.threadId) ||
         credentials.get(input.providerSessionId)?.status !== "active" ||
         credentials.get(input.providerSessionId)?.threadId !== input.threadId ||
         pending.size >= MAX_PENDING_APPROVALS ||
@@ -223,6 +233,7 @@ export const make = (options: ComputerUseLinuxApprovalBrokerOptions) =>
       session: ActiveSession,
     ): { readonly revoked: boolean; readonly unregister: () => void } => {
       if (
+        stoppedThreads.has(session.threadId) ||
         credentials.get(session.providerSessionId)?.status !== "active" ||
         credentials.get(session.providerSessionId)?.threadId !== session.threadId
       ) {
@@ -266,6 +277,8 @@ export const make = (options: ComputerUseLinuxApprovalBrokerOptions) =>
       }
     };
     const interruptThreadAndWait = async (threadId: ThreadId): Promise<void> => {
+      // Synchronously, before anything awaits: a session still starting can't register after.
+      stoppedThreads.add(threadId);
       const ids = [...pending.entries()]
         .filter(([, entry]) => entry.request.threadId === threadId)
         .map(([id]) => id);
@@ -273,6 +286,9 @@ export const make = (options: ComputerUseLinuxApprovalBrokerOptions) =>
       await closeSessions(
         [...activeSessions.values()].filter((session) => session.threadId === threadId),
       );
+    };
+    const resumeThread = (threadId: ThreadId): void => {
+      stoppedThreads.delete(threadId);
     };
     const revokeAllAndWait = async (): Promise<void> => {
       revokeAll();
@@ -309,6 +325,7 @@ export const make = (options: ComputerUseLinuxApprovalBrokerOptions) =>
       revokeSessionAndWait,
       revokeThreadAndWait,
       interruptThreadAndWait,
+      resumeThread,
       revokeAllAndWait,
       credentialCount: () => credentials.size,
       snapshot,
@@ -366,6 +383,7 @@ export const layerRevocation = Layer.effect(
         revokeSession: broker.revokeSessionAndWait,
         revokeThread: broker.revokeThreadAndWait,
         interruptThread: broker.interruptThreadAndWait,
+        resumeThread: broker.resumeThread,
       }),
     ),
   ),
@@ -384,6 +402,7 @@ export const disabled = ComputerUseLinuxApprovalBroker.of({
   revokeSessionAndWait: async () => undefined,
   revokeThreadAndWait: async () => undefined,
   interruptThreadAndWait: async () => undefined,
+  resumeThread: () => undefined,
   revokeAllAndWait: async () => undefined,
   credentialCount: () => 0,
   snapshot: () => ({ requests: [] }),

@@ -84,6 +84,8 @@ type DesktopSession = Effect.Success<
 interface KeptSession {
   readonly session: DesktopSession;
   idle: ReturnType<typeof setTimeout> | undefined;
+  /** Calls in flight; the idle countdown only runs while this is zero. */
+  active: number;
 }
 
 /** An unused desktop session closes after this long; the next call starts a new one. */
@@ -103,7 +105,8 @@ class ComputerUseLinuxCallError extends Schema.TaggedError<ComputerUseLinuxCallE
 ) {}
 
 function scheduleIdleClose(key: string, entry: KeptSession): void {
-  if (keptSessions.get(key) !== entry) return;
+  cancelIdleClose(entry);
+  if (keptSessions.get(key) !== entry || entry.active > 0) return;
   // @effect-diagnostics-next-line globalTimers:off -- a plain unref'd idle timer outside any fiber.
   entry.idle = setTimeout(() => void closeKeptSession(key, entry), KEPT_SESSION_IDLE_MS);
   entry.idle.unref?.();
@@ -142,7 +145,7 @@ const keptSession = Effect.fn("ComputerUseLinuxMcpToolkit.keptSession")(function
     yield* Effect.promise(() => session.close().catch(() => undefined));
     return { key, entry: raced };
   }
-  const entry: KeptSession = { session, idle: undefined };
+  const entry: KeptSession = { session, idle: undefined, active: 0 };
   keptSessions.set(key, entry);
   return { key, entry };
 });
@@ -167,6 +170,7 @@ const handlers = {
     McpInvocationContext.requireThreadMcpCapability("desktop").pipe(
       Effect.andThen(keptSession()),
       Effect.flatMap(({ key, entry }) => {
+        entry.active += 1;
         cancelIdleClose(entry);
         return Effect.tryPromise({
           try: () =>
@@ -183,7 +187,12 @@ const handlers = {
               ? Effect.void
               : Effect.promise(() => closeKeptSession(key, entry)),
           ),
-          Effect.ensuring(Effect.sync(() => scheduleIdleClose(key, entry))),
+          Effect.ensuring(
+            Effect.sync(() => {
+              entry.active -= 1;
+              scheduleIdleClose(key, entry);
+            }),
+          ),
           Effect.mapError(toolError),
         );
       }),
@@ -267,6 +276,10 @@ export function computerUseLinuxToolResult(
 export const layer = McpToolAccess.toLayer(ComputerUseLinuxToolkit, handlers);
 
 export const __testing = {
+  scheduleIdleClose,
+  cancelIdleClose,
+  keptSessions,
+  idleMs: KEPT_SESSION_IDLE_MS,
   /** Closes every kept session, so one test's backend never serves the next. */
   closeKeptSessions: () =>
     Promise.all([...keptSessions.entries()].map(([key, entry]) => closeKeptSession(key, entry))),

@@ -14,6 +14,7 @@ import {
   ComputerUseLinuxApprovalSurfaceService,
   ComputerUseLinuxLeaseFactory,
   ComputerUseLinuxUpstreamFactoryService,
+  ComputerUseLinuxUserLeaseKey,
 } from "./ComputerUseLinuxServerIntegration.ts";
 
 const threadId = ThreadId.make("thread:computer-use");
@@ -61,6 +62,11 @@ describe("ComputerUseLinuxMcpToolkit", () => {
       Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
       Layer.provide(Layer.succeed(ServerSecretStore.ServerSecretStore, secretStore)),
       Layer.provide(Layer.succeed(HostProcess.Platform, "linux")),
+      Layer.provide(
+        Layer.succeed(ComputerUseLinuxUserLeaseKey, {
+          resolve: async () => "test-user-lease-key".repeat(3),
+        }),
+      ),
       Layer.provide(
         Layer.succeed(
           ComputerUseLinuxApprovalSurfaceService,
@@ -166,6 +172,11 @@ describe("ComputerUseLinuxMcpToolkit", () => {
       ),
       Layer.provide(Layer.succeed(HostProcess.Platform, "linux")),
       Layer.provide(
+        Layer.succeed(ComputerUseLinuxUserLeaseKey, {
+          resolve: async () => "test-user-lease-key".repeat(3),
+        }),
+      ),
+      Layer.provide(
         Layer.succeed(
           ComputerUseLinuxApprovalSurfaceService,
           ComputerUseLinuxApprovalSurfaceService.of({ request: async () => true }),
@@ -199,5 +210,27 @@ describe("ComputerUseLinuxMcpToolkit", () => {
       assert.isTrue(result.isError);
       assert.isFalse(upstreamStarted);
     }).pipe(Effect.provide(layerTest));
+  });
+
+  it("keeps one idle timer per session, and none while a call is in flight", () => {
+    const entry = {
+      session: { closed: false, close: async () => undefined } as never,
+      idle: undefined as ReturnType<typeof setTimeout> | undefined,
+      active: 1,
+    };
+    toolkitTesting.keptSessions.set("idle-test", entry);
+    try {
+      toolkitTesting.scheduleIdleClose("idle-test", entry);
+      assert.isUndefined(entry.idle);
+      entry.active = 0;
+      toolkitTesting.scheduleIdleClose("idle-test", entry);
+      const first = entry.idle;
+      assert.isDefined(first);
+      toolkitTesting.scheduleIdleClose("idle-test", entry);
+      assert.notStrictEqual(entry.idle, first);
+    } finally {
+      toolkitTesting.cancelIdleClose(entry);
+      toolkitTesting.keptSessions.delete("idle-test");
+    }
   });
 });
