@@ -4,6 +4,7 @@ import type { ComputerUseLinuxLease } from "./ComputerUseLinuxHostLease.ts";
 import {
   ComputerUseLinuxOperationGate,
   computerUseLinuxToolAccess,
+  computerUseToolArgumentsRefusal,
   type ComputerUseLinuxToolAccess,
 } from "./ComputerUseLinuxPolicy.ts";
 
@@ -49,6 +50,16 @@ export class ComputerUseLinuxBridgeApprovalError extends Schema.TaggedError<Comp
 ) {
   override get message(): string {
     return `Computer Use interaction '${this.toolName}' was not approved.`;
+  }
+}
+
+/** T3 refuses this tool or these arguments; the message is server-authored and safe to show. */
+export class ComputerUseLinuxBridgeRefusedError extends Schema.TaggedError<ComputerUseLinuxBridgeRefusedError>()(
+  "ComputerUseLinuxBridgeRefusedError",
+  { reason: Schema.String },
+) {
+  override get message(): string {
+    return this.reason;
   }
 }
 
@@ -114,8 +125,12 @@ export class ComputerUseLinuxBridge {
     }
     const access = computerUseLinuxToolAccess(snapshot.toolName);
     if (access === "deny") {
-      throw new Error(`Computer Use tool '${snapshot.toolName}' is not exposed by T3.`);
+      throw new ComputerUseLinuxBridgeRefusedError({
+        reason: `Computer Use tool '${snapshot.toolName}' is not exposed by T3.`,
+      });
     }
+    const refusal = computerUseToolArgumentsRefusal(snapshot.toolName, snapshot.arguments);
+    if (refusal !== undefined) throw new ComputerUseLinuxBridgeRefusedError({ reason: refusal });
 
     return this.gate.run(snapshot.toolName, async () => {
       this.assertActive();
