@@ -16,8 +16,11 @@
   Registers the scheduled task: nightly from 03:30, retrying every 30 minutes until 07:30.
 .PARAMETER Force
   Updates even when nothing changed upstream (still waits for idle).
+.PARAMETER IgnoreThread
+  Thread ids whose runs don't block the update, e.g. the agent thread that asked for it. The
+  restart still interrupts that thread's turn.
 #>
-param([switch]$Register, [switch]$Force)
+param([switch]$Register, [switch]$Force, [string[]]$IgnoreThread = @())
 . "$PSScriptRoot\T3Mika.Common.ps1"
 
 $logDir = Join-Path $T3Mika.Root 'logs'
@@ -66,7 +69,8 @@ try {
   if (-not $Force -and $upstream -eq $failedUpstream) { return }
 
   $database = Join-Path $T3Mika.Home 'userdata\statev2.sqlite'
-  $idle = { "$(node (Join-Path $PSScriptRoot 't3mika-idle.cjs') $database 2>$null)".Trim() }
+  $ignored = $IgnoreThread -join ','
+  $idle = { "$(node (Join-Path $PSScriptRoot 't3mika-idle.cjs') $database $ignored 2>$null)".Trim() }
   $turns = & $idle
   if ($turns -ne '0') { Write-Log "warte: $turns laufende oder wartende Laeufe"; return }
 
