@@ -6,6 +6,13 @@ export const COMPUTER_USE_LINUX_OBSERVATION_TOOLS = [
   "focused_window",
   "get_app_state",
   "screenshot",
+  // Windows-MCP (Windows hosts)
+  "ControlStatus",
+  "DisplayInventory",
+  "Snapshot",
+  "Screenshot",
+  "Wait",
+  "WaitFor",
 ] as const;
 
 export const COMPUTER_USE_LINUX_INTERACTION_TOOLS = [
@@ -20,6 +27,17 @@ export const COMPUTER_USE_LINUX_INTERACTION_TOOLS = [
   "type_text",
   "move_window",
   "resize_window",
+  // Windows-MCP (Windows hosts). Its PowerShell, FileSystem, Registry, Process, Scrape and
+  // Notification tools reach beyond the screen and stay refused.
+  "App",
+  "Click",
+  "Type",
+  "Scroll",
+  "Move",
+  "Shortcut",
+  "MultiSelect",
+  "MultiEdit",
+  "Clipboard",
 ] as const;
 
 const OBSERVATION_TOOLS = new Set<string>(COMPUTER_USE_LINUX_OBSERVATION_TOOLS);

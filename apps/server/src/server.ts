@@ -89,6 +89,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ComputerUseLinuxApprovalBroker from "./desktop/ComputerUseLinuxApprovalBroker.ts";
 import * as ComputerUseLinuxDeployment from "./desktop/ComputerUseLinuxDeployment.ts";
 import { ComputerUseLinuxDeploymentEnabled } from "./desktop/ComputerUseLinuxAvailability.ts";
+import { COMPUTER_USE_PLATFORMS } from "./desktop/ComputerUseLinuxHostLease.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import * as DeviceHubProxy from "./device/DeviceHubProxy.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -541,11 +542,11 @@ const layerComputerUseLinuxApprovalBroker = Layer.unwrap(
   }),
 ).pipe(Layer.provide(layerServerEnvironment));
 
-// Linux hosts also serve the mediated desktop toolkit; sessions only get it with the
-// "Agent desktop control" setting on, and every interaction waits for approval.
+// Linux and Windows hosts also serve the mediated desktop toolkit; sessions only get it with
+// the "Agent desktop control" setting on, and interactions follow its approval setting.
 const layerMcpHttpServer = Layer.unwrap(
   Effect.gen(function* () {
-    return (yield* HostProcess.Platform) === "linux"
+    return COMPUTER_USE_PLATFORMS.has(yield* HostProcess.Platform)
       ? McpHttpServer.layerMcpTransport(
           Layer.mergeAll(McpHttpServer.layerTools, ComputerUseLinuxDeployment.layer),
         )
@@ -1235,7 +1236,10 @@ const layerMakeServer = Layer.unwrap(
       Layer.provideMerge(layerPlatformServices),
       // Only a server that serves the desktop toolkit may issue its capability.
       Layer.provide(
-        Layer.succeed(ComputerUseLinuxDeploymentEnabled, (yield* HostProcess.Platform) === "linux"),
+        Layer.succeed(
+          ComputerUseLinuxDeploymentEnabled,
+          COMPUTER_USE_PLATFORMS.has(yield* HostProcess.Platform),
+        ),
       ),
     );
   }),
