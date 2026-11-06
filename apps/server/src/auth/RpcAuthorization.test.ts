@@ -74,6 +74,15 @@ describe("RPC authorization scopes", () => {
     }
   });
 
+  it("keeps desktop approval details and decisions behind operate scope", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.subscribeDesktopApprovals)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.desktopApprovalRespond)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
+
   it("rejects unknown RPC method names", () => {
     for (const method of ["server.notRegistered", "toString", "constructor"]) {
       expect(() => requiredScopeForRpcMethod(method)).toThrow(

@@ -90,6 +90,9 @@ import * as PeerLinks from "./peer/PeerLinks.ts";
 import * as PeerMcpClient from "./peer/PeerMcpClient.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
+import * as ComputerUseLinuxApprovalBroker from "./desktop/ComputerUseLinuxApprovalBroker.ts";
+import * as ComputerUseLinuxDeployment from "./desktop/ComputerUseLinuxDeployment.ts";
+import { ComputerUseLinuxDeploymentEnabled } from "./desktop/ComputerUseLinuxAvailability.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import * as DeviceHubProxy from "./device/DeviceHubProxy.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -536,6 +539,26 @@ const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
 
 const layerServerEnvironment = ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer));
 
+const layerComputerUseLinuxApprovalBroker = Layer.unwrap(
+  Effect.gen(function* () {
+    const environment = yield* ServerEnvironment.ServerEnvironment;
+    const environmentId = yield* environment.getEnvironmentId;
+    return ComputerUseLinuxApprovalBroker.layer({ environmentId });
+  }),
+).pipe(Layer.provide(layerServerEnvironment));
+
+// Linux hosts also serve the mediated desktop toolkit; sessions only get it with the
+// "Agent desktop control" setting on, and every interaction waits for approval.
+const layerMcpHttpServer = Layer.unwrap(
+  Effect.gen(function* () {
+    return (yield* HostProcess.Platform) === "linux"
+      ? McpHttpServer.layerMcpTransport(
+          Layer.mergeAll(McpHttpServer.layerTools, ComputerUseLinuxDeployment.layer),
+        )
+      : McpHttpServer.layer;
+  }),
+);
+
 const layerAuth = EnvironmentAuth.layer.pipe(
   Layer.provideMerge(layerPersistence),
   Layer.provide(layerServerEnvironment),
@@ -759,6 +782,8 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
   Layer.provideMerge(layerRepositoryIdentityResolver),
   Layer.provideMerge(CodexManagedTokenBroker.layer),
   Layer.provideMerge(layerServerEnvironment),
+  Layer.provideMerge(ComputerUseLinuxApprovalBroker.layerRevocation),
+  Layer.provideMerge(layerComputerUseLinuxApprovalBroker),
   Layer.provideMerge(layerAuth),
   Layer.provideMerge(Layer.mergeAll(AssetSigner.layer, EnvironmentKeys.layer)),
   Layer.provideMerge(ServerSecretStore.layer),
@@ -820,7 +845,7 @@ const layerMakeRoutes = Layer.mergeAll(
     Ws.layer,
     speechStreamRouteLayer,
   ),
-  McpHttpServer.layer.pipe(
+  layerMcpHttpServer.pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),
@@ -1297,6 +1322,10 @@ const layerMakeServer = Layer.unwrap(
       Layer.provideMerge(AgentScopeLive.layer),
       Layer.provideMerge(layerPlatformServices),
       Layer.provide(Layer.succeed(HostProcess.InvokedAs, invokedAs)),
+      // Only a server that serves the desktop toolkit may issue its capability.
+      Layer.provide(
+        Layer.succeed(ComputerUseLinuxDeploymentEnabled, (yield* HostProcess.Platform) === "linux"),
+      ),
     );
   }),
 ).pipe(Layer.provide(ProcessRunner.layer));

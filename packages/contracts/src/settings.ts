@@ -1126,10 +1126,14 @@ export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 export const ResponseStreamingMode = Schema.Literals(["turn", "paragraph"]);
 export type ResponseStreamingMode = typeof ResponseStreamingMode.Type;
 
-/** A name both Claude and Codex accept as an MCP server key; `t3-code` stays T3's own. */
+/**
+ * Names both providers accept; T3 reserves its own server and the mediated desktop bridge.
+ * This blocks the canonical raw bridge name, not an operator-controlled alias or wrapper command:
+ * arbitrary central MCP transports remain trusted configuration outside this schema's visibility.
+ */
 export const CentralMcpServerName = TrimmedNonEmptyString.check(
   Schema.isMaxLength(64),
-  Schema.isPattern(/^(?!t3-code$)[a-zA-Z0-9][a-zA-Z0-9_-]*$/),
+  Schema.isPattern(/^(?!(?:t3-code|computer-use-linux)$)[a-zA-Z0-9][a-zA-Z0-9_-]*$/),
 );
 
 export const CentralMcpServerTransport = Schema.Union([
@@ -1151,11 +1155,21 @@ export const CentralMcpServerTransport = Schema.Union([
 ]);
 export type CentralMcpServerTransport = typeof CentralMcpServerTransport.Type;
 
-/** An MCP server T3 adds to every Claude and Codex session, whichever account runs it. */
+/** Optional fail-closed session scope for MCP servers with host-level capabilities. */
+export const CentralMcpServerSessionScope = Schema.Struct({
+  providerInstanceIds: Schema.Array(ProviderInstanceId).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  threadIds: Schema.Array(ThreadId).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+});
+export type CentralMcpServerSessionScope = typeof CentralMcpServerSessionScope.Type;
+
+/** An MCP server T3 adds globally, or only to sessions matching its optional scope. */
 export const CentralMcpServer = Schema.Struct({
   name: CentralMcpServerName,
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   transport: CentralMcpServerTransport,
+  sessionScope: Schema.optionalKey(CentralMcpServerSessionScope),
 });
 export type CentralMcpServer = typeof CentralMcpServer.Type;
 
@@ -1206,6 +1220,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "defaultProjectScripts",
   "enableAgentBrowserAccess",
   "enableAgentDeviceAccess",
+  "enableAgentDesktopAccess",
   "textGenerationModelSelection",
   "threadTitleInstructions",
   "sourceControlWriterModelSelection",
@@ -1244,6 +1259,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   defaultProjectScripts: Schema.optionalKey(Schema.Array(ProjectScript)),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
   enableAgentDeviceAccess: Schema.optionalKey(Schema.Boolean),
+  enableAgentDesktopAccess: Schema.optionalKey(Schema.Boolean),
   textGenerationModelSelection: Schema.optionalKey(ModelSelection),
   threadTitleInstructions: Schema.optionalKey(TrimmedString),
   sourceControlWriterModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
@@ -1428,6 +1444,8 @@ export const ServerSettings = Schema.Struct({
   speechPostProcessingModelSelection: Schema.NullOr(ModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  /** Linux desktop control is high impact and must be explicitly enabled for a new session. */
+  enableAgentDesktopAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   projectAgentBrowserAccessOverrides: Schema.Record(ProjectId, Schema.Boolean).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
@@ -1878,6 +1896,7 @@ export const ServerSettingsPatch = Schema.Struct({
   speechModelUnloadTimeout: Schema.optionalKey(SpeechModelUnloadTimeout),
   speechProjectCustomWords: Schema.optionalKey(SpeechCustomWords),
   speechPostProcessingModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
+  enableAgentDesktopAccess: Schema.optionalKey(Schema.Boolean),
   projectAgentBrowserAccessOverrides: Schema.optionalKey(
     Schema.Record(ProjectId, Schema.NullOr(Schema.Boolean)),
   ),

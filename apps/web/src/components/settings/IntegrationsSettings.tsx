@@ -1073,6 +1073,51 @@ function AgentBrowserAccessSetting() {
   );
 }
 
+function AgentDesktopAccessSetting() {
+  const { scope } = useSettingsScope();
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  const isProjectScope = scope.kind === "project" || scope.kind === "checkout";
+
+  return (
+    <SettingsRow
+      serverScoped
+      settingKeys={["enableAgentDesktopAccess"]}
+      {...searchableSetting("agent-desktop-access")}
+      description={
+        <>
+          {isProjectScope
+            ? "Allow agents in this project to see and control this Linux machine's desktop."
+            : "Allow agents to see and control this Linux machine's desktop. Projects can override it."}{" "}
+          Every action waits for your approval in T3 Code, and GNOME asks once to share the screen.
+          Needs <code>computer-use-linux</code> on the server&apos;s PATH. Applies when the agent
+          session next starts.
+        </>
+      }
+      resetAction={
+        settings.enableAgentDesktopAccess !== DEFAULT_SERVER_SETTINGS.enableAgentDesktopAccess ? (
+          <SettingResetButton
+            label="default desktop control"
+            onClick={() =>
+              updateSettings({
+                enableAgentDesktopAccess: DEFAULT_SERVER_SETTINGS.enableAgentDesktopAccess,
+              })
+            }
+          />
+        ) : null
+      }
+      control={
+        <ScopedSwitch
+          settingKeys={["enableAgentDesktopAccess"]}
+          aria-label="Agent desktop control"
+          checked={settings.enableAgentDesktopAccess}
+          onCheckedChange={(enabled) => updateSettings({ enableAgentDesktopAccess: enabled })}
+        />
+      }
+    />
+  );
+}
+
 function BrowserAutoShowFloatingPreviewSetting({ disabled }: { readonly disabled: boolean }) {
   const autoShow = useClientSettings((settings) => settings.browserAutoShowFloatingPreview);
   const updateSettings = useUpdateScopedSettings();
@@ -1586,6 +1631,7 @@ export function BrowserSettingsPanel() {
     <SettingsPageContainer>
       <SettingsSection id="browser-agent-access" title="Agent access">
         <AgentBrowserAccessSetting />
+        <AgentDesktopAccessSetting />
       </SettingsSection>
       <SettingsSection id="browser" title="Browsing">
         <SettingsUnavailableGroup message={desktopOnlyMessage}>

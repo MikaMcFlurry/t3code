@@ -102,6 +102,10 @@ const unitTestProject = {
 
 // Hash checkout paths to ports 61000-64999; Vitest's fixed port collides under inherited strictPort.
 const browserTestApiPort = 61_000 + ((Hash.string(import.meta.dirname) >>> 0) % 4_000);
+const browserTestExecutable = process.env.T3CODE_BROWSER_TEST_EXECUTABLE?.trim();
+const browserTestProvider = browserTestExecutable
+  ? playwright({ launchOptions: { executablePath: browserTestExecutable } })
+  : playwright();
 
 const browserTestProject = {
   extends: true,
@@ -139,7 +143,7 @@ const browserTestProject = {
     browser: {
       enabled: true,
       headless: true,
-      provider: playwright(),
+      provider: browserTestProvider,
       instances: [{ browser: "chromium" }],
       screenshotFailures: false,
       commands: {

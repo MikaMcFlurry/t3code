@@ -86,6 +86,7 @@ import {
 import * as HtmlHandlers from "./toolkits/html/handlers.ts";
 import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
 import { requestUrl } from "../requestUrl.ts";
+import * as ComputerUseLinuxMcpToolkit from "../desktop/ComputerUseLinuxMcpToolkit.ts";
 
 const mcpResourceMetadataUrl = (request: HttpServerRequest.HttpServerRequest) =>
   requestUrl(request).pipe(
@@ -1315,6 +1316,16 @@ export const layerMcpTransport = <RA, RE, RR>(registrations: Layer.Layer<RA, RE,
     allowSessionTermination: true,
     registrations,
   }).pipe(Layer.provide(layerMcpAuthMiddleware));
+
+/**
+ * Opt-in mediated desktop registration. Deliberately excluded from `layerTools`: no deployment
+ * may expose it until the real upstream factory and approval surface are provided and the
+ * authenticated provider session is explicitly issued the `desktop` capability.
+ */
+export const layerComputerUseLinuxToolkit = toolkitRegistration(
+  ComputerUseLinuxMcpToolkit.ComputerUseLinuxToolkit,
+  ComputerUseLinuxMcpToolkit.layer,
+);
 
 /** Every tool the T3 MCP server advertises. AgentContextBudget.test.ts measures this set. */
 export const layerTools = Layer.mergeAll(
