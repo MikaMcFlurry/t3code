@@ -417,3 +417,27 @@ it.effect("after Stop, a late session can't register until the next turn resumes
     ).toBe(false);
   }),
 );
+
+it.effect("a session set up before a Stop never registers, even after the next turn resumes", () =>
+  Effect.gen(function* () {
+    const broker = yield* make({ environmentId: EnvironmentId.make("environment-1") });
+    broker.activateSession({ providerSessionId: "session-1", threadId: bridgeRequest.threadId });
+    const before = broker.generation(bridgeRequest.threadId);
+    yield* Effect.promise(() => broker.interruptThreadAndWait(bridgeRequest.threadId));
+    broker.resumeThread(bridgeRequest.threadId);
+    const stale = broker.registerSession({
+      close: async () => undefined,
+      providerSessionId: "session-1",
+      threadId: bridgeRequest.threadId,
+      generation: before,
+    });
+    expect(stale.revoked).toBe(true);
+    const fresh = broker.registerSession({
+      close: async () => undefined,
+      providerSessionId: "session-1",
+      threadId: bridgeRequest.threadId,
+      generation: broker.generation(bridgeRequest.threadId),
+    });
+    expect(fresh.revoked).toBe(false);
+  }),
+);
