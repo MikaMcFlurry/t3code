@@ -184,6 +184,33 @@ describe("new thread model fallback", () => {
     it("stays on the default while the setting is off", () => {
       expect(resolve([codexAccount("codex_a", 0), claude], false)).toMatchObject(selection);
     });
+    it.each([
+      ["another account with the same model", [claude, codexAccount("codex_a", 20)], "codex_a"],
+      [
+        "nothing when only another provider has usage",
+        [codexAccount("codex_a", 100), claude],
+        null,
+      ],
+    ] as const)("keeps an agent's model: %s", (_name, providers, expected) => {
+      const next = availableAccountSelection({
+        selection,
+        providers: [limited, ...providers],
+        now,
+        settings: {
+          ...DEFAULT_SERVER_SETTINGS,
+          fallbackToAvailableAccounts: true,
+          providerInstances: Object.fromEntries(
+            providers.map((entry) => [
+              entry.instanceId,
+              { driver: entry.driver, enabled: true, config: {} },
+            ]),
+          ),
+        },
+        sameModelOnly: true,
+      });
+      expect(next?.instanceId ?? null).toBe(expected);
+      if (next) expect(next.model).toBe(selection.model);
+    });
   });
   it.each([undefined, "invalid"])("treats an unknown reset as exhausted: %s", (resetsAt) => {
     expect(
