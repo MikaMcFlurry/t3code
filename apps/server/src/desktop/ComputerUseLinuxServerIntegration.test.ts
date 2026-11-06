@@ -10,7 +10,6 @@ import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import { ComputerUseLinuxApprovalRevocation } from "./ComputerUseLinuxAvailability.ts";
 import * as ComputerUseLinuxApprovalBroker from "./ComputerUseLinuxApprovalBroker.ts";
 import {
-  __testing,
   ComputerUseLinuxApprovalSurfaceService,
   ComputerUseLinuxLeaseFactory,
   ComputerUseLinuxUserLeaseKey,
@@ -46,10 +45,9 @@ const threadInvocation: McpInvocationContext.McpThreadInvocationScope = {
   },
 };
 
-// The secret-store fallback; userLeaseScopeKey has its own test in ComputerUseLinuxHostLease.test.ts.
-const noUserLeaseKey = async (): Promise<string> => {
-  throw new Error("no user lease key in this test");
-};
+// userLeaseScopeKey has its own tests in ComputerUseLinuxHostLease.test.ts.
+const USER_LEASE_KEY = "user-lease-key-shared-by-this-users-t3-servers";
+const fixedUserLeaseKey = async (): Promise<string> => USER_LEASE_KEY;
 
 describe("ComputerUseLinuxServerIntegration", () => {
   it.effect(
@@ -75,7 +73,7 @@ describe("ComputerUseLinuxServerIntegration", () => {
   );
 
   it.effect(
-    "derives identity from authenticated MCP context and lease scope from the secret store",
+    "derives identity from authenticated MCP context and lease scope from the user's lease key",
     () =>
       Effect.gen(function* () {
         const approvals: string[] = [];
@@ -92,7 +90,7 @@ describe("ComputerUseLinuxServerIntegration", () => {
             secretStore((name, bytes) => secretReads.push({ name, bytes })),
           ),
           Effect.provideService(HostProcess.Platform, "linux"),
-          Effect.provideService(ComputerUseLinuxUserLeaseKey, { resolve: noUserLeaseKey }),
+          Effect.provideService(ComputerUseLinuxUserLeaseKey, { resolve: fixedUserLeaseKey }),
           Effect.provideService(ComputerUseLinuxLeaseFactory, {
             make: (input) => {
               leaseInputs.push(input);
@@ -135,12 +133,9 @@ describe("ComputerUseLinuxServerIntegration", () => {
         );
 
         const session = yield* program;
-        assert.deepStrictEqual(secretReads, [
-          { name: __testing.leaseSecretName, bytes: __testing.leaseSecretBytes },
-        ]);
-        assert.deepStrictEqual(leaseInputs, [
-          { platform: "linux", scopeKey: Buffer.from(secret).toString("base64url") },
-        ]);
+        // The installation's secret no longer picks the lease: every T3 server of the user shares it.
+        assert.deepStrictEqual(secretReads, []);
+        assert.deepStrictEqual(leaseInputs, [{ platform: "linux", scopeKey: USER_LEASE_KEY }]);
         assert.deepStrictEqual(upstreamEnvironments, []);
         assert.deepStrictEqual(
           (yield* Effect.promise(() => session.listTools())).map((tool) => tool.name),
@@ -190,7 +185,7 @@ describe("ComputerUseLinuxServerIntegration", () => {
             }),
           ),
           Effect.provideService(HostProcess.Platform, "linux"),
-          Effect.provideService(ComputerUseLinuxUserLeaseKey, { resolve: noUserLeaseKey }),
+          Effect.provideService(ComputerUseLinuxUserLeaseKey, { resolve: fixedUserLeaseKey }),
           Effect.provideService(ComputerUseLinuxLeaseFactory, {
             make: () => ({ withLease: (operation) => operation() }),
           }),
@@ -233,6 +228,7 @@ describe("ComputerUseLinuxServerIntegration", () => {
         revokeSession: broker.revokeSessionAndWait,
         revokeThread: broker.revokeThreadAndWait,
         interruptThread: broker.interruptThreadAndWait,
+        resumeThread: broker.resumeThread,
       });
       broker.activateSession({
         providerSessionId: threadInvocation.thread.providerSessionId,
@@ -246,7 +242,7 @@ describe("ComputerUseLinuxServerIntegration", () => {
         ),
         Effect.provideService(HostProcess.Platform, "linux"),
         Effect.provideService(ComputerUseLinuxApprovalRevocation, lifecycle),
-        Effect.provideService(ComputerUseLinuxUserLeaseKey, { resolve: noUserLeaseKey }),
+        Effect.provideService(ComputerUseLinuxUserLeaseKey, { resolve: fixedUserLeaseKey }),
         Effect.provideService(ComputerUseLinuxLeaseFactory, {
           make: () => ({ withLease: (operation) => operation() }),
         }),
@@ -323,29 +319,26 @@ describe("ComputerUseLinuxServerIntegration", () => {
         revokeSession: broker.revokeSessionAndWait,
         revokeThread: broker.revokeThreadAndWait,
         interruptThread: broker.interruptThreadAndWait,
+        resumeThread: broker.resumeThread,
       });
       broker.activateSession({
         providerSessionId: threadInvocation.thread.providerSessionId,
         threadId: threadInvocation.thread.threadId,
       });
-      const delayedSecretStore = ServerSecretStore.ServerSecretStore.of({
-        create: () => Effect.void,
-        get: () => Effect.succeedNone,
-        getOrCreateRandom: () =>
-          Effect.promise(async () => {
-            markSecretRequested();
-            await secretReleased;
-            return secret;
-          }),
-        remove: () => Effect.void,
-        set: () => Effect.void,
-      });
+      const delayedUserLeaseKey = async () => {
+        markSecretRequested();
+        await secretReleased;
+        return USER_LEASE_KEY;
+      };
       const program = startComputerUseLinuxForCurrentMcpInvocation().pipe(
         Effect.provideService(McpInvocationContext.McpInvocationContext, threadInvocation),
-        Effect.provideService(ServerSecretStore.ServerSecretStore, delayedSecretStore),
+        Effect.provideService(
+          ServerSecretStore.ServerSecretStore,
+          secretStore(() => undefined),
+        ),
         Effect.provideService(HostProcess.Platform, "linux"),
         Effect.provideService(ComputerUseLinuxApprovalRevocation, lifecycle),
-        Effect.provideService(ComputerUseLinuxUserLeaseKey, { resolve: noUserLeaseKey }),
+        Effect.provideService(ComputerUseLinuxUserLeaseKey, { resolve: delayedUserLeaseKey }),
         Effect.provideService(ComputerUseLinuxLeaseFactory, {
           make: () => ({ withLease: (operation) => operation() }),
         }),

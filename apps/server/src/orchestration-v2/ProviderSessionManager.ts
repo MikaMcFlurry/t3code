@@ -2803,7 +2803,9 @@ export const layerWithOptions = (
             ),
           startTurn: (input) =>
             busyTurn(input, () =>
-              agentFeedbackMode.pipe(
+              // A new turn may use the desktop again after a Stop closed it.
+              Effect.sync(() => desktopApprovalRevocation.resumeThread(input.threadId)).pipe(
+                Effect.andThen(agentFeedbackMode),
                 Effect.flatMap((agentFeedback) => runtime.startTurn({ ...input, agentFeedback })),
                 turnMetrics("send", input.modelSelection.model),
               ),
