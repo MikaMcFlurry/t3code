@@ -13,6 +13,7 @@ import {
   type OrchestratorMcpThreadTimelineItem,
   type OrchestrationV2RemoteTaskChild,
   type OrchestrationV2Subagent,
+  type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   type ProjectId,
   type ProviderInstanceId,
   ProviderDriverKind,
@@ -46,6 +47,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import { forkParked } from "../serverActivation.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as PeerForwarding from "./PeerForwarding.ts";
 import * as PeerLinks from "./PeerLinks.ts";
 
@@ -149,6 +151,7 @@ const make = Effect.gen(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const projects = yield* ProjectService.ProjectService;
   const repositoryIdentities = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
+  const git = yield* GitVcsDriver.GitVcsDriver;
   const random = yield* SecureRandom.SecureRandom;
   const hereId = yield* ServerEnvironment.ServerEnvironment.pipe(
     Effect.flatMap((environment) => environment.getEnvironmentId),
@@ -251,6 +254,46 @@ const make = Effect.gen(function* () {
     return chosen.providerInstanceId;
   });
 
+  /**
+   * Where a task's worktree there can start, in order: this checkout's commit,
+   * which the other checkout has when it fetched it, then this branch on the
+   * remote, which only holds the same commit when nothing here is unpushed.
+   */
+  const worktreeBases = Effect.fn("RemoteDelegation.worktreeBases")(function* (thread: {
+    readonly projectId: ProjectId;
+    readonly worktreePath: string | null;
+  }) {
+    const project = yield* projects.getById(thread.projectId).pipe(
+      Effect.map(Option.getOrUndefined),
+      Effect.orElseSucceed(() => undefined),
+    );
+    const cwd = thread.worktreePath ?? project?.workspaceRoot;
+    const head =
+      cwd === undefined
+        ? undefined
+        : yield* git
+            .resolveCommit({ cwd, revision: "HEAD" })
+            .pipe(Effect.orElseSucceed(() => undefined));
+    if (cwd === undefined || head === undefined) {
+      return yield* new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message:
+          "Isolation \"worktree\" needs this thread's checkout to be a Git repository with a commit. Omit isolation to work in that project's checkout.",
+      });
+    }
+    const status = yield* git.statusDetailsLocal(cwd).pipe(Effect.orElseSucceed(() => undefined));
+    const remoteBranch =
+      status?.hasUpstream === true && status.aheadCount === 0
+        ? (status.upstreamRef?.replace(/^[^/]+\//, "") ?? status.branch)
+        : null;
+    const bases: Array<OrchestrationV2ThreadLaunchWorkspaceStrategy> = [
+      { type: "worktree", baseRef: head.commitSha, startFromOrigin: false },
+    ];
+    if (remoteBranch)
+      bases.push({ type: "worktree", baseRef: remoteBranch, startFromOrigin: true });
+    return { commit: head.commitSha, branch: status?.branch ?? null, bases } as const;
+  });
+
   const delegate: RemoteDelegation["Service"]["delegate"] = Effect.fn("RemoteDelegation.delegate")(
     function* (scope, input) {
       const parent = yield* threads.getThreadRecords(scope.thread.threadId, ["runs"]).pipe(
@@ -277,15 +320,9 @@ const make = Effect.gen(function* () {
       }
       const parentNodeId = parentRun.rootNodeId;
       const { target } = input;
-      // A worktree there would branch from a commit this checkout has and the
-      // other may not, so a remote task runs in that project's checkout.
-      if (input.isolation === "worktree") {
-        return yield* new OrchestratorMcpFailure({
-          code: "invalid_request",
-          message:
-            'A task in a linked environment runs in that project\'s checkout; isolation "worktree" is not supported there. Omit isolation, or use t3_thread_launch with environmentId and a worktree workspaceStrategy.',
-        });
-      }
+      // A worktree there starts from this checkout's commit, as a local one does.
+      const isolated =
+        input.isolation === "worktree" ? yield* worktreeBases(parent.thread) : undefined;
       // The provider and model inherit as they do for a task here. Another
       // provider there has no model to inherit, so the caller names one.
       const inherited = parent.thread.modelSelection;
@@ -333,16 +370,14 @@ const make = Effect.gen(function* () {
       const key = input.clientRequestId ?? (yield* random.uuidV4());
       const task = taskPrompt(input);
       const title = input.title ?? parent.thread.title;
-      const launched = yield* forwarding.call(
-        scope,
-        ProjectToolkit.tools.t3_thread_launch,
-        target.environmentId,
-        {
+      const launch = (workspaceStrategy?: OrchestrationV2ThreadLaunchWorkspaceStrategy) =>
+        forwarding.call(scope, ProjectToolkit.tools.t3_thread_launch, target.environmentId, {
           projectId,
           title,
           modelSelection: { instanceId, model, ...(options === undefined ? {} : { options }) },
           ...(runtimeMode === undefined ? {} : { runtimeMode }),
           ...(interactionMode === undefined ? {} : { interactionMode }),
+          ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
           message: task,
           clientRequestId: `delegate:${scope.thread.threadId}:${key}`,
           // The thread there shows it is this thread's subagent, with a way back.
@@ -351,8 +386,30 @@ const make = Effect.gen(function* () {
             threadId: parent.thread.id,
             title: parent.thread.title,
           },
-        },
-      );
+        });
+      // A base the other checkout lacks is refused there before any thread
+      // exists, so the next base reuses the same launch key.
+      let launched: Effect.Success<ReturnType<typeof launch>> | undefined;
+      let refusal: OrchestratorMcpFailure | undefined;
+      if (isolated === undefined) launched = yield* launch();
+      for (const base of isolated?.bases ?? []) {
+        const attempt = yield* Effect.result(launch(base));
+        if (attempt._tag === "Success") {
+          launched = attempt.success;
+          break;
+        }
+        if (attempt.failure.code !== "invalid_request") return yield* attempt.failure;
+        refusal = attempt.failure;
+      }
+      if (launched === undefined) {
+        const where = isolated?.branch ? `branch ${isolated.branch} at ` : "";
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: `Isolation "worktree" starts the task's checkout there from this thread's ${where}commit ${isolated?.commit.slice(0, 12)}, which that project does not have${
+            isolated?.bases.length === 1 ? " and is not pushed" : ""
+          }. Push the branch, or fetch it in that project, then delegate again. Its refusal: ${refusal?.message ?? "none"}`,
+        });
+      }
       const link = yield* links.get(target.environmentId).pipe(
         Effect.map(Option.getOrUndefined),
         Effect.orElseSucceed(() => undefined),
