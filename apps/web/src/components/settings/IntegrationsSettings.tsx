@@ -8,6 +8,7 @@ import {
   AuthSettingsWriteScope,
   BrowserImportFailureReason,
   BROWSER_PROFILE_MAX_COUNT,
+  type AgentDesktopApproval,
   type BrowserLinkTarget,
   type BrowserProfile,
   BrowserSearchEngine,
@@ -1162,11 +1163,11 @@ function AgentDesktopAccessSetting() {
       description={
         <>
           {isProjectScope
-            ? "Allow agents in this project to see and control this Linux machine's desktop."
-            : "Allow agents to see and control this Linux machine's desktop. Projects can override it."}{" "}
-          Every action waits for your approval in T3 Code, and GNOME asks once to share the screen.
-          Needs <code>computer-use-linux</code> on the server&apos;s PATH. Applies when the agent
-          session next starts.
+            ? "Allow agents in this project to see and control this machine's desktop."
+            : "Allow agents to see and control this machine's desktop. Projects can override it."}{" "}
+          Linux needs <code>computer-use-linux</code> on the server&apos;s PATH, and GNOME asks once
+          to share the screen. Windows needs <code>uv</code>; T3 runs Windows-MCP through it. Shell,
+          file, registry and process tools stay off. Applies when the agent session next starts.
         </>
       }
       resetAction={
@@ -1188,6 +1189,59 @@ function AgentDesktopAccessSetting() {
           checked={settings.enableAgentDesktopAccess}
           onCheckedChange={(enabled) => updateSettings({ enableAgentDesktopAccess: enabled })}
         />
+      }
+    />
+  );
+}
+
+const DESKTOP_APPROVAL_LABELS: Record<AgentDesktopApproval, string> = {
+  "every-action": "Ask every time",
+  "full-access-threads": "Not in full access",
+  standing: "Never ask",
+};
+
+function AgentDesktopApprovalSetting() {
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+
+  return (
+    <SettingsRow
+      serverScoped
+      settingKeys={["agentDesktopApproval"]}
+      {...searchableSetting("agent-desktop-approval")}
+      description="When an agent's click, typing or other desktop action waits for your approval. Not in full access: threads running in full access act without asking. Never ask: a standing approval for every thread with desktop control. Stop or a new session still ends it."
+      resetAction={
+        settings.agentDesktopApproval !== DEFAULT_SERVER_SETTINGS.agentDesktopApproval ? (
+          <SettingResetButton
+            label="desktop approval"
+            onClick={() =>
+              updateSettings({ agentDesktopApproval: DEFAULT_SERVER_SETTINGS.agentDesktopApproval })
+            }
+          />
+        ) : null
+      }
+      control={
+        <Select
+          value={settings.agentDesktopApproval}
+          onValueChange={(value) => {
+            if (value === "every-action" || value === "full-access-threads" || value === "standing") {
+              updateSettings({ agentDesktopApproval: value });
+            }
+          }}
+        >
+          <SelectTrigger size="sm" className="w-full sm:w-44" aria-label="Desktop approval">
+            <SelectValue>{DESKTOP_APPROVAL_LABELS[settings.agentDesktopApproval]}</SelectValue>
+          </SelectTrigger>
+          <SelectPopup align="end" alignItemWithTrigger={false}>
+            {(Object.keys(DESKTOP_APPROVAL_LABELS) as ReadonlyArray<AgentDesktopApproval>).map(
+              (approval) => (
+                <SelectItem hideIndicator key={approval} value={approval}>
+                  {DESKTOP_APPROVAL_LABELS[approval]}
+                </SelectItem>
+              ),
+            )}
+          </SelectPopup>
+        </Select>
       }
     />
   );
@@ -1748,6 +1802,7 @@ export function BrowserSettingsPanel() {
       <SettingsSection id="browser-agent-access" title={gt("Agent access")}>
         <AgentBrowserAccessSetting />
         <AgentDesktopAccessSetting />
+        <AgentDesktopApprovalSetting />
       </SettingsSection>
       <SettingsSection id="browser" title={gt("Browsing")}>
         <SettingsUnavailableGroup message={desktopOnlyMessage}>
