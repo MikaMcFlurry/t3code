@@ -233,6 +233,7 @@ import {
   normalizeMcpText,
 } from "@t3tools/provider-core/server/mcpToolPresentation";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
+import { centralMcpServersForSession } from "@t3tools/provider-core/server/centralMcpServerScope";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import {
@@ -2887,7 +2888,7 @@ export function claudeMcpQueryOverrides(input: {
 } {
   const session = input.mcpSession;
   const central = claudeCentralMcpServers(
-    input.centralMcpServers,
+    centralMcpServersForSession(input.centralMcpServers, session),
     McpProviderSession.sharedMcpSessionEnvironment("claudeAgent", session),
   );
   if (session === undefined) {

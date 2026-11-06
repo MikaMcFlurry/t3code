@@ -117,7 +117,7 @@ export function acpCentralMcpServers(
   servers: ReadonlyArray<CentralMcpServer> | undefined,
 ): ReadonlyArray<EffectAcpSchema.McpServer> {
   return (servers ?? [])
-    .filter((server) => server.enabled)
+    .filter((server) => server.enabled && server.sessionScope === undefined)
     .map((server) => acpCentralMcpServer(server));
 }
 
@@ -130,7 +130,7 @@ export const resolveAcpCentralMcpServers = Effect.fn(
 )(function* (servers: ReadonlyArray<CentralMcpServer> | undefined) {
   const environment = yield* HostProcess.Environment;
   return yield* Effect.forEach(
-    (servers ?? []).filter((server) => server.enabled),
+    (servers ?? []).filter((server) => server.enabled && server.sessionScope === undefined),
     (server) => {
       const transport = server.transport;
       if (transport.type !== "stdio") return Effect.succeed(acpCentralMcpServer(server));

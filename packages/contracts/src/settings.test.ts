@@ -56,6 +56,13 @@ it("drops theme defaults from a client's settings patch", () => {
 });
 
 describe("storage cleanup settings", () => {
+  it("keeps Linux desktop control disabled until explicitly enabled", () => {
+    expect(decodeServerSettings({}).enableAgentDesktopAccess).toBe(false);
+    expect(decodeServerSettingsPatch({ enableAgentDesktopAccess: true })).toEqual({
+      enableAgentDesktopAccess: true,
+    });
+  });
+
   it("keeps cleanup disabled for existing installations", () => {
     expect(decodeServerSettings({}).worktreeCleanup).toBeNull();
     expect(decodeServerSettings({}).storageCleanup).toEqual({
