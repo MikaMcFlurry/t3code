@@ -104,14 +104,57 @@ describe("ComputerUseLinuxUpstreamFactory", () => {
     assert.isFalse(madeClient);
   });
 
-  it("fails closed off Linux", async () => {
+  it("fails closed off Linux and Windows", async () => {
     const factory = makeComputerUseLinuxUpstreamFactory({
-      platform: "win32",
-      resolveExecutable: () => "computer-use-linux.exe",
+      platform: "darwin",
+      resolveExecutable: () => "/usr/local/bin/computer-use-linux",
     });
     await expect(factory.start({ environment: {} })).rejects.toBeInstanceOf(
       ComputerUseLinuxUpstreamStartError,
     );
+  });
+
+  it("starts the pinned Windows-MCP through uvx on Windows with a minimal environment", async () => {
+    const parameters: Array<{
+      readonly args?: ReadonlyArray<string>;
+      readonly command: string;
+      readonly env?: Record<string, string>;
+    }> = [];
+    const fakeTransport = { close: async () => undefined };
+    const factory = makeComputerUseLinuxUpstreamFactory({
+      platform: "win32",
+      environment: {
+        PATH: "C:/safe/bin",
+        SystemRoot: "C:/Windows",
+        USERPROFILE: "C:/Users/me",
+        NODE_OPTIONS: "--require C:/untrusted/inject.js",
+        T3_PROVIDER_SESSION_ID: "attacker-controlled",
+      },
+      resolveExecutable: (command, platform) => {
+        assert.equal(command, "uvx");
+        assert.equal(platform, "win32");
+        return "C:/safe/bin/uvx.exe";
+      },
+      transportFactory: (input) => {
+        parameters.push(input);
+        return fakeTransport as never;
+      },
+      clientFactory: () => ({
+        connect: async () => undefined,
+        listTools: async () => ({ tools: [{ name: "Screenshot" }] }),
+        callTool: async () => ({ content: [] }),
+        close: async () => undefined,
+      }),
+    });
+
+    const upstream = await factory.start({ environment: COMPUTER_USE_LINUX_PORTAL_ONLY_ENVIRONMENT });
+    assert.equal(parameters[0]?.command, "C:/safe/bin/uvx.exe");
+    assert.deepStrictEqual(parameters[0]?.args, ["windows-mcp==0.8.8", "serve"]);
+    assert.equal(parameters[0]?.env?.USERPROFILE, "C:/Users/me");
+    assert.notProperty(parameters[0]?.env ?? {}, "NODE_OPTIONS");
+    assert.notProperty(parameters[0]?.env ?? {}, "T3_PROVIDER_SESSION_ID");
+    assert.notProperty(parameters[0]?.env ?? {}, "COMPUTER_USE_LINUX_ENABLE_SHELL");
+    await upstream.close();
   });
 
   it("closes the client and transport when startup is aborted", async () => {

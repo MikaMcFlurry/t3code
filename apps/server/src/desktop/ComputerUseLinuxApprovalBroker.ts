@@ -16,6 +16,8 @@ import * as Stream from "effect/Stream";
 import type { ComputerUseLinuxBridgeRequest } from "./ComputerUseLinuxBridge.ts";
 import { ComputerUseLinuxApprovalRevocation } from "./ComputerUseLinuxAvailability.ts";
 import { ComputerUseLinuxApprovalSurfaceService } from "./ComputerUseLinuxServerIntegration.ts";
+import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import * as ServerSettings from "../serverSettings.ts";
 
 const DEFAULT_APPROVAL_TTL_MS = 60_000;
 const MAX_ARGUMENT_BYTES = 64 * 1_024;
@@ -57,6 +59,8 @@ export class ComputerUseLinuxApprovalBroker extends Context.Service<
       options: { readonly signal: AbortSignal },
     ) => Promise<boolean>;
     readonly respond: (input: DesktopApprovalRespondInput) => boolean;
+    /** Whether the request's provider session still holds a live, unrevoked desktop credential. */
+    readonly isLive: (request: ComputerUseLinuxBridgeRequest) => boolean;
     readonly revokeSession: (providerSessionId: string) => void;
     readonly revokeThread: (threadId: ThreadId) => void;
     readonly revokeAll: () => void;
@@ -109,6 +113,11 @@ export const make = (options: ComputerUseLinuxApprovalBrokerOptions) =>
       entry.resolve(approved);
       publish();
       return true;
+    };
+
+    const isLive = (input: ComputerUseLinuxBridgeRequest) => {
+      const credential = credentials.get(input.providerSessionId);
+      return credential?.status === "active" && credential.threadId === input.threadId;
     };
 
     const request = (
@@ -279,6 +288,7 @@ export const make = (options: ComputerUseLinuxApprovalBrokerOptions) =>
 
     return ComputerUseLinuxApprovalBroker.of({
       request,
+      isLive,
       respond,
       revokeSession,
       revokeThread,
@@ -302,11 +312,36 @@ export const layer = (options: ComputerUseLinuxApprovalBrokerOptions) =>
     ),
   );
 
+/**
+ * Interactions ask through the broker unless "Agent desktop approval" grants them standing:
+ * in every thread, or only in threads running in full access. A standing grant still needs the
+ * session's live credential, so Stop, a new session or a revocation ends it.
+ */
 export const layerApprovalSurface = Layer.effect(
   ComputerUseLinuxApprovalSurfaceService,
-  ComputerUseLinuxApprovalBroker.pipe(
-    Effect.map((broker) => ComputerUseLinuxApprovalSurfaceService.of({ request: broker.request })),
-  ),
+  Effect.gen(function* () {
+    const broker = yield* ComputerUseLinuxApprovalBroker;
+    const settings = yield* ServerSettings.ServerSettingsService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
+    const standing = Effect.fn("ComputerUseLinuxApprovalBroker.standing")(
+      function* (threadId: ThreadId) {
+        const approval = (yield* settings.getSettings).agentDesktopApproval;
+        if (approval === "standing") return true;
+        if (approval !== "full-access-threads") return false;
+        return (yield* threads.getThreadShell(threadId))?.runtimeMode === "full-access";
+      },
+      Effect.orElseSucceed(() => false),
+    );
+    return ComputerUseLinuxApprovalSurfaceService.of({
+      request: async (request, options) =>
+        !options.signal.aborted &&
+        broker.isLive(request) &&
+        (await runPromise(standing(ThreadId.make(request.threadId))))
+          ? true
+          : broker.request(request, options),
+    });
+  }),
 );
 
 export const layerRevocation = Layer.effect(
@@ -327,6 +362,7 @@ export const layerRevocation = Layer.effect(
 export const disabled = ComputerUseLinuxApprovalBroker.of({
   request: async () => false,
   respond: () => false,
+  isLive: () => false,
   revokeSession: () => undefined,
   revokeThread: () => undefined,
   revokeAll: () => undefined,

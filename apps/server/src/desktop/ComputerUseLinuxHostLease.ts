@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off -- Linux abstract Unix sockets provide a kernel-owned cross-process lease unavailable through Effect's network API.
+// @effect-diagnostics nodeBuiltinImport:off -- Linux abstract Unix sockets and Windows named pipes provide a kernel-owned cross-process lease unavailable through Effect's network API.
 import * as NodeCrypto from "node:crypto";
 import * as NodeNet from "node:net";
 import * as Schema from "effect/Schema";
@@ -18,6 +18,9 @@ export interface ComputerUseLinuxHostLeaseOptions {
   readonly scopeKey: string;
 }
 
+/** Hosts with a desktop backend: computer-use-linux on Linux, Windows-MCP on Windows. */
+export const COMPUTER_USE_PLATFORMS: ReadonlySet<NodeJS.Platform> = new Set(["linux", "win32"]);
+
 export class ComputerUseLinuxLeaseBusyError extends Schema.TaggedError<ComputerUseLinuxLeaseBusyError>()(
   "ComputerUseLinuxLeaseBusyError",
   {},
@@ -32,7 +35,7 @@ export class ComputerUseLinuxLeasePlatformError extends Schema.TaggedError<Compu
   { platform: Schema.String },
 ) {
   override get message(): string {
-    return `Computer Use host lease requires Linux abstract sockets; current platform is ${this.platform}.`;
+    return `Computer Use host lease needs a Linux abstract socket or a Windows named pipe; current platform is ${this.platform}.`;
   }
 }
 
@@ -52,11 +55,16 @@ export class ComputerUseLinuxHostLease implements ComputerUseLinuxLease {
   constructor(options: ComputerUseLinuxHostLeaseOptions) {
     this.platform = options.platform;
     const digest = NodeCrypto.createHash("sha256").update(options.scopeKey).digest("hex");
-    this.socketName = `\0t3-computer-use-${digest.slice(0, 32)}`;
+    // A Windows named pipe has the same lifetime and single-owner semantics as the abstract
+    // socket: a second listener gets EADDRINUSE, and the pipe goes when the process does.
+    this.socketName =
+      options.platform === "win32"
+        ? `\\\\.\\pipe\\t3-computer-use-${digest.slice(0, 32)}`
+        : `\0t3-computer-use-${digest.slice(0, 32)}`;
   }
 
   async acquire(): Promise<ComputerUseLinuxLeaseHandle> {
-    if (this.platform !== "linux")
+    if (!COMPUTER_USE_PLATFORMS.has(this.platform))
       throw new ComputerUseLinuxLeasePlatformError({ platform: this.platform });
     const server = NodeNet.createServer((socket) => socket.destroy());
     try {
