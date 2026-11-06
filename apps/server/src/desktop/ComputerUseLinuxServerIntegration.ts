@@ -128,7 +128,10 @@ class ComputerUseLinuxBoundSession {
  */
 export const startComputerUseLinuxForCurrentMcpInvocation = Effect.fn(
   "ComputerUseLinuxServerIntegration.startForCurrentMcpInvocation",
-)(function* () {
+)(function* (
+  /** The thread's Stop generation when the tool call began; a Stop since then voids the call. */
+  generation: number,
+) {
   const invocation = yield* McpInvocationContext.McpInvocationContext;
   const scoped = yield* McpInvocationContext.requireThreadScope(
     invocation,
@@ -137,8 +140,6 @@ export const startComputerUseLinuxForCurrentMcpInvocation = Effect.fn(
   yield* McpInvocationContext.requireMcpCapability("desktop");
   const approvalSurface = yield* ComputerUseLinuxApprovalSurfaceService;
   const lifecycle = yield* ComputerUseLinuxApprovalRevocation;
-  // Read before anything awaits: a Stop while this call sets up voids it, even after resume.
-  const generation = lifecycle.generation(ThreadId.make(scoped.thread.threadId));
   const upstreamFactory = yield* ComputerUseLinuxUpstreamFactoryService;
   const leaseFactory = yield* ComputerUseLinuxLeaseFactory;
   const platform = yield* HostProcess.Platform;

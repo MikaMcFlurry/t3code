@@ -214,8 +214,8 @@ export const make = (options: ComputerUseLinuxApprovalBrokerOptions) =>
       for (const id of ids) settle(id, false);
     };
     const revokeThread = (threadId: ThreadId): void => {
+      // Generations stay: resetting one to 0 would let a call from before the Stop match again.
       stoppedThreads.delete(threadId);
-      stopGenerations.delete(threadId);
       for (const credential of credentials.values()) {
         if (credential.threadId === threadId) credential.status = "revoked";
       }
@@ -226,7 +226,6 @@ export const make = (options: ComputerUseLinuxApprovalBrokerOptions) =>
     };
     const revokeAll = (): void => {
       stoppedThreads.clear();
-      stopGenerations.clear();
       for (const credential of credentials.values()) credential.status = "revoked";
       for (const id of pending.keys()) settle(id, false);
     };
