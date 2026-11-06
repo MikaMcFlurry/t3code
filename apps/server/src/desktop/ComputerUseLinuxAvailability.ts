@@ -24,6 +24,8 @@ export interface ComputerUseLinuxApprovalRevocationShape {
   readonly revokeThread: (threadId: ThreadId) => Promise<void>;
   /** Stop: end the thread's pending approvals and running desktop calls; later turns may call again. */
   readonly interruptThread: (threadId: ThreadId) => Promise<void>;
+  /** A new turn starts: the thread may use the desktop again after a Stop. */
+  readonly resumeThread: (threadId: ThreadId) => void;
 }
 
 export const ComputerUseLinuxApprovalRevocation =
@@ -36,6 +38,7 @@ export const ComputerUseLinuxApprovalRevocation =
         revokeSession: async () => undefined,
         revokeThread: async () => undefined,
         interruptThread: async () => undefined,
+        resumeThread: () => undefined,
       }),
     },
   );

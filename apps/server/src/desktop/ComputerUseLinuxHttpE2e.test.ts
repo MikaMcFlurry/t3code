@@ -17,6 +17,7 @@ import {
   ComputerUseLinuxApprovalSurfaceService,
   ComputerUseLinuxLeaseFactory,
   ComputerUseLinuxUpstreamFactoryService,
+  ComputerUseLinuxUserLeaseKey,
 } from "./ComputerUseLinuxServerIntegration.ts";
 import * as ComputerUseLinuxApprovalBroker from "./ComputerUseLinuxApprovalBroker.ts";
 
@@ -61,6 +62,11 @@ it.effect("routes an authenticated HTTP bearer call through the mediated desktop
         Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
         Layer.provide(Layer.succeed(ServerSecretStore.ServerSecretStore, secretStore)),
         Layer.provide(Layer.succeed(HostProcess.Platform, "linux")),
+        Layer.provide(
+          Layer.succeed(ComputerUseLinuxUserLeaseKey, {
+            resolve: async () => "test-user-lease-key".repeat(3),
+          }),
+        ),
         Layer.provide(
           Layer.succeed(ComputerUseLinuxLeaseFactory, {
             make: () => ({ withLease: (operation) => operation() }),
