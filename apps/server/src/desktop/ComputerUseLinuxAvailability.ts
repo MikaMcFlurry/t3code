@@ -22,6 +22,8 @@ export interface ComputerUseLinuxApprovalRevocationShape {
   }) => { readonly revoked: boolean; readonly unregister: () => void };
   readonly revokeSession: (providerSessionId: string) => Promise<void>;
   readonly revokeThread: (threadId: ThreadId) => Promise<void>;
+  /** Stop: end the thread's pending approvals and running desktop calls; later turns may call again. */
+  readonly interruptThread: (threadId: ThreadId) => Promise<void>;
 }
 
 export const ComputerUseLinuxApprovalRevocation =
@@ -33,6 +35,7 @@ export const ComputerUseLinuxApprovalRevocation =
         registerSession: () => ({ revoked: false, unregister: () => undefined }),
         revokeSession: async () => undefined,
         revokeThread: async () => undefined,
+        interruptThread: async () => undefined,
       }),
     },
   );

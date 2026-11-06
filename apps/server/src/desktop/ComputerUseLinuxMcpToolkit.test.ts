@@ -9,6 +9,7 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as McpToolAccessTestkit from "../mcp/McpToolAccess.testkit.ts";
+import { __testing as toolkitTesting } from "./ComputerUseLinuxMcpToolkit.ts";
 import {
   ComputerUseLinuxApprovalSurfaceService,
   ComputerUseLinuxLeaseFactory,
@@ -137,8 +138,11 @@ describe("ComputerUseLinuxMcpToolkit", () => {
         { arguments: { max_width: 800 }, name: "screenshot" },
         { arguments: { x: 5, y: 6 }, name: "click" },
       ]);
-      assert.equal(upstreamStarts, 2);
-      assert.equal(upstreamCloses, 2);
+      // One kept backend serves every call of the session; a declined approval leaves it open.
+      assert.equal(upstreamStarts, 1);
+      assert.equal(upstreamCloses, 0);
+      yield* Effect.promise(() => toolkitTesting.closeKeptSessions());
+      assert.equal(upstreamCloses, 1);
     }).pipe(Effect.provide(layerTest));
   });
 

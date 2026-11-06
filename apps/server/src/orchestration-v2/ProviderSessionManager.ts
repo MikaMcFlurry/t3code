@@ -466,6 +466,12 @@ export const layerWithOptions = (
             Effect.logWarning("desktop-thread-revocation-failed", { threadId, cause }),
           ),
         );
+      const interruptDesktopThread = (threadId: ThreadId) =>
+        Effect.promise(() => desktopApprovalRevocation.interruptThread(threadId)).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("desktop-thread-interrupt-failed", { threadId, cause }),
+          ),
+        );
       const revokeMcpThread = (threadId: ThreadId) =>
         mcpSessionRegistry
           .revokeThread(threadId)
@@ -2460,6 +2466,13 @@ export const layerWithOptions = (
           // A provider starved of memory can stop answering, so no caller may wait on it unbounded.
           interruptTurn: (input) =>
             observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
+              // Stop also ends desktop work an MCP call started this turn, which the provider's
+              // own interrupt never reaches: a pending approval or a running click.
+              Effect.andThen(
+                input.providerThread.appThreadId === null
+                  ? Effect.void
+                  : interruptDesktopThread(input.providerThread.appThreadId),
+              ),
               Effect.andThen(
                 runtime.interruptTurn(input).pipe(
                   Effect.timeoutOrElse({

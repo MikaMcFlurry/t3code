@@ -19,6 +19,7 @@ import {
 import {
   ComputerUseLinuxHostLease,
   type ComputerUseLinuxLease,
+  userLeaseScopeKey,
 } from "./ComputerUseLinuxHostLease.ts";
 import type {
   ComputerUseLinuxMcpAdapter,
@@ -45,6 +46,13 @@ export const ComputerUseLinuxLeaseFactory = Context.Reference<{
   }) => ComputerUseLinuxLease;
 }>("t3/desktop/ComputerUseLinuxLeaseFactory", {
   defaultValue: () => ({ make: (input) => new ComputerUseLinuxHostLease(input) }),
+});
+
+/** Where this OS user's shared lease key comes from; tests replace it. */
+export const ComputerUseLinuxUserLeaseKey = Context.Reference<{
+  readonly resolve: typeof userLeaseScopeKey;
+}>("t3/desktop/ComputerUseLinuxUserLeaseKey", {
+  defaultValue: () => ({ resolve: userLeaseScopeKey }),
 });
 
 export class ComputerUseLinuxStartError extends Schema.TaggedError<ComputerUseLinuxStartError>()(
@@ -105,6 +113,11 @@ class ComputerUseLinuxBoundSession {
     this.adapter.revoke();
   }
 
+  /** Closed by revocation, Stop, shutdown or its owner; a closed session takes no more calls. */
+  get closed(): boolean {
+    return this.closePromise !== undefined;
+  }
+
   close(): Promise<void> {
     this.closePromise ??= this.adapter.close().finally(this.unregister);
     return this.closePromise;
@@ -130,11 +143,20 @@ export const startComputerUseLinuxForCurrentMcpInvocation = Effect.fn(
   const upstreamFactory = yield* ComputerUseLinuxUpstreamFactoryService;
   const leaseFactory = yield* ComputerUseLinuxLeaseFactory;
   const platform = yield* HostProcess.Platform;
-  const leaseSecret = yield* secretStore.getOrCreateRandom(
-    COMPUTER_USE_LINUX_LEASE_SECRET,
-    COMPUTER_USE_LINUX_LEASE_SECRET_BYTES,
+  const environment = yield* HostProcess.Environment;
+  const homeDirectory = yield* HostProcess.HomeDirectory;
+  const userLeaseKey = yield* ComputerUseLinuxUserLeaseKey;
+  // Shared by this user's T3 servers; this installation's own secret only when the file fails.
+  const leaseScopeKey = yield* Effect.tryPromise({
+    try: () => userLeaseKey.resolve({ platform, environment, homeDirectory }),
+    catch: (cause) => new ComputerUseLinuxStartError({ cause }),
+  }).pipe(
+    Effect.catch(() =>
+      secretStore
+        .getOrCreateRandom(COMPUTER_USE_LINUX_LEASE_SECRET, COMPUTER_USE_LINUX_LEASE_SECRET_BYTES)
+        .pipe(Effect.map((secret) => Buffer.from(secret).toString("base64url"))),
+    ),
   );
-  const leaseScopeKey = Buffer.from(leaseSecret).toString("base64url");
   const identity = {
     providerInstanceId: scoped.thread.providerInstanceId,
     providerSessionId: scoped.thread.providerSessionId,

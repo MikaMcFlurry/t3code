@@ -2453,6 +2453,7 @@ it.effect(
             revokedDesktopSessions.push(providerSessionId);
           },
           revokeThread: async () => undefined,
+          interruptThread: async () => undefined,
         }),
       );
       const effect = Effect.gen(function* () {

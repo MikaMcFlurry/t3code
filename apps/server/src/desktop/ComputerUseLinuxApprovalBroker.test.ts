@@ -1,9 +1,20 @@
 // @effect-diagnostics abortControllerInEffect:off -- Exercises external AbortSignal races at the Promise bridge boundary.
 import { DesktopApprovalId, EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 
-import { __testing, make } from "./ComputerUseLinuxApprovalBroker.ts";
+import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import {
+  __testing,
+  ComputerUseLinuxApprovalBroker,
+  layerApprovalSurface,
+  make,
+} from "./ComputerUseLinuxApprovalBroker.ts";
+import { ComputerUseLinuxApprovalSurfaceService } from "./ComputerUseLinuxServerIntegration.ts";
 
 const bridgeRequest = {
   arguments: { x: 5, password: "never-show", nested: { accessToken: "also-secret" } },
@@ -284,4 +295,94 @@ it.effect("keeps an exact private action snapshot for an informed decision", () 
     broker.revokeAll();
     expect(yield* Effect.promise(() => decision)).toBe(false);
   }),
+);
+
+it.effect(
+  "Stop refuses the thread's pending approvals and closes its sessions, keeping its credential",
+  () =>
+    Effect.gen(function* () {
+      const broker = yield* make({
+        environmentId: EnvironmentId.make("environment-1"),
+        makeId: () => "approval-stop",
+      });
+      broker.activateSession({ providerSessionId: "session-1", threadId: bridgeRequest.threadId });
+      let closed = 0;
+      broker.registerSession({
+        close: async () => {
+          closed += 1;
+        },
+        providerSessionId: "session-1",
+        threadId: bridgeRequest.threadId,
+      });
+      const decision = broker.request(bridgeRequest, { signal: new AbortController().signal });
+      yield* Effect.promise(() => broker.interruptThreadAndWait(bridgeRequest.threadId));
+      expect(yield* Effect.promise(() => decision)).toBe(false);
+      expect(closed).toBe(1);
+      // The next turn can call again without a new credential.
+      expect(broker.isLive(bridgeRequest)).toBe(true);
+    }),
+);
+
+const standingSurface = (
+  approval: "every-action" | "full-access-threads" | "standing",
+  runtimeMode: "full-access" | "approval-required",
+) =>
+  Effect.gen(function* () {
+    const broker = yield* make({
+      environmentId: EnvironmentId.make("environment-1"),
+      makeId: () => "approval-standing",
+    });
+    const context = yield* Layer.build(
+      layerApprovalSurface.pipe(
+        Layer.provide(Layer.succeed(ComputerUseLinuxApprovalBroker, broker)),
+        Layer.provide(ServerSettings.layerTest({ agentDesktopApproval: approval })),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: () => Effect.succeed({ runtimeMode } as never),
+          }),
+        ),
+      ),
+    );
+    return { broker, surface: Context.get(context, ComputerUseLinuxApprovalSurfaceService) };
+  });
+
+it.effect("grants standing approval only as the setting says, and only to a live session", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      for (const [approval, runtimeMode, standing] of [
+        ["standing", "approval-required", true],
+        ["full-access-threads", "full-access", true],
+        ["full-access-threads", "approval-required", false],
+        ["every-action", "full-access", false],
+      ] as const) {
+        const { broker, surface } = yield* standingSurface(approval, runtimeMode);
+        broker.activateSession({
+          providerSessionId: "session-1",
+          threadId: bridgeRequest.threadId,
+        });
+        const decision = surface.request(bridgeRequest, { signal: new AbortController().signal });
+        if (standing) {
+          expect(yield* Effect.promise(() => decision)).toBe(true);
+          expect(broker.snapshot().requests).toEqual([]);
+        } else {
+          // Not standing: the request waits for the user's answer.
+          yield* broker.stream.pipe(
+            Stream.filter((snapshot) => snapshot.requests.length === 1),
+            Stream.runHead,
+          );
+          broker.revokeAll();
+          expect(yield* Effect.promise(() => decision)).toBe(false);
+        }
+      }
+      // A revoked session gets no standing grant either.
+      const { broker, surface } = yield* standingSurface("standing", "full-access");
+      broker.activateSession({ providerSessionId: "session-1", threadId: bridgeRequest.threadId });
+      broker.revokeSession("session-1");
+      expect(
+        yield* Effect.promise(() =>
+          surface.request(bridgeRequest, { signal: new AbortController().signal }),
+        ),
+      ).toBe(false);
+    }),
+  ),
 );
