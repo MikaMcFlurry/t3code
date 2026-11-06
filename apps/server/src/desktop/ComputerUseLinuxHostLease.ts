@@ -138,57 +138,87 @@ export function userLeaseKeyFile(input: { readonly platform: NodeJS.Platform }):
 
 const WINDOWS_SYSTEM_SID = "S-1-5-18";
 const WINDOWS_ADMINISTRATORS_SID = "S-1-5-32-544";
+/** whoami and icacls may not hold up a desktop call indefinitely. */
+const WINDOWS_TOOL_TIMEOUT_MS = 10_000;
 
-const windowsTool = (name: string) =>
-  NodePath.join(process.env.SystemRoot ?? "C:\\Windows", "System32", name);
+const windowsTool = (...segments: ReadonlyArray<string>) =>
+  NodePath.join(process.env.SystemRoot ?? "C:\\Windows", "System32", ...segments);
+
+const runWindowsTool = (file: string, args: ReadonlyArray<string>) =>
+  execFile(file, [...args], { windowsHide: true, timeout: WINDOWS_TOOL_TIMEOUT_MS });
 
 /** The SID of the user this process runs as (locale-independent, unlike account names). */
 async function windowsUserSid(): Promise<string> {
-  const { stdout } = await execFile(windowsTool("whoami.exe"), ["/user", "/fo", "csv", "/nh"], {
-    windowsHide: true,
-  });
+  const { stdout } = await runWindowsTool(windowsTool("whoami.exe"), [
+    "/user",
+    "/fo",
+    "csv",
+    "/nh",
+  ]);
   const sid = /"(S-1-[0-9-]+)"\s*$/.exec(stdout.trim())?.[1];
   if (sid === undefined) throw new ComputerUseLinuxLeaseKeyError({ reason: "no user SID" });
   return sid;
 }
 
 /**
- * Windows has no file mode to check, so a path's DACL (as SDDL, which names SIDs) may only allow
- * this user, SYSTEM and Administrators: anyone else able to read or replace the key could hold or
- * split the lease.
+ * Why an SDDL's DACL is not private to this user, or undefined when it is: only deny ACEs and
+ * plain allow ACEs for the user, SYSTEM and Administrators pass; any other ACE type, callback and
+ * object ACEs included, or text it can't parse is refused rather than interpreted.
+ */
+export function privateDaclRefusal(sddl: string, userSid: string): string | undefined {
+  // The DACL up to any SACL; nothing in it may go unrecognized.
+  const dacl = /D:([^\r\n]*?)(?:S:|$)/m.exec(sddl)?.[1];
+  if (dacl === undefined) {
+    return "has no readable DACL";
+  }
+  const ace = /\(([^;()]*);[^;()]*;[^;()]*;[^;()]*;[^;()]*;([^;()]*)\)/g;
+  const aces = dacl.replace(/^[A-Z]*/, "");
+  if (aces.replace(ace, "") !== "") {
+    return "has a DACL T3 can't verify";
+  }
+  const allowed = new Set(["SY", "BA", WINDOWS_SYSTEM_SID, WINDOWS_ADMINISTRATORS_SID, userSid]);
+  for (const [, type, trustee] of aces.matchAll(ace)) {
+    if (type === "D") continue;
+    if (type !== "A" || trustee === undefined || !allowed.has(trustee)) {
+      return `grants ${trustee ?? "someone"} (${type ?? "?"}); only you, SYSTEM and Administrators may have access`;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A path's whole DACL, read as SDDL (SIDs, not localized names), may hold only deny ACEs and
+ * plain allow ACEs for this user, SYSTEM and Administrators. Any other ACE type, callback and
+ * object ACEs included, is refused rather than interpreted.
  */
 async function assertPrivateWindowsAcl(target: string, userSid: string): Promise<void> {
   const saved = NodePath.join(NodeOS.tmpdir(), `t3-lease-acl-${NodeCrypto.randomUUID()}.txt`);
   try {
-    await execFile(windowsTool("icacls.exe"), [target, "/save", saved], { windowsHide: true });
+    await runWindowsTool(windowsTool("icacls.exe"), [target, "/save", saved]);
     const sddl = (await NodeFSP.readFile(saved)).toString("utf16le");
-    const allowed = new Set(["SY", "BA", WINDOWS_SYSTEM_SID, WINDOWS_ADMINISTRATORS_SID, userSid]);
-    for (const [, type, trustee] of sddl.matchAll(/\((A|OA);[^;]*;[^;]*;[^;]*;[^;]*;([^)]+)\)/g)) {
-      if (type !== undefined && trustee !== undefined && !allowed.has(trustee)) {
-        throw new ComputerUseLinuxLeaseKeyError({
-          reason: `${target} also grants ${trustee}; only you, SYSTEM and Administrators may have access`,
-        });
-      }
+    const refusal = privateDaclRefusal(sddl, userSid);
+    if (refusal !== undefined) {
+      throw new ComputerUseLinuxLeaseKeyError({ reason: `${target} ${refusal}` });
     }
   } finally {
     await NodeFSP.rm(saved, { force: true });
   }
 }
 
-/** On Windows, give the key's directory a DACL of only this user, SYSTEM and Administrators. */
+/**
+ * Gives the key directory exactly this user, SYSTEM and Administrators, inheritance removed, and
+ * verifies that nothing else is left before any secret is written into it.
+ */
 async function restrictWindowsDirectory(directory: string, userSid: string): Promise<void> {
-  await execFile(
-    windowsTool("icacls.exe"),
-    [
-      directory,
-      "/inheritance:r",
-      "/grant:r",
-      `*${userSid}:(OI)(CI)F`,
-      `*${WINDOWS_SYSTEM_SID}:(OI)(CI)F`,
-      `*${WINDOWS_ADMINISTRATORS_SID}:(OI)(CI)F`,
-    ],
-    { windowsHide: true },
-  );
+  await runWindowsTool(windowsTool("icacls.exe"), [
+    directory,
+    "/inheritance:r",
+    "/grant:r",
+    `*${userSid}:(OI)(CI)F`,
+    `*${WINDOWS_SYSTEM_SID}:(OI)(CI)F`,
+    `*${WINDOWS_ADMINISTRATORS_SID}:(OI)(CI)F`,
+  ]);
+  await assertPrivateWindowsAcl(directory, userSid);
 }
 
 /** An existing key file must be a plain file only this user can use. */

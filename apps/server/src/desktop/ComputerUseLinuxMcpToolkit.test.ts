@@ -215,6 +215,7 @@ describe("ComputerUseLinuxMcpToolkit", () => {
   it("keeps one idle timer per session, and none while a call is in flight", () => {
     const entry = {
       session: { closed: false, close: async () => undefined } as never,
+      generation: 0,
       idle: undefined as ReturnType<typeof setTimeout> | undefined,
       active: 1,
     };

@@ -1,4 +1,8 @@
-import { McpCapabilityUnavailableError, OrchestratorMcpFailure } from "@t3tools/contracts";
+import {
+  McpCapabilityUnavailableError,
+  OrchestratorMcpFailure,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { McpSchema, Tool, Toolkit } from "effect/ai";
@@ -12,6 +16,7 @@ import {
   COMPUTER_USE_LINUX_INTERACTION_TOOLS,
   COMPUTER_USE_LINUX_OBSERVATION_TOOLS,
 } from "./ComputerUseLinuxPolicy.ts";
+import { ComputerUseLinuxApprovalRevocation } from "./ComputerUseLinuxAvailability.ts";
 import {
   ComputerUseLinuxBridgeApprovalError,
   ComputerUseLinuxBridgeRefusedError,
@@ -83,6 +88,8 @@ type DesktopSession = Effect.Success<
 
 interface KeptSession {
   readonly session: DesktopSession;
+  /** The thread's Stop generation the session was opened in; a later Stop retires it. */
+  readonly generation: number;
   idle: ReturnType<typeof setTimeout> | undefined;
   /** Calls in flight; the idle countdown only runs while this is zero. */
   active: number;
@@ -127,25 +134,44 @@ const closeKeptSession = (key: string, entry: KeptSession) => {
   return entry.session.close().catch(() => undefined);
 };
 
-const keptSession = Effect.fn("ComputerUseLinuxMcpToolkit.keptSession")(function* () {
+const staleCall = () =>
+  new ComputerUseLinuxToolError({
+    reason:
+      "The desktop session ended (Stop, a new session or a revoked approval). Call again to start a new one.",
+  });
+
+const keptSession = Effect.fn("ComputerUseLinuxMcpToolkit.keptSession")(function* (
+  generation: number,
+) {
   const invocation = yield* McpInvocationContext.McpInvocationContext;
   const scoped = yield* McpInvocationContext.requireThreadScope(invocation, "Computer Use");
+  const lifecycle = yield* ComputerUseLinuxApprovalRevocation;
+  const threadId = ThreadId.make(scoped.thread.threadId);
+  // A call from before the latest Stop may run no desktop action, through any session.
+  const current = () => lifecycle.generation(threadId) === generation;
+  if (!current()) return yield* staleCall();
   const key = [
     scoped.thread.providerInstanceId,
     scoped.thread.providerSessionId,
     scoped.thread.threadId,
   ].join("\u0000");
+  const reusable = (entry: KeptSession | undefined): entry is KeptSession =>
+    entry !== undefined && !entry.session.closed && entry.generation === generation;
   const existing = keptSessions.get(key);
-  if (existing !== undefined && !existing.session.closed) return { key, entry: existing };
-  if (existing !== undefined) forgetSession(key, existing);
-  const session = yield* startComputerUseLinuxForCurrentMcpInvocation();
+  if (reusable(existing)) return { key, entry: existing };
+  if (existing !== undefined) yield* Effect.promise(() => closeKeptSession(key, existing));
+  const session = yield* startComputerUseLinuxForCurrentMcpInvocation(generation);
+  if (!current() || session.closed) {
+    yield* Effect.promise(() => session.close().catch(() => undefined));
+    return yield* staleCall();
+  }
   // A concurrent first call may have kept its own session meanwhile; use one, close the other.
   const raced = keptSessions.get(key);
-  if (raced !== undefined && !raced.session.closed) {
+  if (reusable(raced)) {
     yield* Effect.promise(() => session.close().catch(() => undefined));
     return { key, entry: raced };
   }
-  const entry: KeptSession = { session, idle: undefined, active: 0 };
+  const entry: KeptSession = { session, generation, idle: undefined, active: 0 };
   keptSessions.set(key, entry);
   return { key, entry };
 });
@@ -165,10 +191,23 @@ const toolError = ({ cause }: ComputerUseLinuxCallError) =>
           : "Desktop operation failed.",
   });
 
+/** The thread's Stop generation, read first thing in the call; only MCP caller checks precede it. */
+const callGeneration = Effect.gen(function* () {
+  const invocation = yield* McpInvocationContext.McpInvocationContext;
+  const lifecycle = yield* ComputerUseLinuxApprovalRevocation;
+  return invocation.thread === undefined
+    ? 0
+    : lifecycle.generation(ThreadId.make(invocation.thread.threadId));
+});
+
 const handlers = {
   computer_use_linux: McpToolAccess.actsAsCaller((input) =>
-    McpInvocationContext.requireThreadMcpCapability("desktop").pipe(
-      Effect.andThen(keptSession()),
+    callGeneration.pipe(
+      Effect.flatMap((generation) =>
+        McpInvocationContext.requireThreadMcpCapability("desktop").pipe(
+          Effect.andThen(keptSession(generation)),
+        ),
+      ),
       Effect.flatMap(({ key, entry }) => {
         entry.active += 1;
         cancelIdleClose(entry);
