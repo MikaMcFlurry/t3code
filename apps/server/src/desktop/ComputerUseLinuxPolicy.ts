@@ -59,6 +59,9 @@ export const COMPUTER_USE_LINUX_PORTAL_ONLY_ENVIRONMENT = {
   COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD: "1",
   COMPUTER_USE_LINUX_SCREENSHOT_BACKEND: "portal",
   COMPUTER_USE_LINUX_ENABLE_SHELL: "0",
+  // A new process per call would otherwise ask for pointer and keyboard access every time.
+  // GNOME's dialog offers to remember the grant; later processes reuse its restore token.
+  COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP: "1",
 } as const;
 
 /** One instance belongs to the environment-level bridge and serializes every desktop operation. */

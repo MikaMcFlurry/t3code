@@ -23,6 +23,7 @@ describe("ComputerUseLinuxPolicy", () => {
       COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD: "1",
       COMPUTER_USE_LINUX_SCREENSHOT_BACKEND: "portal",
       COMPUTER_USE_LINUX_ENABLE_SHELL: "0",
+      COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP: "1",
     });
   });
 

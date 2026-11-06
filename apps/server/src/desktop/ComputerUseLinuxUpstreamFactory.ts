@@ -152,6 +152,17 @@ export function makeComputerUseLinuxUpstreamFactory(
           : {
               ...inheritedDesktopEnvironment(hostEnvironment),
               ...controlledEnvironment,
+              // GNOME's Screenshot portal asks on every call for a caller without an app ID,
+              // such as a system service, and rejects it when another app has focus.
+              // gnome-screenshot is the route meant for background services.
+              ...(controlledEnvironment.COMPUTER_USE_LINUX_SCREENSHOT_BACKEND === "portal" &&
+              dependencies.resolveExecutable(
+                "gnome-screenshot",
+                dependencies.platform,
+                hostEnvironment,
+              ) !== undefined
+                ? { COMPUTER_USE_LINUX_SCREENSHOT_BACKEND: "gnome-screenshot" }
+                : {}),
             },
         // Do not let untrusted desktop/tool content or terminal controls reach server logs, and
         // do not leave an unread pipe that can fill and deadlock the MCP child.
