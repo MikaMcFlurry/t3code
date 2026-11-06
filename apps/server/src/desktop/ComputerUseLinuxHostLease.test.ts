@@ -83,21 +83,14 @@ describe("ComputerUseLinuxHostLease", () => {
     }
   });
 
-  it("places the key by the OS account, not the process environment", async () => {
+  it("places the key by the OS account, not the process environment", () => {
     // oxlint-disable-next-line t3code/no-global-process-runtime -- Platform-gated key file test.
     const platform = NodeOS.platform();
-    const account = NodeOS.userInfo();
-    const file = await userLeaseKeyFile({ platform });
-    if (platform === "win32") {
-      expect(file).toBe(
-        NodePath.join(account.homedir, "AppData", "Local", "t3code", "computer-use-lease.key"),
-      );
-    } else {
-      expect(
-        file === NodePath.join(`/run/user/${account.uid}`, "t3code", "computer-use-lease.key") ||
-          file ===
-            NodePath.join(account.homedir, ".local", "state", "t3code", "computer-use-lease.key"),
-      ).toBe(true);
-    }
+    const home = NodeOS.userInfo().homedir;
+    expect(userLeaseKeyFile({ platform })).toBe(
+      platform === "win32"
+        ? NodePath.join(home, "AppData", "Local", "t3code-desktop-lease", "lease.key")
+        : NodePath.join(home, ".local", "state", "t3code-desktop-lease", "lease.key"),
+    );
   });
 });

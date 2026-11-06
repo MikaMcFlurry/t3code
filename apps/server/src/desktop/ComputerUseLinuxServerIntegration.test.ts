@@ -229,6 +229,7 @@ describe("ComputerUseLinuxServerIntegration", () => {
         revokeThread: broker.revokeThreadAndWait,
         interruptThread: broker.interruptThreadAndWait,
         resumeThread: broker.resumeThread,
+        generation: broker.generation,
       });
       broker.activateSession({
         providerSessionId: threadInvocation.thread.providerSessionId,
@@ -320,6 +321,7 @@ describe("ComputerUseLinuxServerIntegration", () => {
         revokeThread: broker.revokeThreadAndWait,
         interruptThread: broker.interruptThreadAndWait,
         resumeThread: broker.resumeThread,
+        generation: broker.generation,
       });
       broker.activateSession({
         providerSessionId: threadInvocation.thread.providerSessionId,

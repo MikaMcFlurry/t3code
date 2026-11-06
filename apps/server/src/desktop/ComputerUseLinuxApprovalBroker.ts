@@ -35,6 +35,8 @@ interface ActiveSession {
   readonly close: () => Promise<void>;
   readonly providerSessionId: string;
   readonly threadId: ThreadId;
+  /** The thread's Stop generation when the call that opens this session began. */
+  readonly generation?: number;
 }
 
 interface CredentialState {
@@ -78,6 +80,8 @@ export class ComputerUseLinuxApprovalBroker extends Context.Service<
     readonly interruptThreadAndWait: (threadId: ThreadId) => Promise<void>;
     /** A new turn: the thread may use the desktop again after a Stop. */
     readonly resumeThread: (threadId: ThreadId) => void;
+    /** Counts the thread's Stops; a session opened before the latest one never registers. */
+    readonly generation: (threadId: ThreadId) => number;
     readonly revokeAllAndWait: () => Promise<void>;
     readonly credentialCount: () => number;
     readonly snapshot: () => DesktopApprovalSnapshot;
@@ -122,6 +126,8 @@ export const make = (options: ComputerUseLinuxApprovalBrokerOptions) =>
     // Threads stopped since their last turn started: no desktop session registers and no
     // request is asked or granted until the next turn re-activates the thread.
     const stoppedThreads = new Set<string>();
+    const stopGenerations = new Map<string, number>();
+    const generation = (threadId: ThreadId) => stopGenerations.get(threadId) ?? 0;
     const isLive = (input: ComputerUseLinuxBridgeRequest) => {
       const credential = credentials.get(input.providerSessionId);
       return (
@@ -208,6 +214,8 @@ export const make = (options: ComputerUseLinuxApprovalBrokerOptions) =>
       for (const id of ids) settle(id, false);
     };
     const revokeThread = (threadId: ThreadId): void => {
+      stoppedThreads.delete(threadId);
+      stopGenerations.delete(threadId);
       for (const credential of credentials.values()) {
         if (credential.threadId === threadId) credential.status = "revoked";
       }
@@ -217,6 +225,8 @@ export const make = (options: ComputerUseLinuxApprovalBrokerOptions) =>
       for (const id of ids) settle(id, false);
     };
     const revokeAll = (): void => {
+      stoppedThreads.clear();
+      stopGenerations.clear();
       for (const credential of credentials.values()) credential.status = "revoked";
       for (const id of pending.keys()) settle(id, false);
     };
@@ -234,6 +244,7 @@ export const make = (options: ComputerUseLinuxApprovalBrokerOptions) =>
     ): { readonly revoked: boolean; readonly unregister: () => void } => {
       if (
         stoppedThreads.has(session.threadId) ||
+        (session.generation !== undefined && session.generation !== generation(session.threadId)) ||
         credentials.get(session.providerSessionId)?.status !== "active" ||
         credentials.get(session.providerSessionId)?.threadId !== session.threadId
       ) {
@@ -277,8 +288,10 @@ export const make = (options: ComputerUseLinuxApprovalBrokerOptions) =>
       }
     };
     const interruptThreadAndWait = async (threadId: ThreadId): Promise<void> => {
-      // Synchronously, before anything awaits: a session still starting can't register after.
+      // Synchronously, before anything awaits: a session still starting can't register after,
+      // not even once a later turn resumes the thread.
       stoppedThreads.add(threadId);
+      stopGenerations.set(threadId, generation(threadId) + 1);
       const ids = [...pending.entries()]
         .filter(([, entry]) => entry.request.threadId === threadId)
         .map(([id]) => id);
@@ -326,6 +339,7 @@ export const make = (options: ComputerUseLinuxApprovalBrokerOptions) =>
       revokeThreadAndWait,
       interruptThreadAndWait,
       resumeThread,
+      generation,
       revokeAllAndWait,
       credentialCount: () => credentials.size,
       snapshot,
@@ -384,6 +398,7 @@ export const layerRevocation = Layer.effect(
         revokeThread: broker.revokeThreadAndWait,
         interruptThread: broker.interruptThreadAndWait,
         resumeThread: broker.resumeThread,
+        generation: broker.generation,
       }),
     ),
   ),
@@ -403,6 +418,7 @@ export const disabled = ComputerUseLinuxApprovalBroker.of({
   revokeThreadAndWait: async () => undefined,
   interruptThreadAndWait: async () => undefined,
   resumeThread: () => undefined,
+  generation: () => 0,
   revokeAllAndWait: async () => undefined,
   credentialCount: () => 0,
   snapshot: () => ({ requests: [] }),

@@ -1,10 +1,14 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Linux abstract Unix sockets and Windows named pipes provide a kernel-owned cross-process lease unavailable through Effect's network API.
+import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeUtil from "node:util";
 import * as Schema from "effect/Schema";
+
+const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
 
 export interface ComputerUseLinuxLease {
   withLease<A>(operation: () => Promise<A>): Promise<A>;
@@ -121,33 +125,82 @@ export class ComputerUseLinuxLeaseKeyError extends Schema.TaggedError<ComputerUs
 }
 
 /**
- * Where this OS user's lease key lives, from the account itself rather than the process
- * environment, so servers started with different LOCALAPPDATA or XDG_STATE_HOME still agree:
- * the user's runtime directory on Linux when it exists, else the passwd home's state directory;
- * the profile's AppData\Local on Windows, whose ACL already admits only the user and SYSTEM.
+ * Where this OS user's lease key lives: a fixed place in the account's own home (from the OS
+ * account, not HOME, LOCALAPPDATA or XDG_STATE_HOME), so every server of the user agrees whether
+ * or not it started before login.
  */
-export async function userLeaseKeyFile(input: {
-  readonly platform: NodeJS.Platform;
-}): Promise<string> {
-  const account = NodeOS.userInfo();
-  if (input.platform === "win32") {
-    return NodePath.join(account.homedir, "AppData", "Local", "t3code", "computer-use-lease.key");
-  }
-  const runtime = `/run/user/${account.uid}`;
-  const runtimeExists = await NodeFSP.stat(runtime).then(
-    (stats) => stats.isDirectory() && stats.uid === account.uid,
-    () => false,
-  );
-  return runtimeExists
-    ? NodePath.join(runtime, "t3code", "computer-use-lease.key")
-    : NodePath.join(account.homedir, ".local", "state", "t3code", "computer-use-lease.key");
+export function userLeaseKeyFile(input: { readonly platform: NodeJS.Platform }): string {
+  const home = NodeOS.userInfo().homedir;
+  return input.platform === "win32"
+    ? NodePath.join(home, "AppData", "Local", "t3code-desktop-lease", "lease.key")
+    : NodePath.join(home, ".local", "state", "t3code-desktop-lease", "lease.key");
 }
 
-/** An existing key file must be a plain file of this user that nobody else can read. */
+const WINDOWS_SYSTEM_SID = "S-1-5-18";
+const WINDOWS_ADMINISTRATORS_SID = "S-1-5-32-544";
+
+const windowsTool = (name: string) =>
+  NodePath.join(process.env.SystemRoot ?? "C:\\Windows", "System32", name);
+
+/** The SID of the user this process runs as (locale-independent, unlike account names). */
+async function windowsUserSid(): Promise<string> {
+  const { stdout } = await execFile(windowsTool("whoami.exe"), ["/user", "/fo", "csv", "/nh"], {
+    windowsHide: true,
+  });
+  const sid = /"(S-1-[0-9-]+)"\s*$/.exec(stdout.trim())?.[1];
+  if (sid === undefined) throw new ComputerUseLinuxLeaseKeyError({ reason: "no user SID" });
+  return sid;
+}
+
+/**
+ * Windows has no file mode to check, so a path's DACL (as SDDL, which names SIDs) may only allow
+ * this user, SYSTEM and Administrators: anyone else able to read or replace the key could hold or
+ * split the lease.
+ */
+async function assertPrivateWindowsAcl(target: string, userSid: string): Promise<void> {
+  const saved = NodePath.join(NodeOS.tmpdir(), `t3-lease-acl-${NodeCrypto.randomUUID()}.txt`);
+  try {
+    await execFile(windowsTool("icacls.exe"), [target, "/save", saved], { windowsHide: true });
+    const sddl = (await NodeFSP.readFile(saved)).toString("utf16le");
+    const allowed = new Set(["SY", "BA", WINDOWS_SYSTEM_SID, WINDOWS_ADMINISTRATORS_SID, userSid]);
+    for (const [, type, trustee] of sddl.matchAll(/\((A|OA);[^;]*;[^;]*;[^;]*;[^;]*;([^)]+)\)/g)) {
+      if (type !== undefined && trustee !== undefined && !allowed.has(trustee)) {
+        throw new ComputerUseLinuxLeaseKeyError({
+          reason: `${target} also grants ${trustee}; only you, SYSTEM and Administrators may have access`,
+        });
+      }
+    }
+  } finally {
+    await NodeFSP.rm(saved, { force: true });
+  }
+}
+
+/** On Windows, give the key's directory a DACL of only this user, SYSTEM and Administrators. */
+async function restrictWindowsDirectory(directory: string, userSid: string): Promise<void> {
+  await execFile(
+    windowsTool("icacls.exe"),
+    [
+      directory,
+      "/inheritance:r",
+      "/grant:r",
+      `*${userSid}:(OI)(CI)F`,
+      `*${WINDOWS_SYSTEM_SID}:(OI)(CI)F`,
+      `*${WINDOWS_ADMINISTRATORS_SID}:(OI)(CI)F`,
+    ],
+    { windowsHide: true },
+  );
+}
+
+/** An existing key file must be a plain file only this user can use. */
 async function assertPrivateKeyFile(file: string, platform: NodeJS.Platform): Promise<void> {
   const stats = await NodeFSP.lstat(file);
   if (!stats.isFile()) throw new ComputerUseLinuxLeaseKeyError({ reason: `${file} is not a file` });
-  if (platform === "win32") return;
+  if (platform === "win32") {
+    const userSid = await windowsUserSid();
+    await assertPrivateWindowsAcl(NodePath.dirname(file), userSid);
+    await assertPrivateWindowsAcl(file, userSid);
+    return;
+  }
   if (stats.uid !== NodeOS.userInfo().uid || (stats.mode & 0o077) !== 0) {
     throw new ComputerUseLinuxLeaseKeyError({
       reason: `${file} must belong to this user and be readable by nobody else (mode 600)`,
@@ -164,7 +217,7 @@ export async function userLeaseScopeKey(input: {
   /** Test seam; production derives it from the OS account. */
   readonly file?: string;
 }): Promise<string> {
-  const file = input.file ?? (await userLeaseKeyFile(input));
+  const file = input.file ?? userLeaseKeyFile(input);
   const read = async () => {
     await assertPrivateKeyFile(file, input.platform);
     const key = (await NodeFSP.readFile(file)).toString("base64url");
@@ -179,6 +232,10 @@ export async function userLeaseScopeKey(input: {
   );
   if (exists) return read();
   await NodeFSP.mkdir(NodePath.dirname(file), { recursive: true, mode: 0o700 });
+  // Every creator restricts the directory before publishing, so whichever key wins is private.
+  if (input.platform === "win32") {
+    await restrictWindowsDirectory(NodePath.dirname(file), await windowsUserSid());
+  }
   const draft = `${file}.${process.pid}.${NodeCrypto.randomUUID()}.tmp`;
   await NodeFSP.writeFile(draft, NodeCrypto.randomBytes(USER_LEASE_KEY_BYTES), {
     flag: "wx",

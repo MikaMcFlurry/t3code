@@ -19,6 +19,7 @@ export interface ComputerUseLinuxApprovalRevocationShape {
     readonly close: () => Promise<void>;
     readonly providerSessionId: string;
     readonly threadId: ThreadId;
+    readonly generation?: number;
   }) => { readonly revoked: boolean; readonly unregister: () => void };
   readonly revokeSession: (providerSessionId: string) => Promise<void>;
   readonly revokeThread: (threadId: ThreadId) => Promise<void>;
@@ -26,6 +27,8 @@ export interface ComputerUseLinuxApprovalRevocationShape {
   readonly interruptThread: (threadId: ThreadId) => Promise<void>;
   /** A new turn starts: the thread may use the desktop again after a Stop. */
   readonly resumeThread: (threadId: ThreadId) => void;
+  /** Counts the thread's Stops, read when a call begins and checked when its session registers. */
+  readonly generation: (threadId: ThreadId) => number;
 }
 
 export const ComputerUseLinuxApprovalRevocation =
@@ -39,6 +42,7 @@ export const ComputerUseLinuxApprovalRevocation =
         revokeThread: async () => undefined,
         interruptThread: async () => undefined,
         resumeThread: () => undefined,
+        generation: () => 0,
       }),
     },
   );
