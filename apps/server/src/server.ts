@@ -80,6 +80,7 @@ import * as PeerLinks from "./peer/PeerLinks.ts";
 import * as PeerMcpClient from "./peer/PeerMcpClient.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
+import * as ComputerUseLinuxApprovalBroker from "./desktop/ComputerUseLinuxApprovalBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import * as CentralSkills from "./skills/CentralSkills.ts";
 import * as DeviceHubProxy from "./device/DeviceHubProxy.ts";
@@ -525,6 +526,14 @@ const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
 
 const layerServerEnvironment = ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer));
 
+const layerComputerUseLinuxApprovalBroker = Layer.unwrap(
+  Effect.gen(function* () {
+    const environment = yield* ServerEnvironment.ServerEnvironment;
+    const environmentId = yield* environment.getEnvironmentId;
+    return ComputerUseLinuxApprovalBroker.layer({ environmentId });
+  }),
+).pipe(Layer.provide(layerServerEnvironment));
+
 const layerAuth = EnvironmentAuth.layer.pipe(
   Layer.provideMerge(layerPersistence),
   Layer.provide(layerServerEnvironment),
@@ -726,6 +735,8 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
   Layer.provideMerge(layerRepositoryIdentityResolver),
   Layer.provideMerge(CodexManagedTokenBroker.layer),
   Layer.provideMerge(layerServerEnvironment),
+  Layer.provideMerge(ComputerUseLinuxApprovalBroker.layerRevocation),
+  Layer.provideMerge(layerComputerUseLinuxApprovalBroker),
   Layer.provideMerge(layerAuth),
   Layer.provideMerge(Layer.mergeAll(AssetSigner.layer, EnvironmentKeys.layer)),
   Layer.provideMerge(ServerSecretStore.layer),
