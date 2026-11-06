@@ -82,7 +82,14 @@ describe("ComputerUseLinuxMcpToolkit", () => {
               return {
                 callTool: async (input) => {
                   upstreamCalls.push(input);
-                  return { content: [{ text: input.name, type: "text" }] };
+                  return {
+                    content: [
+                      { text: input.name, type: "text" },
+                      ...(input.name === "screenshot"
+                        ? [{ type: "image", data: "iVBORw==", mimeType: "image/png" }]
+                        : []),
+                    ],
+                  };
                 },
                 close: async () => {
                   upstreamCloses += 1;
@@ -115,6 +122,11 @@ describe("ComputerUseLinuxMcpToolkit", () => {
       approvalAllowed = false;
       const denied = yield* call("click", { x: 7, y: 8 });
       assert.isFalse(observed.isError);
+      // The screenshot reaches the agent as an image block, not as base64 inside JSON text.
+      assert.deepStrictEqual(
+        observed.content.map((block) => block.type),
+        ["text", "image"],
+      );
       assert.isFalse(interacted.isError);
       assert.isTrue(denied.isError);
       assert.deepStrictEqual(approvals, [
