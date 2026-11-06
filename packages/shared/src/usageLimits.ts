@@ -121,17 +121,26 @@ export function availableAccountSelection(
     readonly selection: ModelSelection;
     readonly exhausted?: boolean;
     readonly sameModelOnly?: boolean;
+    /** Accounts a turn found out of usage, until when, ahead of their usage bars. */
+    readonly limitedUntil?: ReadonlyMap<ProviderInstanceId, number>;
   },
 ): ModelSelection | null {
   if (!input.settings?.fallbackToAvailableAccounts) return null;
   const provider = input.providers.find((entry) => entry.instanceId === input.selection.instanceId);
   if (!provider) return null;
-  if (!input.exhausted && !exhaustedUsageWindow(provider, input.now, input.selection.model)) {
+  const limited = (instanceId: ProviderInstanceId) =>
+    (input.limitedUntil?.get(instanceId) ?? 0) > input.now;
+  if (
+    !input.exhausted &&
+    !limited(provider.instanceId) &&
+    !exhaustedUsageWindow(provider, input.now, input.selection.model)
+  ) {
     return null;
   }
   return (
     automaticFallbackSelections(input.selection, provider, input.providers, input.now).find(
       (candidate) =>
+        !limited(candidate.instanceId) &&
         (!input.sameModelOnly ||
           (candidate.model === input.selection.model &&
             input.providers.find((entry) => entry.instanceId === candidate.instanceId)?.driver ===

@@ -8189,6 +8189,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             pendingRuntimeRequest: null,
             limitRecovery: sqlShell.limitRecovery,
             snoozedUntil: sqlShell.snoozedUntil,
+            createdBy: sqlShell.createdBy,
           });
         } else assert.isUndefined(candidate);
         assert.isUndefined(candidates.find((row) => row.id === otherThreadId));
@@ -8358,6 +8359,24 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           found,
         );
       }
+      // A spent workspace names no reset: another account may take over, nothing resumes here.
+      yield* sql`UPDATE orchestration_v2_projection_turn_items
+        SET payload_json = json_remove(payload_json, '$.failure.resetAt')
+        WHERE thread_id = ${threadId} AND type = 'error'`;
+      assert.isTrue(
+        (yield* store.getLimitRecoveryCandidates({
+          ...recoveryOptions,
+          switchAccountsSince: DateTime.subtract(now, { minutes: 1 }),
+        })).some((row) => row.id === threadId),
+      );
+      assert.isUndefined(
+        (yield* store.getLimitRecoveryCandidates({ ...recoveryOptions, autoResume: true })).find(
+          (row) => row.id === threadId,
+        ),
+      );
+      yield* sql`UPDATE orchestration_v2_projection_turn_items
+        SET payload_json = json_set(payload_json, '$.failure.resetAt', ${limitItem.failure.resetAt})
+        WHERE thread_id = ${threadId} AND type = 'error'`;
       const reset = DateTime.makeUnsafe(limitItem.failure.resetAt);
       const recovery = {
         runId: original.id,

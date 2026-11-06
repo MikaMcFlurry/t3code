@@ -753,6 +753,10 @@ function cancelledAppOwnedTask(
   };
 }
 
+/** Appended to the failed result of a child the usage-limit account switch will continue. */
+const LIMIT_SWITCH_TASK_NOTE =
+  'T3 Code: this child stopped at a usage limit, not because the task failed. With "switch to an account with usage left" on, T3 continues it on another account with usage left if there is one, and that run reports back to you as a follow-up task. Do not restart it: read the child thread or wait for that follow-up first.';
+
 // Provider wakes can start follow-up work; monitor updates only report progress.
 // Dispatch takes the parent's lock for follow-ups because intake writes the parent.
 function mayStartSubagentFollowup(
@@ -13974,7 +13978,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
 
       const now = yield* DateTime.now;
-      const result = subagentResultForRun(childProjection, { ...childRun, status: outcome });
+      const reported = subagentResultForRun(childProjection, { ...childRun, status: outcome });
+      // A child stopped by a usage limit is continued on another account by the limit switch,
+      // whose run reports back as a follow-up task. Say so, or the parent restarts it and two
+      // agents end up writing the same checkout.
+      const switchesAccount =
+        latestRootProviderFailure(childRun, childResult.turnItems)?.class === "usage_limit" &&
+        (yield* serverSettings.getSettings.pipe(
+          Effect.map((settings) => settings.fallbackToAvailableAccounts === true),
+          Effect.orElseSucceed(() => false),
+        ));
+      const result = switchesAccount
+        ? { ...reported, text: `${reported.text}\n\n${LIMIT_SWITCH_TASK_NOTE}`.trim() }
+        : reported;
       const parentRun =
         task.runId === null
           ? undefined

@@ -20,6 +20,7 @@ import * as Orchestrator from "./Orchestrator.ts";
 
 import * as AttachmentClaims from "./AttachmentClaims.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
+import * as AccountLimits from "./AccountLimits.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
 // These failures precede commitCommand; generic dispatch errors can follow commits and remain ambiguous.
@@ -107,8 +108,15 @@ const readAccountChoice = Effect.fn("ThreadMessageIntake.readAccountChoice")(fun
   const now = DateTime.toEpochMillis(yield* DateTime.now);
   // A model an agent picked stays that model: only another account of it may take over.
   const choose = (selection: ModelSelection, projectId: ProjectId, sameModelOnly = false) =>
-    availableAccountSelection({ selection, providers, now, settings, projectId, sameModelOnly }) ??
-    selection;
+    availableAccountSelection({
+      selection,
+      providers,
+      now,
+      settings,
+      projectId,
+      sameModelOnly,
+      limitedUntil: AccountLimits.accountLimits(),
+    }) ?? selection;
   return Object.assign(choose, { providers, now, settings });
 });
 
