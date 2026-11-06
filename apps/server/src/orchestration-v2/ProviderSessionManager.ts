@@ -2448,7 +2448,14 @@ export const layerWithOptions = (
                     ),
                   ),
                   () =>
-                    runtime.startTurn(input).pipe(turnMetrics("send", input.modelSelection.model)),
+                    // A new turn may use the desktop again after a Stop closed it.
+                    Effect.sync(() => desktopApprovalRevocation.resumeThread(input.threadId)).pipe(
+                      Effect.andThen(
+                        runtime
+                          .startTurn(input)
+                          .pipe(turnMetrics("send", input.modelSelection.model)),
+                      ),
+                    ),
                   (_, exit) =>
                     Exit.isFailure(exit)
                       ? observeActivity(

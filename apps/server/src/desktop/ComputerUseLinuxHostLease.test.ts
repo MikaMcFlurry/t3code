@@ -8,7 +8,9 @@ import { describe, expect, it } from "@effect/vitest";
 import {
   ComputerUseLinuxHostLease,
   ComputerUseLinuxLeaseBusyError,
+  ComputerUseLinuxLeaseKeyError,
   ComputerUseLinuxLeasePlatformError,
+  userLeaseKeyFile,
   userLeaseScopeKey,
 } from "./ComputerUseLinuxHostLease.ts";
 
@@ -51,25 +53,51 @@ describe("ComputerUseLinuxHostLease", () => {
   it("gives every T3 server of one OS user the same lease key", async () => {
     const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-lease-key-"));
     try {
-      const input = {
-        platform: "linux" as const,
-        environment: { XDG_STATE_HOME: NodePath.join(home, "state") },
-        homeDirectory: home,
-      };
-      const [first, second] = await Promise.all([
-        userLeaseScopeKey(input),
-        userLeaseScopeKey(input),
-      ]);
-      expect(first).toBe(second);
-      expect(first.length).toBeGreaterThanOrEqual(32);
-      expect(await userLeaseScopeKey(input)).toBe(first);
-      const file = NodePath.join(home, "state", "t3code", "computer-use-lease.key");
-      // oxlint-disable-next-line t3code/no-global-process-runtime -- Platform-gated file mode check.
-      if (NodeOS.platform() !== "win32") {
+      // oxlint-disable-next-line t3code/no-global-process-runtime -- Platform-gated key file test.
+      const platform = NodeOS.platform();
+      const file = NodePath.join(home, "t3code", "computer-use-lease.key");
+      const keys = await Promise.all(
+        Array.from({ length: 4 }, () => userLeaseScopeKey({ platform, file })),
+      );
+      expect(new Set(keys).size).toBe(1);
+      expect(keys[0]!.length).toBeGreaterThanOrEqual(32);
+      expect(await userLeaseScopeKey({ platform, file })).toBe(keys[0]);
+      expect(
+        (await NodeFSP.readdir(NodePath.dirname(file))).filter((name) => name.endsWith(".tmp")),
+      ).toEqual([]);
+      if (platform !== "win32") {
         expect((await NodeFSP.stat(file)).mode & 0o777).toBe(0o600);
+        // A key others can read, or a link to someone else's file, is refused rather than used.
+        await NodeFSP.chmod(file, 0o644);
+        await expect(userLeaseScopeKey({ platform, file })).rejects.toBeInstanceOf(
+          ComputerUseLinuxLeaseKeyError,
+        );
+        const linked = NodePath.join(home, "linked.key");
+        await NodeFSP.symlink(file, linked);
+        await expect(userLeaseScopeKey({ platform, file: linked })).rejects.toBeInstanceOf(
+          ComputerUseLinuxLeaseKeyError,
+        );
       }
     } finally {
       await NodeFSP.rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("places the key by the OS account, not the process environment", async () => {
+    // oxlint-disable-next-line t3code/no-global-process-runtime -- Platform-gated key file test.
+    const platform = NodeOS.platform();
+    const account = NodeOS.userInfo();
+    const file = await userLeaseKeyFile({ platform });
+    if (platform === "win32") {
+      expect(file).toBe(
+        NodePath.join(account.homedir, "AppData", "Local", "t3code", "computer-use-lease.key"),
+      );
+    } else {
+      expect(
+        file === NodePath.join(`/run/user/${account.uid}`, "t3code", "computer-use-lease.key") ||
+          file ===
+            NodePath.join(account.homedir, ".local", "state", "t3code", "computer-use-lease.key"),
+      ).toBe(true);
     }
   });
 });

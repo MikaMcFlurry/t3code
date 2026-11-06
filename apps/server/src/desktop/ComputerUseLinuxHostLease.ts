@@ -2,6 +2,7 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeNet from "node:net";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as Schema from "effect/Schema";
 
@@ -110,40 +111,85 @@ export class ComputerUseLinuxHostLease implements ComputerUseLinuxLease {
 
 const USER_LEASE_KEY_BYTES = 32;
 
+export class ComputerUseLinuxLeaseKeyError extends Schema.TaggedError<ComputerUseLinuxLeaseKeyError>()(
+  "ComputerUseLinuxLeaseKeyError",
+  { reason: Schema.String },
+) {
+  override get message(): string {
+    return `The desktop lease key can't be used: ${this.reason}`;
+  }
+}
+
 /**
- * The host lease's scope key for this OS user, shared by every T3 server the user runs (an
- * installed app and a fork, say), so they take turns on the one desktop. The key file is private
- * to the user, so another local user cannot predict the lease name and hold it.
+ * Where this OS user's lease key lives, from the account itself rather than the process
+ * environment, so servers started with different LOCALAPPDATA or XDG_STATE_HOME still agree:
+ * the user's runtime directory on Linux when it exists, else the passwd home's state directory;
+ * the profile's AppData\Local on Windows, whose ACL already admits only the user and SYSTEM.
+ */
+export async function userLeaseKeyFile(input: {
+  readonly platform: NodeJS.Platform;
+}): Promise<string> {
+  const account = NodeOS.userInfo();
+  if (input.platform === "win32") {
+    return NodePath.join(account.homedir, "AppData", "Local", "t3code", "computer-use-lease.key");
+  }
+  const runtime = `/run/user/${account.uid}`;
+  const runtimeExists = await NodeFSP.stat(runtime).then(
+    (stats) => stats.isDirectory() && stats.uid === account.uid,
+    () => false,
+  );
+  return runtimeExists
+    ? NodePath.join(runtime, "t3code", "computer-use-lease.key")
+    : NodePath.join(account.homedir, ".local", "state", "t3code", "computer-use-lease.key");
+}
+
+/** An existing key file must be a plain file of this user that nobody else can read. */
+async function assertPrivateKeyFile(file: string, platform: NodeJS.Platform): Promise<void> {
+  const stats = await NodeFSP.lstat(file);
+  if (!stats.isFile()) throw new ComputerUseLinuxLeaseKeyError({ reason: `${file} is not a file` });
+  if (platform === "win32") return;
+  if (stats.uid !== NodeOS.userInfo().uid || (stats.mode & 0o077) !== 0) {
+    throw new ComputerUseLinuxLeaseKeyError({
+      reason: `${file} must belong to this user and be readable by nobody else (mode 600)`,
+    });
+  }
+}
+
+/**
+ * The lease scope key shared by all of this OS user's T3 servers, from a file only the user can
+ * read. It appears only complete (written aside, then hard-linked in), so racing servers agree.
  */
 export async function userLeaseScopeKey(input: {
   readonly platform: NodeJS.Platform;
-  readonly environment: NodeJS.ProcessEnv;
-  readonly homeDirectory: string;
+  /** Test seam; production derives it from the OS account. */
+  readonly file?: string;
 }): Promise<string> {
-  const base =
-    input.platform === "win32"
-      ? (input.environment.LOCALAPPDATA ?? NodePath.join(input.homeDirectory, "AppData", "Local"))
-      : (input.environment.XDG_STATE_HOME ?? NodePath.join(input.homeDirectory, ".local", "state"));
-  const directory = NodePath.join(base, "t3code");
-  const file = NodePath.join(directory, "computer-use-lease.key");
+  const file = input.file ?? (await userLeaseKeyFile(input));
   const read = async () => {
+    await assertPrivateKeyFile(file, input.platform);
     const key = (await NodeFSP.readFile(file)).toString("base64url");
-    if (key.length < USER_LEASE_KEY_BYTES) throw new Error("Computer Use lease key is too short.");
+    if (key.length < USER_LEASE_KEY_BYTES) {
+      throw new ComputerUseLinuxLeaseKeyError({ reason: `${file} is too short` });
+    }
     return key;
   };
+  const exists = await NodeFSP.lstat(file).then(
+    () => true,
+    () => false,
+  );
+  if (exists) return read();
+  await NodeFSP.mkdir(NodePath.dirname(file), { recursive: true, mode: 0o700 });
+  const draft = `${file}.${process.pid}.${NodeCrypto.randomUUID()}.tmp`;
+  await NodeFSP.writeFile(draft, NodeCrypto.randomBytes(USER_LEASE_KEY_BYTES), {
+    flag: "wx",
+    mode: 0o600,
+  });
   try {
-    return await read();
-  } catch {
-    await NodeFSP.mkdir(directory, { recursive: true, mode: 0o700 });
-    try {
-      // "wx": when two servers race, one writes and the other reads what it wrote.
-      await NodeFSP.writeFile(file, NodeCrypto.randomBytes(USER_LEASE_KEY_BYTES), {
-        flag: "wx",
-        mode: 0o600,
-      });
-    } catch (cause) {
-      if (!(cause instanceof Error && "code" in cause && cause.code === "EEXIST")) throw cause;
-    }
-    return await read();
+    await NodeFSP.link(draft, file);
+  } catch (cause) {
+    if (!(cause instanceof Error && "code" in cause && cause.code === "EEXIST")) throw cause;
+  } finally {
+    await NodeFSP.rm(draft, { force: true });
   }
+  return read();
 }

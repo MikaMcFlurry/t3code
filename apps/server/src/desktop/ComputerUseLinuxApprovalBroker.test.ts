@@ -318,7 +318,9 @@ it.effect(
       yield* Effect.promise(() => broker.interruptThreadAndWait(bridgeRequest.threadId));
       expect(yield* Effect.promise(() => decision)).toBe(false);
       expect(closed).toBe(1);
-      // The next turn can call again without a new credential.
+      // Closed until the next turn resumes it, which needs no new credential.
+      expect(broker.isLive(bridgeRequest)).toBe(false);
+      broker.resumeThread(bridgeRequest.threadId);
       expect(broker.isLive(bridgeRequest)).toBe(true);
     }),
 );
@@ -385,4 +387,33 @@ it.effect("grants standing approval only as the setting says, and only to a live
       ).toBe(false);
     }),
   ),
+);
+
+it.effect("after Stop, a late session can't register until the next turn resumes the thread", () =>
+  Effect.gen(function* () {
+    const broker = yield* make({ environmentId: EnvironmentId.make("environment-1") });
+    broker.activateSession({ providerSessionId: "session-1", threadId: bridgeRequest.threadId });
+    yield* Effect.promise(() => broker.interruptThreadAndWait(bridgeRequest.threadId));
+    const late = broker.registerSession({
+      close: async () => undefined,
+      providerSessionId: "session-1",
+      threadId: bridgeRequest.threadId,
+    });
+    expect(late.revoked).toBe(true);
+    expect(broker.isLive(bridgeRequest)).toBe(false);
+    expect(
+      yield* Effect.promise(() =>
+        broker.request(bridgeRequest, { signal: new AbortController().signal }),
+      ),
+    ).toBe(false);
+    broker.resumeThread(bridgeRequest.threadId);
+    expect(broker.isLive(bridgeRequest)).toBe(true);
+    expect(
+      broker.registerSession({
+        close: async () => undefined,
+        providerSessionId: "session-1",
+        threadId: bridgeRequest.threadId,
+      }).revoked,
+    ).toBe(false);
+  }),
 );
