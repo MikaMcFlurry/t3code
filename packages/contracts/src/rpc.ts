@@ -37,6 +37,11 @@ import * as Schema from "effect/Schema";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
+import {
+  DesktopApprovalRespondInput,
+  DesktopApprovalRespondResult,
+  DesktopApprovalSnapshot,
+} from "./desktopApproval.ts";
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
   ProviderAuthCancelInput,
@@ -613,6 +618,8 @@ export const WS_METHODS = {
   subscribeServerLifecycle: "subscribeServerLifecycle",
   subscribeAuthAccess: "subscribeAuthAccess",
   subscribeResourceTelemetry: "subscribeResourceTelemetry",
+  subscribeDesktopApprovals: "subscribeDesktopApprovals",
+  desktopApprovalRespond: "desktopApproval.respond",
 } as const;
 
 const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
@@ -1723,6 +1730,19 @@ const WsSubscribeDeviceStateRpc = Rpc.make(WS_METHODS.subscribeDeviceState, {
   stream: true,
 });
 
+const WsSubscribeDesktopApprovalsRpc = Rpc.make(WS_METHODS.subscribeDesktopApprovals, {
+  payload: Schema.Struct({}),
+  success: DesktopApprovalSnapshot,
+  error: EnvironmentAuthorizationError,
+  stream: true,
+});
+
+const WsDesktopApprovalRespondRpc = Rpc.make(WS_METHODS.desktopApprovalRespond, {
+  payload: DesktopApprovalRespondInput,
+  success: DesktopApprovalRespondResult,
+  error: EnvironmentAuthorizationError,
+});
+
 const WsOrchestrationV2DispatchCommandRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, {
   payload: OrchestrationV2RpcSchemas.dispatchCommand.input,
   success: OrchestrationV2RpcSchemas.dispatchCommand.output,
@@ -2186,6 +2206,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsDeviceDetailRpc,
   WsDeviceActionRpc,
   WsSubscribeDeviceStateRpc,
+  WsSubscribeDesktopApprovalsRpc,
+  WsDesktopApprovalRespondRpc,
   WsSubscribeServerConfigRpc,
   WsSubscribeServerLifecycleRpc,
   WsSubscribeAuthAccessRpc,

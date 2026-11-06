@@ -125,6 +125,7 @@ import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEve
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "../../provider/codexLaunchArgs.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
+import { centralMcpServersForSession } from "@t3tools/provider-core/server/centralMcpServerScope";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import {
   MCP_APP_EXTENSION_ID,
@@ -1444,7 +1445,7 @@ function codexThreadRuntimeParams(input: {
     config: {
       ...CODEX_THREAD_CONFIG,
       ...codexCentralMcpConfig(
-        input.centralMcpServers,
+        centralMcpServersForSession(input.centralMcpServers, mcpSession),
         McpProviderSession.sharedMcpSessionEnvironment("codex", input.mcpSession),
       ),
       // One app-server serves many threads, so the id goes in per-thread shell config, not its env.
