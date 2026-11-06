@@ -309,6 +309,13 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           link: McpInvocationContext.threadLinkFor(scope, thread.id, thread.title),
           projectId: thread.projectId,
           modelSelection: thread.modelSelection,
+          ...(input.modelSelection !== undefined &&
+          !replaying &&
+          thread.modelSelection.instanceId !== input.modelSelection.instanceId
+            ? {
+                accountSwitch: `${input.modelSelection.instanceId} is out of usage, so this thread started on ${thread.modelSelection.instanceId} with the same model ("switch to an account with usage left" is on).`,
+              }
+            : {}),
           runId: run?.id ?? null,
           status: run?.status ?? null,
         };

@@ -105,8 +105,10 @@ const readAccountChoice = Effect.fn("ThreadMessageIntake.readAccountChoice")(fun
     Effect.flatMap((registry) => registry.getProviders),
   );
   const now = DateTime.toEpochMillis(yield* DateTime.now);
-  const choose = (selection: ModelSelection, projectId: ProjectId) =>
-    availableAccountSelection({ selection, providers, now, settings, projectId }) ?? selection;
+  // A model an agent picked stays that model: only another account of it may take over.
+  const choose = (selection: ModelSelection, projectId: ProjectId, sameModelOnly = false) =>
+    availableAccountSelection({ selection, providers, now, settings, projectId, sameModelOnly }) ??
+    selection;
   return Object.assign(choose, { providers, now, settings });
 });
 
@@ -132,7 +134,7 @@ const withAvailableAccount = Effect.fn("ThreadMessageIntake.withAvailableAccount
   const { thread } = window.projection;
   const selection = command.modelSelection ?? thread.modelSelection;
   const returned = yield* returnAfterLimitSwitch(command, selection, thread.projectId, choose);
-  const next = choose(returned ?? selection, thread.projectId);
+  const next = choose(returned ?? selection, thread.projectId, thread.createdBy === "agent");
   return next === selection ? command : { ...command, modelSelection: next };
 });
 
@@ -302,7 +304,14 @@ export const launchThread = Effect.fn("ThreadMessageIntake.launchThread")(functi
   const input =
     choose === null
       ? requested
-      : { ...requested, modelSelection: choose(requested.modelSelection, requested.projectId) };
+      : {
+          ...requested,
+          modelSelection: choose(
+            requested.modelSelection,
+            requested.projectId,
+            requested.createdBy === "agent",
+          ),
+        };
   yield* AttachmentClaims.validateAttachmentLimits(input.initialMessage?.attachments ?? []);
   if (!input.initialMessage?.attachments.some(AttachmentClaims.attachmentIsPendingUpload)) {
     return yield* launches.launch(input);

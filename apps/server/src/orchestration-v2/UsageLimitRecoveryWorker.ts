@@ -64,6 +64,8 @@ export function limitSwitchCommand(
     settings: input.settings,
     projectId: thread.projectId,
     exhausted: true,
+    // An agent's thread runs the model it asked for; it would not know why another one answers.
+    sameModelOnly: thread.createdBy === "agent",
   });
   if (next === null) return null;
   const identity = `${thread.id}:${thread.latestRunId}`;

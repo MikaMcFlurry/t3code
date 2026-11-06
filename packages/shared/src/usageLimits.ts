@@ -113,10 +113,15 @@ function isUsableSelection(candidate: ModelSelection, input: AccountChoiceInput)
 /**
  * With `fallbackToAvailableAccounts` on and the selection's account out of usage (`exhausted`
  * when a turn just said so), the same model on another account with usage left, else another
- * provider's default model.
+ * provider's default model. `sameModelOnly` keeps a model an agent asked for by name: only
+ * another account with that model counts.
  */
 export function availableAccountSelection(
-  input: AccountChoiceInput & { readonly selection: ModelSelection; readonly exhausted?: boolean },
+  input: AccountChoiceInput & {
+    readonly selection: ModelSelection;
+    readonly exhausted?: boolean;
+    readonly sameModelOnly?: boolean;
+  },
 ): ModelSelection | null {
   if (!input.settings?.fallbackToAvailableAccounts) return null;
   const provider = input.providers.find((entry) => entry.instanceId === input.selection.instanceId);
@@ -126,7 +131,12 @@ export function availableAccountSelection(
   }
   return (
     automaticFallbackSelections(input.selection, provider, input.providers, input.now).find(
-      (candidate) => isUsableSelection(candidate, input),
+      (candidate) =>
+        (!input.sameModelOnly ||
+          (candidate.model === input.selection.model &&
+            input.providers.find((entry) => entry.instanceId === candidate.instanceId)?.driver ===
+              provider.driver)) &&
+        isUsableSelection(candidate, input),
     ) ?? null
   );
 }

@@ -203,4 +203,28 @@ describe("limitSwitchCommand", () => {
   ])("waits when %s", (_name, thread, options) => {
     assert.isNull(limitSwitchCommand(thread, options));
   });
+
+  it("keeps an agent's thread on its model rather than another provider's", () => {
+    const codex: ServerProvider = {
+      ...claude("codex", 0),
+      instanceId: ProviderInstanceId.make("codex"),
+      driver: ProviderDriverKind.make("codex"),
+      models: [{ slug: "gpt-6.1-sol", name: "Sol", isCustom: false, capabilities: null }],
+    };
+    const options = {
+      ...input,
+      providers: [claude("claude_work", 40), codex],
+      settings: {
+        ...settings,
+        providerInstances: {
+          ...settings.providerInstances,
+          [codex.instanceId]: { driver: codex.driver, enabled: true },
+        },
+      },
+    };
+    assert.deepInclude(limitSwitchCommand(justLimited, options), {
+      modelSelection: { instanceId: codex.instanceId, model: "gpt-6.1-sol" },
+    });
+    assert.isNull(limitSwitchCommand({ ...justLimited, createdBy: "agent" }, options));
+  });
 });
