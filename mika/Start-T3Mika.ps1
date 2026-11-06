@@ -27,5 +27,20 @@ if ((Get-T3MikaMode) -eq 'takeover') {
   $env:T3CODE_PORT = "$($T3Mika.OfficialPort)"
 }
 
-Set-Location (Join-Path $T3Mika.Repo 'apps\desktop')
-node scripts/start-electron.mjs
+$desktopDir = Join-Path $T3Mika.Repo 'apps\desktop'
+$nodePath = (Get-Command node -ErrorAction Stop).Source
+
+# Start the desktop runtime in its own hidden process. Keeping it attached to this
+# launcher console means closing that console also tears down Electron and every
+# running provider session.
+$desktopProcess = Start-Process `
+  -FilePath $nodePath `
+  -ArgumentList 'scripts/start-electron.mjs' `
+  -WorkingDirectory $desktopDir `
+  -WindowStyle Hidden `
+  -PassThru
+
+Start-Sleep -Milliseconds 750
+if ($desktopProcess.HasExited) {
+  throw "T3 Code Mika konnte nicht gestartet werden (Exit-Code $($desktopProcess.ExitCode))."
+}
