@@ -16,3 +16,5 @@ mika/mobile-camera
 # Upstream PR #28595 (account switch at the usage limit) plus our follow-ups: going back to the
 # original account, a clearer switch notice. Keep until #28595 is merged upstream.
 mika/limit-switch-back
+# delegate_task isolation "worktree" for linked environments (upstream discussion #31920).
+mika/remote-delegate-isolation
