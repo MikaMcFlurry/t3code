@@ -52,6 +52,33 @@ export function computerUseLinuxToolAccess(toolName: string): ComputerUseLinuxTo
   return "deny";
 }
 
+// Windows-MCP's App tool also has a `launch_executable` mode that runs any executable with
+// arguments, which would reach past the screen exactly like its refused PowerShell tool.
+const WINDOWS_APP_MODES: ReadonlySet<unknown> = new Set([undefined, "launch", "resize", "switch"]);
+const WINDOWS_APP_EXECUTABLE_KEYS = ["executable", "args", "cwd"] as const;
+
+/**
+ * Why T3 refuses these arguments for an allowed tool, or undefined when they pass. It runs before
+ * approval, so a standing grant cannot let them through either.
+ */
+export function computerUseToolArgumentsRefusal(
+  toolName: string,
+  arguments_: unknown,
+): string | undefined {
+  if (toolName !== "App") return undefined;
+  const fields =
+    typeof arguments_ === "object" && arguments_ !== null && !Array.isArray(arguments_)
+      ? (arguments_ as Record<string, unknown>)
+      : {};
+  if (
+    !WINDOWS_APP_MODES.has(fields.mode) ||
+    WINDOWS_APP_EXECUTABLE_KEYS.some((key) => fields[key] !== undefined)
+  ) {
+    return "App only opens, switches to or resizes applications through T3; launch_executable, executable, args and cwd are refused.";
+  }
+  return undefined;
+}
+
 /** Environment that refuses silent GNOME/Wayland fallbacks after portal denial. */
 export const COMPUTER_USE_LINUX_PORTAL_ONLY_ENVIRONMENT = {
   CU_DISABLE_ABS_POINTER: "1",

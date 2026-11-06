@@ -74,6 +74,8 @@ export class ComputerUseLinuxApprovalBroker extends Context.Service<
     };
     readonly revokeSessionAndWait: (providerSessionId: string) => Promise<void>;
     readonly revokeThreadAndWait: (threadId: ThreadId) => Promise<void>;
+    /** Stop: refuse the thread's pending approvals and close its desktop sessions, keeping its credential. */
+    readonly interruptThreadAndWait: (threadId: ThreadId) => Promise<void>;
     readonly revokeAllAndWait: () => Promise<void>;
     readonly credentialCount: () => number;
     readonly snapshot: () => DesktopApprovalSnapshot;
@@ -263,6 +265,15 @@ export const make = (options: ComputerUseLinuxApprovalBrokerOptions) =>
         for (const providerSessionId of credentialIds) credentials.delete(providerSessionId);
       }
     };
+    const interruptThreadAndWait = async (threadId: ThreadId): Promise<void> => {
+      const ids = [...pending.entries()]
+        .filter(([, entry]) => entry.request.threadId === threadId)
+        .map(([id]) => id);
+      for (const id of ids) settle(id, false);
+      await closeSessions(
+        [...activeSessions.values()].filter((session) => session.threadId === threadId),
+      );
+    };
     const revokeAllAndWait = async (): Promise<void> => {
       revokeAll();
       try {
@@ -297,6 +308,7 @@ export const make = (options: ComputerUseLinuxApprovalBrokerOptions) =>
       registerSession,
       revokeSessionAndWait,
       revokeThreadAndWait,
+      interruptThreadAndWait,
       revokeAllAndWait,
       credentialCount: () => credentials.size,
       snapshot,
@@ -353,6 +365,7 @@ export const layerRevocation = Layer.effect(
         registerSession: broker.registerSession,
         revokeSession: broker.revokeSessionAndWait,
         revokeThread: broker.revokeThreadAndWait,
+        interruptThread: broker.interruptThreadAndWait,
       }),
     ),
   ),
@@ -370,6 +383,7 @@ export const disabled = ComputerUseLinuxApprovalBroker.of({
   registerSession: () => ({ revoked: false, unregister: () => undefined }),
   revokeSessionAndWait: async () => undefined,
   revokeThreadAndWait: async () => undefined,
+  interruptThreadAndWait: async () => undefined,
   revokeAllAndWait: async () => undefined,
   credentialCount: () => 0,
   snapshot: () => ({ requests: [] }),

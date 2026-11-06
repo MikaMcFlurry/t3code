@@ -13,6 +13,11 @@ import {
   COMPUTER_USE_LINUX_OBSERVATION_TOOLS,
 } from "./ComputerUseLinuxPolicy.ts";
 import {
+  ComputerUseLinuxBridgeApprovalError,
+  ComputerUseLinuxBridgeRefusedError,
+  ComputerUseLinuxBridgeRevokedError,
+} from "./ComputerUseLinuxBridge.ts";
+import {
   ComputerUseLinuxApprovalSurfaceService,
   ComputerUseLinuxUpstreamFactoryService,
   startComputerUseLinuxForCurrentMcpInvocation,
@@ -72,30 +77,116 @@ export const ComputerUseLinuxTool = Tool.make("computer_use_linux", {
 
 export const ComputerUseLinuxToolkit = Toolkit.make(ComputerUseLinuxTool);
 
-const closeSession = (session: { readonly close: () => Promise<void> }) =>
-  Effect.tryPromise({
-    try: () => session.close(),
-    catch: () => new ComputerUseLinuxToolError({ reason: "Desktop session cleanup failed." }),
-  }).pipe(Effect.orDie);
+type DesktopSession = Effect.Success<
+  ReturnType<typeof startComputerUseLinuxForCurrentMcpInvocation>
+>;
+
+interface KeptSession {
+  readonly session: DesktopSession;
+  idle: ReturnType<typeof setTimeout> | undefined;
+}
+
+/** An unused desktop session closes after this long; the next call starts a new one. */
+const KEPT_SESSION_IDLE_MS = 10 * 60_000;
+
+/**
+ * One desktop session per provider session and thread, kept between calls: the backends hold
+ * state a later call needs, such as the element labels a Windows-MCP Snapshot resolves for a
+ * Click, or cached accessibility handles on Linux. Revocation, Stop, an unexpected failure or
+ * idling closes it; the broker closes whatever is left at shutdown.
+ */
+const keptSessions = new Map<string, KeptSession>();
+
+class ComputerUseLinuxCallError extends Schema.TaggedError<ComputerUseLinuxCallError>()(
+  "ComputerUseLinuxCallError",
+  { cause: Schema.Defect() },
+) {}
+
+function scheduleIdleClose(key: string, entry: KeptSession): void {
+  if (keptSessions.get(key) !== entry) return;
+  // @effect-diagnostics-next-line globalTimers:off -- a plain unref'd idle timer outside any fiber.
+  entry.idle = setTimeout(() => void closeKeptSession(key, entry), KEPT_SESSION_IDLE_MS);
+  entry.idle.unref?.();
+}
+
+function cancelIdleClose(entry: KeptSession): void {
+  if (entry.idle !== undefined) clearTimeout(entry.idle);
+  entry.idle = undefined;
+}
+
+const forgetSession = (key: string, entry: KeptSession) => {
+  if (keptSessions.get(key) === entry) keptSessions.delete(key);
+  cancelIdleClose(entry);
+};
+
+const closeKeptSession = (key: string, entry: KeptSession) => {
+  forgetSession(key, entry);
+  return entry.session.close().catch(() => undefined);
+};
+
+const keptSession = Effect.fn("ComputerUseLinuxMcpToolkit.keptSession")(function* () {
+  const invocation = yield* McpInvocationContext.McpInvocationContext;
+  const scoped = yield* McpInvocationContext.requireThreadScope(invocation, "Computer Use");
+  const key = [
+    scoped.thread.providerInstanceId,
+    scoped.thread.providerSessionId,
+    scoped.thread.threadId,
+  ].join("\u0000");
+  const existing = keptSessions.get(key);
+  if (existing !== undefined && !existing.session.closed) return { key, entry: existing };
+  if (existing !== undefined) forgetSession(key, existing);
+  const session = yield* startComputerUseLinuxForCurrentMcpInvocation();
+  // A concurrent first call may have kept its own session meanwhile; use one, close the other.
+  const raced = keptSessions.get(key);
+  if (raced !== undefined && !raced.session.closed) {
+    yield* Effect.promise(() => session.close().catch(() => undefined));
+    return { key, entry: raced };
+  }
+  const entry: KeptSession = { session, idle: undefined };
+  keptSessions.set(key, entry);
+  return { key, entry };
+});
+
+const isRefusedError = Schema.is(ComputerUseLinuxBridgeRefusedError);
+const isApprovalError = Schema.is(ComputerUseLinuxBridgeApprovalError);
+const isRevokedError = Schema.is(ComputerUseLinuxBridgeRevokedError);
+
+/** Server-authored errors reach the agent; anything else may carry desktop output and is generic. */
+const toolError = ({ cause }: ComputerUseLinuxCallError) =>
+  new ComputerUseLinuxToolError({
+    reason:
+      isRefusedError(cause) || isApprovalError(cause)
+        ? cause.message
+        : isRevokedError(cause)
+          ? "The desktop session ended (Stop, a new session or a revoked approval). Call again to start a new one."
+          : "Desktop operation failed.",
+  });
 
 const handlers = {
   computer_use_linux: McpToolAccess.actsAsCaller((input) =>
     McpInvocationContext.requireThreadMcpCapability("desktop").pipe(
-      Effect.andThen(
-        Effect.acquireUseRelease(
-          startComputerUseLinuxForCurrentMcpInvocation(),
-          (session) =>
-            Effect.tryPromise({
-              try: () =>
-                session.callTool({
-                  arguments: input.arguments,
-                  toolName: input.toolName,
-                }),
-              catch: () => new ComputerUseLinuxToolError({ reason: "Desktop operation failed." }),
+      Effect.andThen(keptSession()),
+      Effect.flatMap(({ key, entry }) => {
+        cancelIdleClose(entry);
+        return Effect.tryPromise({
+          try: () =>
+            entry.session.callTool({
+              arguments: input.arguments,
+              toolName: input.toolName,
             }),
-          closeSession,
-        ),
-      ),
+          catch: (cause) => new ComputerUseLinuxCallError({ cause }),
+        }).pipe(
+          // A refusal or a declined approval leaves the session usable; anything else may have
+          // left the backend broken, so the next call starts fresh.
+          Effect.tapError(({ cause }) =>
+            isRefusedError(cause) || isApprovalError(cause)
+              ? Effect.void
+              : Effect.promise(() => closeKeptSession(key, entry)),
+          ),
+          Effect.ensuring(Effect.sync(() => scheduleIdleClose(key, entry))),
+          Effect.mapError(toolError),
+        );
+      }),
       Effect.mapError((cause) =>
         isOrchestratorMcpFailure(cause) ||
         isMcpCapabilityUnavailableError(cause) ||
@@ -174,3 +265,9 @@ export function computerUseLinuxToolResult(
 
 /** Optional registration only; it is deliberately not part of McpHttpServer.layerTools. */
 export const layer = McpToolAccess.toLayer(ComputerUseLinuxToolkit, handlers);
+
+export const __testing = {
+  /** Closes every kept session, so one test's backend never serves the next. */
+  closeKeptSessions: () =>
+    Promise.all([...keptSessions.entries()].map(([key, entry]) => closeKeptSession(key, entry))),
+};

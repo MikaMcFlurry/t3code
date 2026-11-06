@@ -1,6 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Linux abstract Unix sockets and Windows named pipes provide a kernel-owned cross-process lease unavailable through Effect's network API.
 import * as NodeCrypto from "node:crypto";
+import * as NodeFSP from "node:fs/promises";
 import * as NodeNet from "node:net";
+import * as NodePath from "node:path";
 import * as Schema from "effect/Schema";
 
 export interface ComputerUseLinuxLease {
@@ -103,5 +105,45 @@ export class ComputerUseLinuxHostLease implements ComputerUseLinuxLease {
     } finally {
       await lease.release();
     }
+  }
+}
+
+const USER_LEASE_KEY_BYTES = 32;
+
+/**
+ * The host lease's scope key for this OS user, shared by every T3 server the user runs (an
+ * installed app and a fork, say), so they take turns on the one desktop. The key file is private
+ * to the user, so another local user cannot predict the lease name and hold it.
+ */
+export async function userLeaseScopeKey(input: {
+  readonly platform: NodeJS.Platform;
+  readonly environment: NodeJS.ProcessEnv;
+  readonly homeDirectory: string;
+}): Promise<string> {
+  const base =
+    input.platform === "win32"
+      ? (input.environment.LOCALAPPDATA ?? NodePath.join(input.homeDirectory, "AppData", "Local"))
+      : (input.environment.XDG_STATE_HOME ?? NodePath.join(input.homeDirectory, ".local", "state"));
+  const directory = NodePath.join(base, "t3code");
+  const file = NodePath.join(directory, "computer-use-lease.key");
+  const read = async () => {
+    const key = (await NodeFSP.readFile(file)).toString("base64url");
+    if (key.length < USER_LEASE_KEY_BYTES) throw new Error("Computer Use lease key is too short.");
+    return key;
+  };
+  try {
+    return await read();
+  } catch {
+    await NodeFSP.mkdir(directory, { recursive: true, mode: 0o700 });
+    try {
+      // "wx": when two servers race, one writes and the other reads what it wrote.
+      await NodeFSP.writeFile(file, NodeCrypto.randomBytes(USER_LEASE_KEY_BYTES), {
+        flag: "wx",
+        mode: 0o600,
+      });
+    } catch (cause) {
+      if (!(cause instanceof Error && "code" in cause && cause.code === "EEXIST")) throw cause;
+    }
+    return await read();
   }
 }

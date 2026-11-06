@@ -3,6 +3,7 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   COMPUTER_USE_LINUX_PORTAL_ONLY_ENVIRONMENT,
   ComputerUseLinuxOperationGate,
+  computerUseToolArgumentsRefusal,
   computerUseLinuxToolAccess,
 } from "./ComputerUseLinuxPolicy.ts";
 
@@ -14,6 +15,22 @@ describe("ComputerUseLinuxPolicy", () => {
     assert.equal(computerUseLinuxToolAccess("setup_window_targeting"), "deny");
     assert.equal(computerUseLinuxToolAccess("run_shell"), "deny");
     assert.equal(computerUseLinuxToolAccess("future_tool"), "deny");
+  });
+
+  it("refuses Windows-MCP App launches of an arbitrary executable", () => {
+    for (const allowed of [undefined, {}, { name: "Notepad" }, { mode: "switch", name: "Edge" }]) {
+      assert.isUndefined(computerUseToolArgumentsRefusal("App", allowed));
+    }
+    for (const refused of [
+      { mode: "launch_executable", executable: "C:/Windows/System32/cmd.exe" },
+      { mode: "launch", name: "x", executable: "powershell.exe" },
+      { args: ["-Command", "whoami"] },
+      { cwd: "C:/" },
+      { mode: "something-new" },
+    ]) {
+      assert.isString(computerUseToolArgumentsRefusal("App", refused));
+    }
+    assert.isUndefined(computerUseToolArgumentsRefusal("Click", { executable: "ignored" }));
   });
 
   it("pins screenshots and input to portal routes without shell execution", () => {
