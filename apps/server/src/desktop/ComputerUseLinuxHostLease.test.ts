@@ -10,6 +10,7 @@ import {
   ComputerUseLinuxLeaseBusyError,
   ComputerUseLinuxLeaseKeyError,
   ComputerUseLinuxLeasePlatformError,
+  privateDaclRefusal,
   userLeaseKeyFile,
   userLeaseScopeKey,
 } from "./ComputerUseLinuxHostLease.ts";
@@ -92,5 +93,25 @@ describe("ComputerUseLinuxHostLease", () => {
         ? NodePath.join(home, "AppData", "Local", "t3code-desktop-lease", "lease.key")
         : NodePath.join(home, ".local", "state", "t3code-desktop-lease", "lease.key"),
     );
+  });
+
+  it("accepts only a DACL private to this user, SYSTEM and Administrators", () => {
+    const user = "S-1-5-21-1-2-3-1001";
+    for (const sddl of [
+      `D:P(A;OICI;FA;;;${user})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)`,
+      `D:AI(A;ID;FA;;;BA)(A;ID;FA;;;SY)(A;ID;FA;;;${user})(D;;FA;;;WD)`,
+    ]) {
+      expect(privateDaclRefusal(sddl, user)).toBeUndefined();
+    }
+    for (const sddl of [
+      "D:(A;ID;FA;;;BA)(A;ID;FA;;;SY)(A;ID;0x1301bf;;;AU)(A;ID;0x1200a9;;;BU)",
+      `D:P(A;;FA;;;${user})(XA;;FA;;;WD;(Member_of {SID(BA)}))`,
+      `D:P(A;;FA;;;${user})(OA;;CC;guid;;WD)`,
+      `D:P(A;;FA;;;${user})(ZA;;FA;;;S-1-5-21-9-9-9-500)`,
+      `D:P(A;;FA;;;${user})garbage`,
+      "O:BA",
+    ]) {
+      expect(privateDaclRefusal(sddl, user)).toBeTypeOf("string");
+    }
   });
 });
