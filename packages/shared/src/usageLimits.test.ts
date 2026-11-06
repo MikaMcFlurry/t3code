@@ -211,6 +211,36 @@ describe("new thread model fallback", () => {
       expect(next?.instanceId ?? null).toBe(expected);
       if (next) expect(next.model).toBe(selection.model);
     });
+    it("moves off an account a turn just found spent, before its bars show it", () => {
+      const fresh = { ...limited, usageLimits: limits(10) };
+      const settings = {
+        ...DEFAULT_SERVER_SETTINGS,
+        fallbackToAvailableAccounts: true,
+        providerInstances: {
+          codex_a: { driver: limited.driver, enabled: true, config: {} },
+          codex_b: { driver: limited.driver, enabled: true, config: {} },
+        },
+      };
+      const choose = (limitedUntil: ReadonlyMap<ProviderInstanceId, number>) =>
+        availableAccountSelection({
+          selection,
+          providers: [fresh, codexAccount("codex_a", 20), codexAccount("codex_b", 10)],
+          now,
+          settings,
+          limitedUntil,
+        })?.instanceId ?? null;
+      expect(choose(new Map())).toBeNull();
+      expect(choose(new Map([[fresh.instanceId, now + 60_000]]))).toBe("codex_b");
+      expect(
+        choose(
+          new Map([
+            [fresh.instanceId, now + 60_000],
+            [ProviderInstanceId.make("codex_b"), now + 60_000],
+          ]),
+        ),
+      ).toBe("codex_a");
+      expect(choose(new Map([[fresh.instanceId, now - 1]]))).toBeNull();
+    });
   });
   it.each([undefined, "invalid"])("treats an unknown reset as exhausted: %s", (resetsAt) => {
     expect(

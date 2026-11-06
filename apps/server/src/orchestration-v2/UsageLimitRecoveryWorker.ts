@@ -17,6 +17,7 @@ import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as AccountLimits from "./AccountLimits.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
@@ -24,6 +25,8 @@ import * as ThreadManagement from "./ThreadManagementService.ts";
 export const MAX_OVERDUE_ARM_MS = 24 * 60 * 60 * 1000;
 // Only limits hit this recently move accounts, so turning the setting on never wakes old threads.
 const ACCOUNT_SWITCH_WINDOW_MS = 10 * 60 * 1000;
+// A limit without a reset time (a workspace out of credits) keeps its account aside this long.
+const UNKNOWN_RESET_HOLD_MS = 60 * 60 * 1000;
 
 // The turn stopped at the limit, maybe mid-command; the new account must not blindly repeat it.
 export const LIMIT_SWITCH_PROMPT =
@@ -55,11 +58,8 @@ export function limitSwitchCommand(
   const selection = thread.modelSelection;
   const next = availableAccountSelection({
     selection,
-    providers: input.providers.filter(
-      (provider) =>
-        provider.instanceId === selection.instanceId ||
-        (input.limitedUntil.get(provider.instanceId) ?? 0) <= input.nowMs,
-    ),
+    providers: input.providers,
+    limitedUntil: input.limitedUntil,
     now: input.nowMs,
     settings: input.settings,
     projectId: thread.projectId,
@@ -164,7 +164,7 @@ const makeSweep = Effect.gen(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const settings = yield* ServerSettings.ServerSettingsService;
   const registry = yield* ProviderRegistry.ProviderRegistry;
-  const limitedUntil = new Map<ProviderInstanceId, number>();
+  const limitedUntil = AccountLimits.accountLimits();
   // A rejected switch is not retried every tick; the thread falls back to waiting for the reset.
   const attemptedSwitches = new Set<string>();
   const due = DueHint.make();
@@ -191,17 +191,20 @@ const makeSweep = Effect.gen(function* () {
     const providers = preferences.fallbackToAvailableAccounts ? yield* registry.getProviders : [];
     let acted = false;
     for (const thread of candidates) {
+      // Every recent limit marks its account, so sends and launches stop picking it at once.
+      if (thread.lastErrorClass === "usage_limit") {
+        const resetMs = Date.parse(thread.usageLimitResetAt ?? "");
+        AccountLimits.recordAccountLimit(
+          thread.modelSelection.instanceId,
+          Number.isFinite(resetMs) ? resetMs : nowMs + UNKNOWN_RESET_HOLD_MS,
+        );
+      }
       const switchCommand = preferences.fallbackToAvailableAccounts
         ? limitSwitchCommand(thread, { providers, settings: preferences, nowMs, limitedUntil })
         : null;
       if (switchCommand !== null && !attemptedSwitches.has(switchCommand.commandId)) {
         attemptedSwitches.add(switchCommand.commandId);
         acted = true;
-        const resetMs = Date.parse(thread.usageLimitResetAt ?? "");
-        limitedUntil.set(
-          thread.modelSelection.instanceId,
-          Number.isFinite(resetMs) ? resetMs : nowMs + ACCOUNT_SWITCH_WINDOW_MS,
-        );
         yield* threads.dispatch(switchCommand).pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning("orchestration-v2.limit-recovery.account-switch-failed", {
