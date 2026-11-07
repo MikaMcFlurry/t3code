@@ -8,7 +8,15 @@ import { Dialog, DialogDescription, DialogHeader, DialogPopup, DialogTitle } fro
 /** `?desktopLiveView=primary` (or an environment id) opens the live view, e.g. from a push. */
 export const DESKTOP_LIVE_VIEW_SEARCH_PARAM = "desktopLiveView";
 
-let openEnvironment: EnvironmentId | "primary" | null = null;
+// Read when the app loads: start-up redirects (welcome, last thread) drop the query string.
+const deepLinked = (() => {
+  if (typeof window === "undefined") return null;
+  const target = new URL(window.location.href).searchParams.get(DESKTOP_LIVE_VIEW_SEARCH_PARAM);
+  return target === null || target === "" ? null : target;
+})();
+
+let openEnvironment: EnvironmentId | "primary" | null =
+  deepLinked === null ? null : deepLinked === "primary" ? "primary" : (deepLinked as EnvironmentId);
 const listeners = new Set<() => void>();
 const notify = () => {
   for (const listener of listeners) listener();
@@ -35,14 +43,12 @@ export function DesktopLiveViewDialog() {
   const primary = usePrimaryEnvironmentId();
   const environmentId = requested === "primary" ? primary : requested;
 
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- a deep link opens the view once, then leaves the address bar clean
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- leaves the address bar clean once the deep link has opened the view
   useEffect(() => {
     const url = new URL(window.location.href);
-    const target = url.searchParams.get(DESKTOP_LIVE_VIEW_SEARCH_PARAM);
-    if (!target) return;
+    if (!url.searchParams.has(DESKTOP_LIVE_VIEW_SEARCH_PARAM)) return;
     url.searchParams.delete(DESKTOP_LIVE_VIEW_SEARCH_PARAM);
     window.history.replaceState(window.history.state, "", url);
-    openDesktopLiveView(target === "primary" ? "primary" : (target as EnvironmentId));
   }, []);
 
   return (
