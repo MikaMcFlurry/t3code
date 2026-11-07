@@ -2,14 +2,16 @@
 # Branches meant for upstream pull requests should touch one thing each.
 # Stacked branches: list only the tip; Update-T3Mika rebases the ones below it too.
 #   mika/reset-planner > mika/routine-routing > mika/routine-auto > mika/auto-launch > mika/auto-model.
-#   mika/linux-computer-use > mika/central-mcp.
+#   mika/desktop-live-view > mika/linux-computer-use > mika/central-mcp.
 mika/tooling
 mika/side-by-side
 mika/usage-rings
 # mika/dictation-locale: replaced by upstream #29689 (iPhone dictation language); not merged.
 mika/central-skills
-# Linux desktop control for agents (opt-in, per-action approval), on top of mika/central-mcp.
-mika/linux-computer-use
+# Linux desktop control for agents (opt-in, per-action approval), on top of mika/central-mcp,
+# with the desktop live view on top (opt-in): watch and take over the screen from any T3 client.
+# Upstream idea #32487 (https://github.com/pingdotgg/t3code/discussions/32487).
+mika/desktop-live-view
 mika/desktop-dictation
 mika/reset-planner
 mika/environment-load
