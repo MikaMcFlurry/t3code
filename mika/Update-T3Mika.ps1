@@ -50,6 +50,8 @@ if ($failed.Count -gt 0) {
   throw "Update gestoppt. Konflikte in: $($failed -join ', '). mika/main und dein Build sind unverändert."
 }
 
+# Remember the working mika/main so a failed merge can put it back unchanged.
+$previousMain = git rev-parse mika/main
 git switch -q -C mika/main main
 foreach ($branch in $branches) {
   git merge -q --no-ff $branch -m "merge: $branch"
@@ -62,7 +64,8 @@ foreach ($branch in $branches) {
   }
   if (-not $merged) {
     git merge --abort
-    git switch -q main
+    # Back to the old mika/main: it tracks these scripts, so the next run starts from a clean tree.
+    git switch -q -C mika/main $previousMain
     throw "Die Branches vertragen sich untereinander nicht ($branch). Build unverändert."
   }
 }
