@@ -8113,14 +8113,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       dispatchMode.type === "start_immediately" ||
       dispatchMode.type === "queue_after_active";
     // A send that would wait if it were queued waits here too, queued, instead of being refused.
-    // It also queues behind sends already waiting on that work, so it cannot overtake them.
+    // A user's send also queues behind sends already waiting on that work, so it cannot overtake
+    // them. Server and agent messages do not: a provider wake may be what drains that work.
     const switchWaitRun =
       activeRun === undefined &&
       worktreeMissingRun === undefined &&
       steerFollowUpSource === undefined &&
       latestRun != null &&
       startsOrQueuesRun &&
-      (backgroundWorkWaits.has(command.threadId) ||
+      ((command.createdBy === "user" && backgroundWorkWaits.has(command.threadId)) ||
         (!freshContext &&
           (yield* switchWaitsForBackgroundWork({
             projection,
@@ -17166,9 +17167,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         threadDispatch
           .withLock(
             threadId,
-            Effect.suspend(() => {
+            Effect.gen(function* () {
+              // A running turn starts the queue when it ends; until then the wait stands.
+              const projection = yield* readCommandProjection(threadId);
+              if (projection.runs.some(isActiveRun)) return;
               backgroundWorkWaits.delete(threadId);
-              return startNextQueuedRun(threadId);
+              yield* startNextQueuedRun(threadId);
             }),
           )
           .pipe(
