@@ -1201,6 +1201,26 @@ export const ProjectProviderInstanceOverride = Schema.Struct({
 });
 export type ProjectProviderInstanceOverride = typeof ProjectProviderInstanceOverride.Type;
 
+/** A weekly window in which a linked machine is usually off, in this server's local time. */
+export const EnvironmentOfflineWindow = Schema.Struct({
+  /** 0 Sunday to 6 Saturday; the day the window starts. */
+  days: Schema.Array(Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 6 }))),
+  /** "HH:MM"; a window whose end is before its start runs past midnight. */
+  from: Schema.String.check(Schema.isPattern(/^([01]\d|2[0-3]):[0-5]\d$/)),
+  to: Schema.String.check(Schema.isPattern(/^([01]\d|2[0-3]):[0-5]\d$/)),
+});
+export type EnvironmentOfflineWindow = typeof EnvironmentOfflineWindow.Type;
+
+/** When a machine is expected to be reachable, so placement avoids one that is about to go off. */
+export const EnvironmentSchedule = Schema.Struct({
+  environmentId: TrimmedNonEmptyString,
+  alwaysOn: Schema.Boolean,
+  offline: Schema.Array(EnvironmentOfflineWindow).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+});
+export type EnvironmentSchedule = typeof EnvironmentSchedule.Type;
+
 /** Absent keys inherit; null is a value for nullable settings.
  * providerInstances overrides fields per instance; other keys replace the whole setting. */
 export const ProjectSettingsOverrides = Schema.Struct({
@@ -1419,6 +1439,9 @@ export const ServerSettings = Schema.Struct({
   usageResetStaggering: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   // One malformed entry is dropped on its own instead of clearing the list.
   usageResetForecast: ForwardCompatibleArray(UsageResetForecastEntry).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  environmentSchedules: ForwardCompatibleArray(EnvironmentSchedule).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   defaultRuntimeMode: RuntimeMode.pipe(
@@ -1841,6 +1864,7 @@ export const ServerSettingsPatch = Schema.Struct({
   autoRoutingAllowed: Schema.optionalKey(Schema.Array(Schema.String)),
   usageResetStaggering: Schema.optionalKey(Schema.Boolean),
   usageResetForecast: Schema.optionalKey(Schema.Array(UsageResetForecastEntry)),
+  environmentSchedules: Schema.optionalKey(Schema.Array(EnvironmentSchedule)),
   /** Replaces each project's override set; null removes it. Omitted providerInstances retains its stored value. */
   projectSettingsOverrides: Schema.optionalKey(
     Schema.Record(
