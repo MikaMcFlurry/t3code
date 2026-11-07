@@ -163,9 +163,14 @@ export class DesktopLiveViewHub {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private consentTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly stopListening: () => void;
+  private readonly onHelperError: (status: Record<string, unknown>) => void;
 
-  constructor(spawnHelper: SpawnDesktopLiveViewHelper) {
+  constructor(
+    spawnHelper: SpawnDesktopLiveViewHelper,
+    options: { readonly onHelperError?: (status: Record<string, unknown>) => void } = {},
+  ) {
     this.spawnHelper = spawnHelper;
+    this.onHelperError = options.onHelperError ?? (() => undefined);
     this.stopListening = desktopLiveControl.onChange(() => this.broadcastControl());
   }
 
@@ -385,6 +390,7 @@ export class DesktopLiveViewHub {
         this.setState("ended");
         return;
       case "error":
+        this.onHelperError(status);
         this.stopHelper();
         this.setState("unavailable", helperErrorDetail(status));
         return;
@@ -549,12 +555,25 @@ export const layer = Layer.effect(
     const settings = yield* ServerSettings.ServerSettingsService;
     const platform = yield* HostProcess.Platform;
     const environment = yield* HostProcess.Environment;
-    const runSyncExit = Effect.runSyncExitWith(yield* Effect.context<never>());
+    const context = yield* Effect.context<never>();
+    const runSyncExit = Effect.runSyncExitWith(context);
+    const runFork = Effect.runForkWith(context);
     const hub = new DesktopLiveViewHub(
       spawnPortalHelper({
         tokenPath: NodePath.join(config.stateDir, "desktop-live-view", "portal-restore-token"),
         environment,
       }),
+      {
+        // The helper reports codes and GStreamer messages only, never frames or input.
+        onHelperError: (status) =>
+          void runFork(
+            Effect.logWarning("desktop live view capture failed", {
+              code: status.code,
+              element: status.element,
+              detail: status.detail,
+            }),
+          ),
+      },
     );
     yield* Effect.addFinalizer(() => Effect.sync(() => hub.shutdown()));
     return DesktopLiveView.of({
