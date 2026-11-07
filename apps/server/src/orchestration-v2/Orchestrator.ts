@@ -7307,17 +7307,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       dispatchMode.type === "start_immediately" ||
       dispatchMode.type === "queue_after_active";
     // A send that would wait if it were queued waits here too, queued, instead of being refused.
+    // It also queues behind sends already waiting on that work, so it cannot overtake them.
     const switchWaitRun =
       activeRun === undefined &&
       worktreeMissingRun === undefined &&
       latestRun != null &&
       startsOrQueuesRun &&
-      !freshContext &&
-      (yield* switchWaitsForBackgroundWork({
-        projection,
-        activeProviderThread,
-        modelSelection,
-      }).pipe(mapDispatchError(command)))
+      (backgroundWorkWaits.has(command.threadId) ||
+        (!freshContext &&
+          (yield* switchWaitsForBackgroundWork({
+            projection,
+            activeProviderThread,
+            modelSelection,
+          }).pipe(mapDispatchError(command)))))
         ? latestRun
         : undefined;
     const queueBehindRun = activeRun ?? worktreeMissingRun ?? switchWaitRun;
@@ -15694,24 +15696,43 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   );
 
   // Retries the queue of threads whose next send waits on a replaced session's background
-  // work. A send that still waits registers again; held sends stay held.
-  yield* Effect.suspend(() => {
-    const threadIds = Array.from(backgroundWorkWaits);
-    backgroundWorkWaits.clear();
-    return Effect.forEach(
-      threadIds,
+  // work. The thread leaves the set under its lock, so a send dispatched meanwhile still queues
+  // behind; a send that still waits registers again, and held sends stay held. A failed start
+  // keeps the retry for about five minutes, then the queue waits for the user.
+  const backgroundWorkWaitFailures = new Map<ThreadId, number>();
+  yield* Effect.suspend(() =>
+    Effect.forEach(
+      Array.from(backgroundWorkWaits),
       (threadId) =>
-        threadDispatch.withLock(threadId, startNextQueuedRun(threadId)).pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("Failed to start a queued send after background work ended", {
-              threadId,
-              cause,
+        threadDispatch
+          .withLock(
+            threadId,
+            Effect.suspend(() => {
+              backgroundWorkWaits.delete(threadId);
+              return startNextQueuedRun(threadId);
             }),
+          )
+          .pipe(
+            Effect.tap(() => Effect.sync(() => backgroundWorkWaitFailures.delete(threadId))),
+            Effect.catchCause((cause) =>
+              Effect.gen(function* () {
+                const failures = (backgroundWorkWaitFailures.get(threadId) ?? 0) + 1;
+                if (failures < 150) {
+                  backgroundWorkWaitFailures.set(threadId, failures);
+                  backgroundWorkWaits.add(threadId);
+                } else {
+                  backgroundWorkWaitFailures.delete(threadId);
+                }
+                yield* Effect.logWarning(
+                  "Failed to start a queued send after background work ended",
+                  { threadId, failures, cause },
+                );
+              }),
+            ),
           ),
-        ),
       { discard: true },
-    );
-  }).pipe(Effect.repeat(Schedule.spaced("2 seconds")), Effect.forkScoped);
+    ),
+  ).pipe(Effect.repeat(Schedule.spaced("2 seconds")), Effect.forkScoped);
 
   const recoverDelegatedTasks = Effect.gen(function* () {
     yield* projectionStore.getRecoveryThreadIds("subagent-results").pipe(

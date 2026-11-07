@@ -3374,6 +3374,149 @@ describe("orchestration v2 provider switching", () => {
     ),
   );
 
+  it.live("keeps a later send behind an account switch that waits on background work", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("waiting-switch-order");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const firstBusy = yield* Ref.make(true);
+        const secondSelection: ModelSelection = {
+          ...CLAUDE_MODEL_SELECTION,
+          instanceId: ProviderInstanceId.make("claude-second-account"),
+        };
+        const adapters = [
+          makeTestAdapter({
+            instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            responseByRunOrdinal: { 1: "First account complete" },
+            capturedTurns,
+            backgroundWork: firstBusy,
+          }),
+          makeTestAdapter({
+            instanceId: secondSelection.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: secondSelection,
+            responseByRunOrdinal: { 2: "Waiting send complete", 3: "Later send complete" },
+            capturedTurns,
+          }),
+        ];
+        // Both accounts continue one native history, so the switch resumes it.
+        const layerRegistry = Layer.succeed(
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+            get: (instanceId) => {
+              const adapter = adapters.find((candidate) => candidate.instanceId === instanceId);
+              return adapter === undefined
+                ? Effect.fail(
+                    new ProviderAdapterRegistry.ProviderAdapterRegistryLookupError({ instanceId }),
+                  )
+                : Effect.succeed(adapter);
+            },
+            list: () => Effect.succeed(adapters.map((adapter) => adapter.instanceId)),
+            getMetadata: () =>
+              Effect.succeed({
+                driver: CLAUDE_DRIVER,
+                continuationKey: "claude:shared-native-account-history",
+                enabled: true,
+                capabilities: ClaudeProviderCapabilitiesV2,
+              }),
+          }),
+        );
+        const threadId = ThreadId.make("thread:waiting-switch-order");
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const send = (ordinal: number, modelSelection: ModelSelection) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:waiting-switch-order:${ordinal}`),
+              threadId,
+              messageId: MessageId.make(`message:waiting-switch-order:${ordinal}`),
+              text: `Prompt ${ordinal}`,
+              attachments: [],
+              modelSelection,
+              dispatchMode: { type: "start_immediately" },
+            });
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:waiting-switch-order:create"),
+            threadId,
+            projectId: ProjectId.make("project:waiting-switch-order"),
+            title: "Waiting switch order",
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+          });
+          yield* send(1, CLAUDE_MODEL_SELECTION);
+          yield* worker.drain();
+          yield* waitForIdle(threadId);
+
+          yield* send(2, secondSelection);
+          // The work ends, and another send arrives before the queue is retried.
+          yield* Ref.set(firstBusy, false);
+          yield* send(3, secondSelection);
+          assert.deepEqual(
+            (yield* orchestrator.getThreadProjection(threadId)).runs.map((run) => run.status),
+            ["completed", "queued", "queued"],
+          );
+
+          yield* orchestrator.streamStoredEvents.pipe(
+            Stream.mapEffect(() => orchestrator.getThreadProjection(threadId)),
+            Stream.filter((projection) => projection.runs[1]?.status !== "queued"),
+            Stream.runHead,
+          );
+          yield* worker.drain();
+          yield* orchestrator.streamStoredEvents.pipe(
+            Stream.mapEffect(() => orchestrator.getThreadProjection(threadId)),
+            Stream.filter((projection) => projection.runs[2]?.status !== "queued"),
+            Stream.runHead,
+          );
+          yield* worker.drain();
+          const done = yield* waitForIdle(threadId);
+          assert.deepEqual(
+            done.runs.map((run) => [run.providerInstanceId, run.status]),
+            [
+              [CLAUDE_MODEL_SELECTION.instanceId, "completed"],
+              [secondSelection.instanceId, "completed"],
+              [secondSelection.instanceId, "completed"],
+            ],
+          );
+          assert.deepEqual(
+            (yield* Ref.get(capturedTurns)).map((turn) => turn.text.includes("Prompt 3")),
+            [false, false, true],
+          );
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerWithRegistry(
+              {
+                name: "waiting-switch-order",
+                runtimePolicyOverride: {
+                  cwd,
+                  approvalPolicy: "never",
+                  sandboxPolicy: {
+                    type: "readOnly",
+                    access: { type: "fullAccess" },
+                    networkAccess: false,
+                  },
+                },
+              },
+              layerRegistry,
+            ),
+          ),
+        );
+      }),
+    ),
+  );
+
   it.live.each(["immediately", "behind a running turn"] as const)(
     "starts a fresh provider session %s and never hands earlier runs to a later provider",
     (variant) =>
