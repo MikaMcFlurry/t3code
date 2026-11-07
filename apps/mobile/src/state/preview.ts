@@ -1,6 +1,9 @@
 import { useAtomValue } from "@effect/atom-react";
 import { parseScopedThreadKey, scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { PREVIEW_STREAM_BASE_PATH } from "@t3tools/client-runtime/preview/server-browser-stream";
+import {
+  type PreviewStreamKind,
+  previewStreamBasePath,
+} from "@t3tools/client-runtime/preview/server-browser-stream";
 import { createPreviewEnvironmentAtoms } from "@t3tools/client-runtime/state/preview";
 import { resolveDeviceHubAccess } from "@t3tools/client-runtime/state/deviceHubAccess";
 import type {
@@ -144,7 +147,24 @@ const previewStreamNotBeforeAtom = Atom.family((environmentId: EnvironmentId) =>
   Atom.make(0).pipe(Atom.withLabel(`mobile-preview-stream-retry:${environmentId}`)),
 );
 
-const previewStreamAccessAtom = Atom.family((environmentId: EnvironmentId) =>
+interface StreamAccessKey {
+  readonly environmentId: EnvironmentId;
+  readonly stream: PreviewStreamKind;
+}
+
+// Keyed by stream kind: each socket spends its own media ticket.
+const streamAccessKeys = new Map<string, StreamAccessKey>();
+const streamAccessKey = (environmentId: EnvironmentId, stream: PreviewStreamKind) => {
+  const id = `${stream}:${environmentId}`;
+  let key = streamAccessKeys.get(id);
+  if (!key) {
+    key = { environmentId, stream };
+    streamAccessKeys.set(id, key);
+  }
+  return key;
+};
+
+const previewStreamAccessAtom = Atom.family(({ environmentId, stream }: StreamAccessKey) =>
   connectionAtomRuntime
     .atom((get) => {
       const prepared = Option.getOrNull(
@@ -152,12 +172,18 @@ const previewStreamAccessAtom = Atom.family((environmentId: EnvironmentId) =>
       );
       const notBefore = get(previewStreamNotBeforeAtom(environmentId));
       if (prepared === null) return Effect.never;
-      const resolve = resolveDeviceHubAccess({ prepared, hubBasePath: PREVIEW_STREAM_BASE_PATH });
+      const resolve = resolveDeviceHubAccess({
+        prepared,
+        hubBasePath: previewStreamBasePath(stream),
+      });
       // A recompute interrupts the wait, so only the newest retry resolves.
       const wait = notBefore - Date.now();
       return wait > 0 ? Effect.andThen(Effect.sleep(wait), resolve) : resolve;
     })
-    .pipe(Atom.setIdleTTL(60_000), Atom.withLabel(`mobile-preview-stream-access:${environmentId}`)),
+    .pipe(
+      Atom.setIdleTTL(60_000),
+      Atom.withLabel(`mobile-${stream}-stream-access:${environmentId}`),
+    ),
 );
 
 /** Resolves fresh stream access once `delayMs` has passed. */
@@ -165,9 +191,14 @@ function retryPreviewStreamAccess(environmentId: EnvironmentId, delayMs: number)
   appAtomRegistry.set(previewStreamNotBeforeAtom(environmentId), Date.now() + delayMs);
 }
 
-export function usePreviewStreamAccess(environmentId: EnvironmentId) {
+export function usePreviewStreamAccess(
+  environmentId: EnvironmentId,
+  stream: PreviewStreamKind = "preview",
+) {
   const prepared = usePreparedConnection(environmentId);
-  const query = useEnvironmentQuery(previewStreamAccessAtom(environmentId));
+  const query = useEnvironmentQuery(
+    previewStreamAccessAtom(streamAccessKey(environmentId, stream)),
+  );
   const access = query.data && query.error === null && Option.isSome(prepared) ? query.data : null;
   return {
     access,

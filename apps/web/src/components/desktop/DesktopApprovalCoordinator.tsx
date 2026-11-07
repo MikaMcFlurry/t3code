@@ -14,6 +14,7 @@ import {
   AlertDialogTitle,
 } from "../ui/alert-dialog";
 import { Button } from "../ui/button";
+import { openDesktopLiveView } from "./DesktopLiveViewDialog";
 
 export function DesktopApprovalCoordinator() {
   const environmentId = usePrimaryEnvironmentId();
@@ -59,6 +60,13 @@ export function DesktopApprovalCoordinator() {
               : JSON.stringify(request.arguments, null, 2)}
         </pre>
         <AlertDialogFooter>
+          <Button
+            className="sm:me-auto"
+            variant="ghost"
+            onClick={() => environmentId !== null && openDesktopLiveView(environmentId)}
+          >
+            Show desktop
+          </Button>
           <Button disabled={responding} variant="outline" onClick={() => void decide("deny")}>
             Deny
           </Button>

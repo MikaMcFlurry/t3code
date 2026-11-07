@@ -70,11 +70,13 @@ export function start(configuration: PreviewStreamConfiguration) {
     window.ReactNativeWebView.postMessage(JSON.stringify(message));
   };
   const { interactive } = configuration;
+  // A whole screen keeps its own size, and typing goes through the native field above it.
+  const desktop = configuration.stream === "desktop";
   document.body.style.background = configuration.background;
   const container = document.createElement("div");
   const canvas = document.createElement("canvas");
   canvas.setAttribute("role", "img");
-  canvas.setAttribute("aria-label", "Browser page");
+  canvas.setAttribute("aria-label", desktop ? "Desktop" : "Browser page");
   const agentCursor = document.createElement("div");
   agentCursor.className = "agent-cursor";
   agentCursor.setAttribute("aria-hidden", "true");
@@ -209,7 +211,7 @@ export function start(configuration: PreviewStreamConfiguration) {
           if (nextControl.controller !== "you") clearInput();
           else {
             input.disabled = !interactive;
-            if (interactive && size && previous?.controller !== "you")
+            if (interactive && !desktop && size && previous?.controller !== "you")
               next.send({ type: "resize", ...size });
           }
         },
@@ -222,7 +224,8 @@ export function start(configuration: PreviewStreamConfiguration) {
           }
         },
         onUnauthorized: () => post({ type: "unauthorized" }),
-        onGone: () => post({ type: "gone" }),
+        onGone: (reason) => post({ type: "gone", reason }),
+        onDesktop: (status) => post({ type: "desktop", ...status }),
         onHostSetup: (setup) => post({ type: "hostSetup", ...setup }),
       },
     );
@@ -236,7 +239,7 @@ export function start(configuration: PreviewStreamConfiguration) {
     const next = { width: Math.round(rect.width), height: Math.round(rect.height) };
     if (size?.width === next.width && size.height === next.height) return;
     size = next;
-    if (interactive) send({ type: "resize", ...next });
+    if (interactive && !desktop) send({ type: "resize", ...next });
     const ratio = Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
     const side = Math.max(next.width, next.height);
     const width = Math.round((interactive ? next.width : side) * ratio);
@@ -381,6 +384,10 @@ export function start(configuration: PreviewStreamConfiguration) {
     touch = { start: event, last: event, panning: false };
     const point = pagePoint(event.clientX, event.clientY, false);
     if (!point) {
+      probe = null;
+      return;
+    }
+    if (desktop) {
       probe = null;
       return;
     }

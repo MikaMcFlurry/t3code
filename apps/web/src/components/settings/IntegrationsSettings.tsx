@@ -115,6 +115,7 @@ import {
   SettingsSection,
 } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
+import { openDesktopLiveView } from "../desktop/DesktopLiveViewDialog";
 import { AdvancedSettings } from "./AdvancedSettings";
 import { useSettingsScope } from "./SettingsScopeContext";
 import { BrowserImportWizard, type WizardTarget } from "./BrowserImportWizard";
@@ -1090,9 +1091,8 @@ function AgentDesktopAccessSetting() {
           {isProjectScope
             ? "Allow agents in this project to see and control this machine's desktop."
             : "Allow agents to see and control this machine's desktop. Projects can override it."}{" "}
-          Linux needs <code>computer-use-linux</code> on the server&apos;s PATH, and GNOME asks once
-          to share the screen. Windows needs <code>uv</code>; T3 runs Windows-MCP through it. Shell,
-          file, registry and process tools stay off. Applies when the agent session next starts.
+          Linux needs <code>computer-use-linux</code> on PATH, Windows needs <code>uv</code>. Shell
+          and file tools stay off. Applies to new sessions.
         </>
       }
       resetAction={
@@ -1134,7 +1134,7 @@ function AgentDesktopApprovalSetting() {
       serverScoped
       settingKeys={["agentDesktopApproval"]}
       {...searchableSetting("agent-desktop-approval")}
-      description="When an agent's click, typing or other desktop action waits for your approval. Not in full access: threads running in full access act without asking. Never ask: a standing approval for every thread with desktop control. Stop or a new session still ends it."
+      description="When a desktop click or keystroke waits for your approval. Not in full access: full-access threads act without asking. Never ask: always allowed. Stop or a new session still ends it."
       resetAction={
         settings.agentDesktopApproval !== DEFAULT_SERVER_SETTINGS.agentDesktopApproval ? (
           <SettingResetButton
@@ -1149,7 +1149,11 @@ function AgentDesktopApprovalSetting() {
         <Select
           value={settings.agentDesktopApproval}
           onValueChange={(value) => {
-            if (value === "every-action" || value === "full-access-threads" || value === "standing") {
+            if (
+              value === "every-action" ||
+              value === "full-access-threads" ||
+              value === "standing"
+            ) {
               updateSettings({ agentDesktopApproval: value });
             }
           }}
@@ -1167,6 +1171,47 @@ function AgentDesktopApprovalSetting() {
             )}
           </SelectPopup>
         </Select>
+      }
+    />
+  );
+}
+
+function DesktopLiveViewSetting() {
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+
+  return (
+    <SettingsRow
+      serverScoped
+      settingKeys={["enableDesktopLiveView"]}
+      {...searchableSetting("desktop-live-view")}
+      description="Show this machine's screen live in your T3 apps and take over for a password, captcha or system prompt. Linux with GNOME only; the machine asks once to share its screen."
+      resetAction={
+        settings.enableDesktopLiveView !== DEFAULT_SERVER_SETTINGS.enableDesktopLiveView ? (
+          <SettingResetButton
+            label="desktop live view"
+            onClick={() =>
+              updateSettings({
+                enableDesktopLiveView: DEFAULT_SERVER_SETTINGS.enableDesktopLiveView,
+              })
+            }
+          />
+        ) : null
+      }
+      control={
+        <div className="flex items-center gap-2">
+          {settings.enableDesktopLiveView ? (
+            <Button variant="outline" size="xs" onClick={() => openDesktopLiveView()}>
+              Open
+            </Button>
+          ) : null}
+          <ScopedSwitch
+            settingKeys={["enableDesktopLiveView"]}
+            aria-label="Desktop live view"
+            checked={settings.enableDesktopLiveView}
+            onCheckedChange={(enabled) => updateSettings({ enableDesktopLiveView: enabled })}
+          />
+        </div>
       }
     />
   );
@@ -1687,6 +1732,7 @@ export function BrowserSettingsPanel() {
         <AgentBrowserAccessSetting />
         <AgentDesktopAccessSetting />
         <AgentDesktopApprovalSetting />
+        <DesktopLiveViewSetting />
       </SettingsSection>
       <SettingsSection id="browser" title="Browsing">
         <SettingsUnavailableGroup message={desktopOnlyMessage}>

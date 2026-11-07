@@ -1461,6 +1461,8 @@ export const ServerSettings = Schema.Struct({
     Schema.catchDecoding(() => Effect.succeedSome("every-action" as const)),
     Schema.withDecodingDefault(Effect.succeed("every-action" as const)),
   ),
+  /** Streams this machine's whole screen to signed-in clients, so it is off until turned on. */
+  enableDesktopLiveView: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   projectAgentBrowserAccessOverrides: Schema.Record(ProjectId, Schema.Boolean).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
@@ -1913,6 +1915,7 @@ export const ServerSettingsPatch = Schema.Struct({
   speechPostProcessingModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   enableAgentDesktopAccess: Schema.optionalKey(Schema.Boolean),
   agentDesktopApproval: Schema.optionalKey(AgentDesktopApproval),
+  enableDesktopLiveView: Schema.optionalKey(Schema.Boolean),
   projectAgentBrowserAccessOverrides: Schema.optionalKey(
     Schema.Record(ProjectId, Schema.NullOr(Schema.Boolean)),
   ),

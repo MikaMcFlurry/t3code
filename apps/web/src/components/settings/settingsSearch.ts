@@ -1030,7 +1030,17 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "agent-desktop-approval",
     title: "Agent desktop approval",
     to: "/settings/browser",
-    searchTerms: ["computer use approve ask every time full access standing never ask desktop control"],
+    searchTerms: [
+      "computer use approve ask every time full access standing never ask desktop control",
+    ],
+  },
+  {
+    id: "desktop-live-view",
+    title: "Desktop live view",
+    to: "/settings/browser",
+    searchTerms: [
+      "screen share remote desktop take over control captcha password system prompt watch stream phone",
+    ],
   },
   {
     id: "device-sources",
