@@ -2798,15 +2798,19 @@ describe("orchestration v2 provider switching", () => {
       { background: false, queued: false, sharedHistory: false },
     ],
     [
-      "refuses the hand-off while the previous instance still runs background work",
+      "keeps a busy previous session running when a hand-off starts",
       { background: true, queued: false, sharedHistory: false },
+    ],
+    [
+      "queues an account switch sent while the replaced session still runs background work",
+      { background: true, queued: false, sharedHistory: true },
     ],
     [
       "keeps a busy previous session running when a queued hand-off starts",
       { background: true, queued: true, sharedHistory: false },
     ],
     [
-      "holds a queued account switch while the replaced session still runs background work",
+      "waits with a queued account switch while the replaced session still runs background work",
       { background: true, queued: true, sharedHistory: true },
     ],
   ] as const)("%s", ([, { background, queued, sharedHistory }]) =>
@@ -2907,13 +2911,15 @@ describe("orchestration v2 provider switching", () => {
           const queuedRunId = (yield* orchestrator.getThreadProjection(handoffThreadId)).runs[1]
             ?.id;
           assert.isDefined(queuedRunId);
+          const firstRunId = (yield* orchestrator.getThreadProjection(handoffThreadId)).runs[0]?.id;
           yield* Deferred.succeed(releaseFirst, undefined);
+          // A hand-off starts beside the busy session; an account switch waits for its work.
           yield* orchestrator.streamStoredEvents.pipe(
             Stream.filter(
               ({ event }) =>
                 event.type === "run.updated" &&
-                event.runId === queuedRunId &&
-                (event.payload.queueHeld === true || event.payload.status === "completed"),
+                event.runId === (sharedHistory ? firstRunId : queuedRunId) &&
+                event.payload.status === "completed",
             ),
             Stream.runHead,
           );
@@ -2935,21 +2941,27 @@ describe("orchestration v2 provider switching", () => {
             );
             return;
           }
-          // Resuming the native thread beside the busy session would fork its history.
+          // Resuming the native thread beside the busy session would fork its history, so the
+          // send waits in the queue without a hold.
           assert.deepEqual(
             afterQueue.runs.map((run) => [run.status, run.queueHeld === true]),
             [
               ["completed", false],
-              ["queued", true],
+              ["queued", false],
             ],
           );
           assert.lengthOf(yield* Ref.get(capturedTurns), 1);
+          // Once the work ends, the background-work check starts the queue by itself.
           yield* Ref.set(backgroundWork, false);
-          yield* orchestrator.dispatch({
-            type: "queue.resume",
-            commandId: CommandId.make("command:handoff-releases-session:resume"),
-            threadId: handoffThreadId,
-          });
+          yield* orchestrator.streamStoredEvents.pipe(
+            Stream.filter(
+              ({ event }) =>
+                event.type === "run.updated" &&
+                event.runId === queuedRunId &&
+                event.payload.status !== "queued",
+            ),
+            Stream.runHead,
+          );
           yield* worker.drain();
           const resumed = yield* waitForIdle(handoffThreadId);
           assert.deepEqual(
@@ -2974,17 +2986,62 @@ describe("orchestration v2 provider switching", () => {
           // Native subagents live only in the adapter's roster, so the projection's
           // pendingBackgroundTasks stays empty while the probe still reports work.
           assert.deepEqual(afterFirst.providerThreads[0]?.pendingBackgroundTasks ?? [], []);
-          const refused = yield* send(2, secondSelection, ":refused").pipe(Effect.flip);
-          assert.include(String(refused.cause), "still running background agents or commands");
-          const unchanged = yield* orchestrator.getThreadProjection(handoffThreadId);
-          assert.lengthOf(unchanged.runs, 1);
-          assert.deepEqual(yield* Ref.get(closedSessions), []);
-          assert.equal(unchanged.thread.providerInstanceId, CLAUDE_MODEL_SELECTION.instanceId);
+          yield* send(2, secondSelection);
+          yield* worker.drain();
+          if (sharedHistory) {
+            // Resuming the native thread beside the busy session would fork its history,
+            // so the send waits in the queue, as a queued one does.
+            const held = yield* orchestrator.getThreadProjection(handoffThreadId);
+            assert.deepEqual(
+              held.runs.map((run) => [run.status, run.queueHeld === true]),
+              [
+                ["completed", false],
+                ["queued", false],
+              ],
+            );
+            assert.lengthOf(yield* Ref.get(capturedTurns), 1);
+            assert.deepEqual(yield* Ref.get(closedSessions), []);
+            // Once the work ends, the held send starts by itself.
+            const heldRunId = held.runs[1]!.id;
+            yield* Ref.set(backgroundWork, false);
+            yield* orchestrator.streamStoredEvents.pipe(
+              Stream.filter(
+                ({ event }) =>
+                  event.type === "run.updated" &&
+                  event.runId === heldRunId &&
+                  event.payload.status !== "queued",
+              ),
+              Stream.runHead,
+            );
+            yield* worker.drain();
+            const resumed = yield* waitForIdle(handoffThreadId);
+            assert.deepEqual(
+              resumed.runs.map((run) => [run.providerInstanceId, run.status]),
+              [
+                [CLAUDE_MODEL_SELECTION.instanceId, "completed"],
+                [secondSelection.instanceId, "completed"],
+              ],
+            );
+            assert.deepEqual(yield* Ref.get(closedSessions), [firstSession!.id]);
+            return;
+          }
+          const handedOff = yield* waitForIdle(handoffThreadId);
+          yield* worker.drain();
           assert.deepEqual(
-            unchanged.providerSessions.map((session) => [session.id, session.status]),
-            [[firstSession!.id, "ready"]],
+            handedOff.runs.map((run) => [run.providerInstanceId, run.status]),
+            [
+              [CLAUDE_MODEL_SELECTION.instanceId, "completed"],
+              [secondSelection.instanceId, "completed"],
+            ],
           );
-          yield* Ref.set(backgroundWork, false);
+          assert.lengthOf(handedOff.contextHandoffs, 1);
+          // Detaching would end the background agents, so the busy session stays up.
+          assert.deepEqual(yield* Ref.get(closedSessions), []);
+          assert.equal(
+            handedOff.providerSessions.find((session) => session.id === firstSession!.id)?.status,
+            "ready",
+          );
+          return;
         }
 
         yield* send(2, secondSelection);
@@ -3150,6 +3207,171 @@ describe("orchestration v2 provider switching", () => {
         ),
       );
     }),
+  );
+
+  it.live("starts queued account switches in turn as each replaced session's work ends", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("held-account-switches");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const firstBusy = yield* Ref.make(true);
+        const secondBusy = yield* Ref.make(false);
+        const secondSelection: ModelSelection = {
+          ...CLAUDE_MODEL_SELECTION,
+          instanceId: ProviderInstanceId.make("claude-second-account"),
+        };
+        const thirdSelection: ModelSelection = {
+          ...CLAUDE_MODEL_SELECTION,
+          instanceId: ProviderInstanceId.make("claude-third-account"),
+        };
+        const adapters = [
+          makeTestAdapter({
+            instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            responseByRunOrdinal: { 1: "First account complete" },
+            capturedTurns,
+            backgroundWork: firstBusy,
+          }),
+          makeTestAdapter({
+            instanceId: secondSelection.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: secondSelection,
+            responseByRunOrdinal: { 2: "Second account complete" },
+            capturedTurns,
+            backgroundWork: secondBusy,
+          }),
+          makeTestAdapter({
+            instanceId: thirdSelection.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: thirdSelection,
+            responseByRunOrdinal: { 3: "Third account complete" },
+            capturedTurns,
+          }),
+        ];
+        // All three accounts continue one native history, so each switch resumes it.
+        const layerRegistry = Layer.succeed(
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+            get: (instanceId) => {
+              const adapter = adapters.find((candidate) => candidate.instanceId === instanceId);
+              return adapter === undefined
+                ? Effect.fail(
+                    new ProviderAdapterRegistry.ProviderAdapterRegistryLookupError({ instanceId }),
+                  )
+                : Effect.succeed(adapter);
+            },
+            list: () => Effect.succeed(adapters.map((adapter) => adapter.instanceId)),
+            getMetadata: () =>
+              Effect.succeed({
+                driver: CLAUDE_DRIVER,
+                continuationKey: "claude:shared-native-account-history",
+                enabled: true,
+                capabilities: ClaudeProviderCapabilitiesV2,
+              }),
+          }),
+        );
+        const threadId = ThreadId.make("thread:held-account-switches");
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const send = (ordinal: number, modelSelection: ModelSelection) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:held-account-switches:${ordinal}`),
+              threadId,
+              messageId: MessageId.make(`message:held-account-switches:${ordinal}`),
+              text: `Prompt ${ordinal}`,
+              attachments: [],
+              modelSelection,
+              dispatchMode: { type: "start_immediately" },
+            });
+          const runStates = (projection: OrchestrationV2ThreadProjection) =>
+            projection.runs.map((run) => [run.status, run.queueHeld === true]);
+          // Projections commit with their events, so each later event is the time to re-read.
+          const waitUntil = (done: (projection: OrchestrationV2ThreadProjection) => boolean) =>
+            orchestrator.streamStoredEvents.pipe(
+              Stream.mapEffect(() => orchestrator.getThreadProjection(threadId)),
+              Stream.filter(done),
+              Stream.runHead,
+            );
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:held-account-switches:create"),
+            threadId,
+            projectId: ProjectId.make("project:held-account-switches"),
+            title: "Held account switches",
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+          });
+          yield* send(1, CLAUDE_MODEL_SELECTION);
+          yield* worker.drain();
+          yield* waitForIdle(threadId);
+
+          yield* send(2, secondSelection);
+          yield* send(3, thirdSelection);
+          yield* worker.drain();
+          assert.deepEqual(runStates(yield* orchestrator.getThreadProjection(threadId)), [
+            ["completed", false],
+            ["queued", false],
+            ["queued", false],
+          ]);
+
+          // The second account ends its turn with work of its own, so the third send waits again.
+          yield* Ref.set(secondBusy, true);
+          yield* Ref.set(firstBusy, false);
+          yield* waitUntil((projection) => projection.runs[1]?.status !== "queued");
+          yield* worker.drain();
+          yield* waitUntil((projection) => projection.runs[1]?.status === "completed");
+          assert.deepEqual(runStates(yield* orchestrator.getThreadProjection(threadId)), [
+            ["completed", false],
+            ["completed", false],
+            ["queued", false],
+          ]);
+
+          yield* Ref.set(secondBusy, false);
+          yield* waitUntil((projection) => projection.runs[2]?.status !== "queued");
+          yield* worker.drain();
+          const done = yield* waitForIdle(threadId);
+          assert.deepEqual(
+            done.runs.map((run) => [run.providerInstanceId, run.status]),
+            [
+              [CLAUDE_MODEL_SELECTION.instanceId, "completed"],
+              [secondSelection.instanceId, "completed"],
+              [thirdSelection.instanceId, "completed"],
+            ],
+          );
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerWithRegistry(
+              {
+                name: "held-account-switches",
+                runtimePolicyOverride: {
+                  cwd,
+                  approvalPolicy: "never",
+                  sandboxPolicy: {
+                    type: "readOnly",
+                    access: { type: "fullAccess" },
+                    networkAccess: false,
+                  },
+                },
+              },
+              layerRegistry,
+            ),
+          ),
+        );
+      }),
+    ),
   );
 
   it.live.each(["immediately", "behind a running turn"] as const)(
