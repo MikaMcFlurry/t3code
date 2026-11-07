@@ -475,6 +475,8 @@ export const spawnPortalHelper =
   (options: {
     readonly tokenPath: string;
     readonly environment: NodeJS.ProcessEnv;
+    /** A moving test pattern instead of the screen; the portal and compositor stay untouched. */
+    readonly testSource?: boolean;
   }): SpawnDesktopLiveViewHelper =>
   (events) => {
     const environment: Record<string, string> = {};
@@ -493,6 +495,7 @@ export const spawnPortalHelper =
         String(DESKTOP_LIVE_VIEW_FRAME.maxHeight),
         String(DESKTOP_LIVE_VIEW_FRAME.quality),
         String(DESKTOP_LIVE_VIEW_FRAME.fps),
+        ...(options.testSource ? ["--test-source"] : []),
       ],
       { env: environment, stdio: ["pipe", "pipe", "ignore"], windowsHide: true },
     );
@@ -562,6 +565,8 @@ export const layer = Layer.effect(
       spawnPortalHelper({
         tokenPath: NodePath.join(config.stateDir, "desktop-live-view", "portal-restore-token"),
         environment,
+        // For checking clients and transport on a host whose compositor must not be touched.
+        testSource: environment.T3CODE_DESKTOP_LIVE_VIEW_TEST_SOURCE === "1",
       }),
       {
         // The helper reports codes and GStreamer messages only, never frames or input.

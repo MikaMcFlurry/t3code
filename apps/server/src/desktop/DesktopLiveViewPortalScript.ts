@@ -50,7 +50,11 @@ for element in ("pipewiresrc", "jpegenc", "videoscale", "videoconvert", "videora
 
 TOKEN_PATH = sys.argv[1]
 MAX_WIDTH, MAX_HEIGHT, QUALITY, FPS = (int(value) for value in sys.argv[2:6])
-CHECK_ONLY = len(sys.argv) > 6 and sys.argv[6] == "--check"
+MODE = sys.argv[6] if len(sys.argv) > 6 else ""
+CHECK_ONLY = MODE == "--check"
+# A moving test pattern instead of the screen, for checking T3 end to end without the compositor.
+# A click toggles the pattern, so input-to-frame latency shows in the stream.
+TEST_SOURCE = MODE == "--test-source"
 
 DESKTOP = "org.freedesktop.portal.Desktop"
 DESKTOP_PATH = "/org/freedesktop/portal/desktop"
@@ -162,6 +166,12 @@ def scroll(dx, dy):
 
 def handle(message):
     kind = message.get("t")
+    if TEST_SOURCE:
+        source = state["pipeline"].get_by_name("source") if state["pipeline"] else None
+        if kind == "button" and message.get("down") and source is not None:
+            # videotestsrc patterns: 1 snow, 18 ball.
+            source.set_property("pattern", 1 if int(source.get_property("pattern")) != 1 else 18)
+        return
     if kind == "move":
         notify(
             "NotifyPointerMotionAbsolute", "(oa{sv}udd)",
@@ -227,7 +237,35 @@ def on_bus_message(_bus, message):
         shutdown()
 
 
+def run_pipeline(source, width, height):
+    pipeline = Gst.parse_launch(
+        source
+        # Scale before converting: on a 4K screen that is a quarter of the pixels to convert.
+        + " ! videorate drop-only=true max-rate=%d ! videoscale n-threads=4"
+        " ! video/x-raw,width=[1,%d],height=[1,%d],pixel-aspect-ratio=1/1"
+        " ! videoconvert n-threads=4 ! video/x-raw,format=I420 ! jpegenc quality=%d ! appsink name=sink emit-signals=true max-buffers=1 drop=true sync=false"
+        % (FPS, MAX_WIDTH, MAX_HEIGHT, QUALITY)
+    )
+    state["pipeline"] = pipeline
+    pipeline.get_by_name("sink").connect("new-sample", on_sample)
+    pipeline_bus = pipeline.get_bus()
+    pipeline_bus.add_signal_watch()
+    pipeline_bus.connect("message", on_bus_message)
+    pipeline.set_state(Gst.State.PLAYING)
+    status({"type": "ready", "width": width, "height": height, "keyboard": True, "pointer": True})
+    threading.Thread(target=read_input, daemon=True).start()
+    loop.run()
+    return 0
+
+
 def main():
+    if TEST_SOURCE:
+        return run_pipeline(
+            "videotestsrc name=source is-live=true pattern=ball"
+            " ! video/x-raw,format=BGRx,width=3840,height=2160,framerate=10/1",
+            3840,
+            2160,
+        )
     code, results = request(
         REMOTE, "CreateSession", "(a{sv})",
         lambda options: (dict(options, session_handle_token=GLib.Variant("s", "t3live%d" % os.getpid())),),
@@ -295,26 +333,15 @@ def main():
         Gio.DBusCallFlags.NONE, -1, None, None,
     )
     descriptor = fds.get(reply.unpack()[0])
-    # Plain memory only: offered DMA-BUF formats send Mutter down its modifier path, which crashes
-    # GNOME Shell 46 on GPUs without DRM format modifiers (seen on AMD GCN3, Radeon R9 M395X).
-    pipeline = Gst.parse_launch(
+    # Plain memory only: offered DMA-BUF formats send Mutter down its modifier path. Not enough on
+    # its own: GNOME Shell 46 still crashes at stream start on GPUs without DRM format modifiers
+    # (AMD GCN3, Radeon R9 M395X); see docs/desktop-live-view.md.
+    return run_pipeline(
         "pipewiresrc fd=%d path=%d do-timestamp=true always-copy=true"
-        " ! video/x-raw,format={BGRx,BGRA,RGBx,RGBA}"
-        " ! videorate drop-only=true max-rate=%d ! videoconvert ! videoscale"
-        " ! video/x-raw,format=I420,width=[1,%d],height=[1,%d],pixel-aspect-ratio=1/1"
-        " ! jpegenc quality=%d ! appsink name=sink emit-signals=true max-buffers=1 drop=true sync=false"
-        % (descriptor, node, FPS, MAX_WIDTH, MAX_HEIGHT, QUALITY)
+        " ! video/x-raw,format={BGRx,BGRA,RGBx,RGBA}" % (descriptor, node),
+        width,
+        height,
     )
-    state["pipeline"] = pipeline
-    pipeline.get_by_name("sink").connect("new-sample", on_sample)
-    pipeline_bus = pipeline.get_bus()
-    pipeline_bus.add_signal_watch()
-    pipeline_bus.connect("message", on_bus_message)
-    pipeline.set_state(Gst.State.PLAYING)
-    status({"type": "ready", "width": width, "height": height, "keyboard": True, "pointer": True})
-    threading.Thread(target=read_input, daemon=True).start()
-    loop.run()
-    return 0
 
 
 if __name__ == "__main__":
