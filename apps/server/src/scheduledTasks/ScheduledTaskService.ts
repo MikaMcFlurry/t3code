@@ -53,6 +53,9 @@ import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as Metrics from "../observability/Metrics.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ThreadMessageIntake from "../orchestration-v2/ThreadMessageIntake.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as DueHint from "../scheduling/DueHint.ts";
@@ -468,6 +471,30 @@ export const layer = Layer.effect(
     const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const serviceScope = yield* Effect.scope;
+    // Runs start on an account with usage left, as a user's send does. Without these (tests),
+    // runs keep the stored account, as with the setting off.
+    const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
+    const providerRegistry = yield* Effect.serviceOption(ProviderRegistry.ProviderRegistry);
+    const withAccountChoice = <A>(
+      fallback: A,
+      choose: Effect.Effect<
+        A,
+        never,
+        | ServerSettings.ServerSettingsService
+        | ProviderRegistry.ProviderRegistry
+        | ThreadManagementService.ThreadManagementService
+      >,
+    ): Effect.Effect<A> =>
+      Option.isNone(serverSettings) || Option.isNone(providerRegistry)
+        ? Effect.succeed(fallback)
+        : choose.pipe(
+            Effect.provideService(ServerSettings.ServerSettingsService, serverSettings.value),
+            Effect.provideService(ProviderRegistry.ProviderRegistry, providerRegistry.value),
+            Effect.provideService(
+              ThreadManagementService.ThreadManagementService,
+              threadManagement,
+            ),
+          );
     const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
     const secretRequests = yield* SecretRequests.SecretRequests;
     const scheduler = yield* Scheduler.Scheduler;
@@ -1026,43 +1053,44 @@ export const layer = Layer.effect(
           threadId: ThreadId,
           projectId: ProjectId,
           retries: number,
-        ): ReturnType<typeof threadManagement.sendToThread> =>
-          threadManagement
-            .sendToThread({
-              projectId,
-              commandId,
-              threadId,
-              messageId,
-              scheduledTaskId: active.id,
-              text: prompt,
-              attachments: [],
-              mode: "queue",
-              ...(threadMode === "fresh_session" ? { freshContext: true } : {}),
-              createdBy: active.createdBy,
-              creationSource: active.creationSource,
-            })
-            .pipe(
-              Effect.catchTags({
-                ThreadManagementThreadNotFoundError: (error) =>
-                  retries === 0
-                    ? Effect.fail(error)
-                    : threadManagement.getThreadShell(threadId).pipe(
-                        Effect.orElseSucceed(() => null),
-                        Effect.flatMap((shell) =>
-                          shell === null || shell.projectId === projectId
-                            ? Effect.fail(error)
-                            : sendBound(threadId, shell.projectId, retries - 1),
-                        ),
+        ): ReturnType<typeof threadManagement.sendToThread> => {
+          const input: ThreadManagementService.ThreadManagementSendInput = {
+            projectId,
+            commandId,
+            threadId,
+            messageId,
+            scheduledTaskId: active.id,
+            text: prompt,
+            attachments: [],
+            mode: "queue",
+            ...(threadMode === "fresh_session" ? { freshContext: true } : {}),
+            createdBy: active.createdBy,
+            creationSource: active.creationSource,
+          };
+          return withAccountChoice(input, ThreadMessageIntake.withAvailableSendAccount(input)).pipe(
+            Effect.flatMap((next) => threadManagement.sendToThread(next)),
+            Effect.catchTags({
+              ThreadManagementThreadNotFoundError: (error) =>
+                retries === 0
+                  ? Effect.fail(error)
+                  : threadManagement.getThreadShell(threadId).pipe(
+                      Effect.orElseSucceed(() => null),
+                      Effect.flatMap((shell) =>
+                        shell === null || shell.projectId === projectId
+                          ? Effect.fail(error)
+                          : sendBound(threadId, shell.projectId, retries - 1),
                       ),
-              }),
-            );
+                    ),
+            }),
+          );
+        };
 
         // Capture defects and interrupts too so dispatch failures still reach markCompleted.
         const result =
           active.threadId === null
             ? yield* Effect.exit(
-                threadLaunch
-                  .launch({
+                Effect.gen(function* () {
+                  const input: ThreadLaunchService.ThreadLaunchInput = {
                     commandId,
                     projectId: active.projectId,
                     title: active.title,
@@ -1078,17 +1106,23 @@ export const layer = Layer.effect(
                     },
                     createdBy: active.createdBy,
                     creationSource: active.creationSource,
-                  })
-                  .pipe(
-                    Effect.map((launched) => launched.threadId),
-                    Effect.tap((threadId) =>
-                      threadMode === "new_thread" ? Effect.void : bindThread(active, threadId),
+                  };
+                  return yield* threadLaunch.launch(
+                    yield* withAccountChoice(
+                      input,
+                      ThreadMessageIntake.withAvailableLaunchAccount(input),
                     ),
+                  );
+                }).pipe(
+                  Effect.map((launched) => launched.threadId),
+                  Effect.tap((threadId) =>
+                    threadMode === "new_thread" ? Effect.void : bindThread(active, threadId),
                   ),
+                ),
               )
             : yield* Effect.exit(
-                // The stored selection only seeds fresh threads. A bound run
-                // follows the thread's current provider, so it passes none.
+                // The stored selection only seeds fresh threads. A bound run follows the
+                // thread's current provider; it names one only to move off an exhausted account.
                 sendBound(ThreadId.make(active.threadId), active.projectId, 2).pipe(
                   Effect.as(ThreadId.make(active.threadId)),
                 ),

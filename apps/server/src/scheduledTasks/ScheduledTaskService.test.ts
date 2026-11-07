@@ -5,12 +5,15 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it, vi } from "@effect/vitest";
 import {
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ScheduledTaskError,
   ScheduledTaskId,
   type ScheduledTaskUpsertInput,
   SecretRef,
   ThreadId,
+  type ModelSelection,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -34,6 +37,8 @@ import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ServerSettings from "../serverSettings.ts";
 
 const isScheduledTaskError = Schema.is(ScheduledTaskError);
 
@@ -1003,4 +1008,130 @@ it.effect("a run interrupted right after it reserves the task does not block the
       assert.equal(yield* Ref.get(launches), 1);
     }).pipe(Effect.provide(layer));
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect.each([true, false] as const)(
+  "a run starts on an account with usage left only when the setting allows it (%s)",
+  (fallbackToAvailableAccounts) =>
+    Effect.gen(function* () {
+      const claude = (id: string, usedPercent: number): ServerProvider => ({
+        instanceId: ProviderInstanceId.make(id),
+        driver: ProviderDriverKind.make("claudeAgent"),
+        enabled: true,
+        installed: true,
+        version: null,
+        status: "ready",
+        auth: { status: "authenticated" },
+        checkedAt: "2026-09-13T00:00:00.000Z",
+        models: [
+          { slug: "claude-opus-5-5", name: "Opus 5.5", isCustom: false, capabilities: null },
+        ],
+        slashCommands: [],
+        skills: [],
+        usageLimits: {
+          checkedAt: "2026-09-13T00:00:00.000Z",
+          windows: [
+            {
+              id: "five_hour",
+              kind: "session",
+              label: "Session",
+              usedPercent,
+              resetsAt: "2099-01-01T00:00:00.000Z",
+            },
+          ],
+        },
+      });
+      const exhausted: ModelSelection = {
+        instanceId: ProviderInstanceId.make("claude_work"),
+        model: "claude-opus-5-5",
+      };
+      const projectId = ProjectId.make("project:test");
+      const boundThread = ThreadId.make("thread:bound-limited");
+      const launched = yield* Ref.make<Array<ModelSelection>>([]);
+      const sent = yield* Ref.make<Array<ModelSelection | undefined>>([]);
+      const layer = ScheduledTaskService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            ManagedPolicy.layerTest(),
+            Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+              launch: (input) =>
+                Ref.update(launched, (all) => [...all, input.modelSelection]).pipe(
+                  Effect.as({ threadId: ThreadId.make("thread:new"), resumed: false } as never),
+                ),
+            }),
+            Layer.mock(ThreadManagementService.ThreadManagementService)({
+              getThreadShell: () => Effect.succeed({ projectId, deletedAt: null } as never),
+              getThreadSnapshotWindow: () =>
+                Effect.succeed({
+                  projection: {
+                    thread: { projectId, modelSelection: exhausted, createdBy: "user" },
+                  },
+                } as never),
+              getLatestLimitSwitch: () => Effect.succeed(null),
+              sendToThread: (input) =>
+                Ref.update(sent, (all) => [...all, input.modelSelection]).pipe(
+                  Effect.as({} as never),
+                ),
+            }),
+            Layer.mock(ProviderRegistry.ProviderRegistry)({
+              getProviders: Effect.succeed([
+                claude("claude_work", 100),
+                claude("claude_personal", 30),
+              ]),
+            }),
+            ServerSettings.layerTest({
+              fallbackToAvailableAccounts,
+              providerInstances: Object.fromEntries(
+                ["claude_work", "claude_personal"].map((id) => [
+                  ProviderInstanceId.make(id),
+                  { driver: ProviderDriverKind.make("claudeAgent"), enabled: true },
+                ]),
+              ),
+            }),
+            Layer.mock(SecretRequests.SecretRequests)({}),
+            Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+              namedProjectsRoot: "/projects",
+              isScratchProject: () => Effect.succeed(false),
+            }),
+            NodeCrypto.layer,
+            Layer.succeed(Scheduler.Scheduler, { register: () => Effect.void }),
+          ),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        const task = {
+          title: "Check in",
+          prompt: "Check progress",
+          enabled: true,
+          schedule: { type: "interval", everyMs: 60_000 },
+          projectId,
+          workspaceStrategy: { type: "root" },
+          modelSelection: exhausted,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+        } as const;
+        yield* service.upsert({ ...task, id: ScheduledTaskId.make("task:new-thread") });
+        yield* service.upsert({
+          ...task,
+          id: ScheduledTaskId.make("task:bound"),
+          threadId: boundThread,
+        });
+
+        yield* service.runNow({ id: ScheduledTaskId.make("task:new-thread") });
+        yield* service.runNow({ id: ScheduledTaskId.make("task:bound") });
+
+        const available = {
+          instanceId: ProviderInstanceId.make("claude_personal"),
+          model: "claude-opus-5-5",
+        };
+        assert.deepEqual(yield* Ref.get(launched), [
+          fallbackToAvailableAccounts ? available : exhausted,
+        ]);
+        // A bound run names no account unless it moves off the exhausted one.
+        assert.deepEqual(yield* Ref.get(sent), [
+          fallbackToAvailableAccounts ? available : undefined,
+        ]);
+      }).pipe(Effect.provide(layer));
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );

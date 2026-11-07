@@ -120,8 +120,39 @@ const readAccountChoice = Effect.fn("ThreadMessageIntake.readAccountChoice")(fun
   return Object.assign(choose, { providers, now, settings });
 });
 
+type MessageDispatchCommand = Extract<
+  OrchestrationV2Command,
+  { readonly type: "message.dispatch" }
+>;
+
+/**
+ * The account a new turn on an existing thread starts on, or undefined to keep the one it
+ * names (or the thread's). Null-safe when the setting is off or the thread cannot be read.
+ */
+const availableThreadAccount = Effect.fn("ThreadMessageIntake.availableThreadAccount")(function* (
+  input: Pick<MessageDispatchCommand, "threadId" | "modelSelection" | "deliveryIntent">,
+  sameModelOnly = false,
+) {
+  const choose = yield* readAccountChoice();
+  if (choose === null) return undefined;
+  const threads = yield* ThreadManagement.ThreadManagementService;
+  const window = yield* threads
+    .getThreadSnapshotWindow(input.threadId, { rowLimit: 1 })
+    .pipe(Effect.orElseSucceed(() => null));
+  if (window === null) return undefined;
+  const { thread } = window.projection;
+  const selection = input.modelSelection ?? thread.modelSelection;
+  const returned = yield* returnAfterLimitSwitch(input, selection, thread.projectId, choose);
+  const next = choose(
+    returned ?? selection,
+    thread.projectId,
+    sameModelOnly || thread.createdBy === "agent",
+  );
+  return next === selection ? undefined : next;
+});
+
 const withAvailableAccount = Effect.fn("ThreadMessageIntake.withAvailableAccount")(function* (
-  command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
+  command: MessageDispatchCommand,
 ) {
   // Steering stays on the active run's account; server continuations validate their own.
   if (
@@ -132,18 +163,37 @@ const withAvailableAccount = Effect.fn("ThreadMessageIntake.withAvailableAccount
   ) {
     return command;
   }
+  const next = yield* availableThreadAccount(command);
+  return next === undefined ? command : { ...command, modelSelection: next };
+});
+
+/**
+ * A queued send that bypasses dispatchCommand, such as a scheduled run on its bound thread,
+ * starts on the account dispatchCommand would pick. An agent's send keeps its model.
+ */
+export const withAvailableSendAccount = Effect.fn("ThreadMessageIntake.withAvailableSendAccount")(
+  function* (input: ThreadManagement.ThreadManagementSendInput) {
+    // Other modes may steer the active run, which stays on its account.
+    if (input.mode !== "queue") return input;
+    const next = yield* availableThreadAccount(
+      {
+        threadId: input.threadId,
+        ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+      },
+      input.createdBy === "agent",
+    );
+    return next === undefined ? input : { ...input, modelSelection: next };
+  },
+);
+
+/** A new thread starts on an account with usage left; a model an agent picked stays. */
+export const withAvailableLaunchAccount = Effect.fn(
+  "ThreadMessageIntake.withAvailableLaunchAccount",
+)(function* (input: ThreadLaunch.ThreadLaunchInput) {
   const choose = yield* readAccountChoice();
-  if (choose === null) return command;
-  const threads = yield* ThreadManagement.ThreadManagementService;
-  const window = yield* threads
-    .getThreadSnapshotWindow(command.threadId, { rowLimit: 1 })
-    .pipe(Effect.orElseSucceed(() => null));
-  if (window === null) return command;
-  const { thread } = window.projection;
-  const selection = command.modelSelection ?? thread.modelSelection;
-  const returned = yield* returnAfterLimitSwitch(command, selection, thread.projectId, choose);
-  const next = choose(returned ?? selection, thread.projectId, thread.createdBy === "agent");
-  return next === selection ? command : { ...command, modelSelection: next };
+  if (choose === null) return input;
+  const modelSelection = choose(input.modelSelection, input.projectId, input.createdBy === "agent");
+  return modelSelection === input.modelSelection ? input : { ...input, modelSelection };
 });
 
 /**
@@ -151,7 +201,7 @@ const withAvailableAccount = Effect.fn("ThreadMessageIntake.withAvailableAccount
  * for a turn that starts now: never while a run is active or queued, so no turn is cut off.
  */
 const returnAfterLimitSwitch = Effect.fn("ThreadMessageIntake.returnAfterLimitSwitch")(function* (
-  command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
+  command: Pick<MessageDispatchCommand, "threadId" | "deliveryIntent">,
   current: ModelSelection,
   projectId: ProjectId,
   choice: {
@@ -308,18 +358,7 @@ export const launchThread = Effect.fn("ThreadMessageIntake.launchThread")(functi
   requested: ThreadLaunch.ThreadLaunchInput,
 ) {
   const launches = yield* ThreadLaunch.ThreadLaunchService;
-  const choose = yield* readAccountChoice();
-  const input =
-    choose === null
-      ? requested
-      : {
-          ...requested,
-          modelSelection: choose(
-            requested.modelSelection,
-            requested.projectId,
-            requested.createdBy === "agent",
-          ),
-        };
+  const input = yield* withAvailableLaunchAccount(requested);
   yield* AttachmentClaims.validateAttachmentLimits(input.initialMessage?.attachments ?? []);
   if (!input.initialMessage?.attachments.some(AttachmentClaims.attachmentIsPendingUpload)) {
     return yield* launches.launch(input);
