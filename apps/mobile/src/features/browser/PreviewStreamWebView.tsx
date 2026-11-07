@@ -410,7 +410,8 @@ function PreviewStreamDocumentView({
                 onDesktop?.(message);
                 return;
               case "gone":
-                setGone(true);
+                // A desktop refusal (viewer limit, switched off) can pass; a closed tab cannot.
+                if (!desktop) setGone(true);
                 fail(message.reason || "This tab was closed.");
                 onGone?.();
                 return;
@@ -445,6 +446,9 @@ function PreviewStreamDocumentView({
                   dialogRef.current = null;
                   setControl(null);
                   onControl?.(null);
+                  // The capture state comes again with the next connection.
+                  setDesktopWaiting(false);
+                  if (desktop) onDesktop?.(null);
                 }
                 onStreamingChange?.(message.status === "streaming");
                 if (message.status === "streaming") onStreaming();

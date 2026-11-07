@@ -190,8 +190,9 @@ Consequences:
   disk; a `starting` left behind therefore counts as a crash, and it stays when `crashed` cannot be
   written. An attempt that ends after Start without a frame writes `crashed`, and the server also
   latches in memory. If the `starting` marker cannot be written, the share does not start. A server
-  killed before the first frame leaves `starting` too, which then refuses on purpose. Deleting
-  `crashed` (and a stale `starting`) re-enables it.
+  killed before the first frame leaves `starting` too, which then refuses on purpose. To
+  re-enable sharing, stop the T3 servers on that login, delete `crashed` (and a stale `starting`)
+  and start them again: a running server keeps its latch in memory.
 - **Warning before the first share.** Until a share has produced a frame on this login
   (`verified`), viewers see the risk spelled out and must press **Start screen sharing anyway**;
   nothing starts on its own.
@@ -283,8 +284,9 @@ Verified:
   3840×2160 coordinate space; Take control → `you`, Release → `agent`; while the web app at phone
   size holds control the desktop viewer shows "another viewer"; the mobile app's own WebView script
   (`preview-stream.browser.ts`, bundled as for the app) streams, takes control and sends taps and
-  text. Click to changed frame: web median 211 ms (p90 242, n=12), mobile WebView median 202 ms
-  (p90 251, n=10), including up to 100 ms of the 10 fps test source. Frame rate ~9.9 fps at
+  text. Click to changed frame, last run at `c4c9b8d15c`: web median 167 ms (p90 222, n=12),
+  mobile WebView script median 187 ms (p90 271, n=10); five runs that day had medians of 167–214 ms
+  (web) and 172–202 ms (mobile), including up to 100 ms of the 10 fps test source. Frame rate ~9.9 fps at
   ~325 KB/s with the simple pattern (1920×1080 JPEG q60; a busy screen costs more per frame).
 
 Not verified yet:

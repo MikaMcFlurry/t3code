@@ -142,15 +142,15 @@ export function useThreadServerBrowserTabs(input: {
   return { tabs: sessions, loaded: tabs.listed };
 }
 
-// The earliest time the next access request may go out.
-const previewStreamNotBeforeAtom = Atom.family((environmentId: EnvironmentId) =>
-  Atom.make(0).pipe(Atom.withLabel(`mobile-preview-stream-retry:${environmentId}`)),
-);
-
 interface StreamAccessKey {
   readonly environmentId: EnvironmentId;
   readonly stream: PreviewStreamKind;
 }
+
+// The earliest time the next access request may go out, per stream kind like the access itself.
+const previewStreamNotBeforeAtom = Atom.family(({ environmentId, stream }: StreamAccessKey) =>
+  Atom.make(0).pipe(Atom.withLabel(`mobile-${stream}-stream-retry:${environmentId}`)),
+);
 
 // Keyed by stream kind: each socket spends its own media ticket.
 const streamAccessKeys = new Map<string, StreamAccessKey>();
@@ -170,7 +170,7 @@ const previewStreamAccessAtom = Atom.family(({ environmentId, stream }: StreamAc
       const prepared = Option.getOrNull(
         get(environmentSession.preparedConnectionValueAtom(environmentId)),
       );
-      const notBefore = get(previewStreamNotBeforeAtom(environmentId));
+      const notBefore = get(previewStreamNotBeforeAtom(streamAccessKey(environmentId, stream)));
       if (prepared === null) return Effect.never;
       const resolve = resolveDeviceHubAccess({
         prepared,
@@ -187,8 +187,15 @@ const previewStreamAccessAtom = Atom.family(({ environmentId, stream }: StreamAc
 );
 
 /** Resolves fresh stream access once `delayMs` has passed. */
-function retryPreviewStreamAccess(environmentId: EnvironmentId, delayMs: number) {
-  appAtomRegistry.set(previewStreamNotBeforeAtom(environmentId), Date.now() + delayMs);
+function retryPreviewStreamAccess(
+  environmentId: EnvironmentId,
+  stream: PreviewStreamKind,
+  delayMs: number,
+) {
+  appAtomRegistry.set(
+    previewStreamNotBeforeAtom(streamAccessKey(environmentId, stream)),
+    Date.now() + delayMs,
+  );
 }
 
 export function usePreviewStreamAccess(
@@ -204,6 +211,6 @@ export function usePreviewStreamAccess(
     access,
     error: query.error,
     refresh: query.refresh,
-    retryAfter: (delayMs: number) => retryPreviewStreamAccess(environmentId, delayMs),
+    retryAfter: (delayMs: number) => retryPreviewStreamAccess(environmentId, stream, delayMs),
   };
 }
