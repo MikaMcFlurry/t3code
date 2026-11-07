@@ -76,7 +76,7 @@ Identical to `/api/preview-stream/ws`, so existing viewers work unchanged:
 - server → client: binary JPEG frame (client answers `{"type":"ack"}`; one frame in flight per
   viewer, only the newest waits), `{"type":"viewport","width","height"}`,
   `{"type":"control","canOperate","controller","generation","dialog":null}`.
-- new: `{"type":"desktop","state":"starting|consent|streaming|denied|ended|unavailable","detail"?}`.
+- new: `{"type":"desktop","state":"unverified|starting|consent|streaming|denied|ended|unavailable","detail"?}`.
 - client → server: `takeControl`, `releaseControl`, `mouse`, `wheel`, `key`, `text`, and `reload`
   (restart a stopped capture). `resize`, `probe` and navigation messages are ignored.
 - close `4404` with a reason: live view is off or the platform is unsupported.
@@ -92,9 +92,13 @@ Frames may be smaller than the viewport; clients map from the drawn frame to the
   every viewer (`ended`).
 - **Who may watch and drive.** Its own scope, `desktop:operate` ("Watch and control the
   desktop"), which no standard client grant includes: enabling the setting does not turn existing
-  preview or Connect grants into whole-screen access. A device gets it only when someone pairs it
-  with that permission (pairing dialog or `t3 auth pairing create --scope desktop:operate`).
-  `interactive=false` narrows a socket further to watching. This also answers the concern in
+  preview or Connect grants into whole-screen access. The pairing dialog only offers permissions
+  the current session holds, so the first such client is bootstrapped on the machine itself with
+  the CLI, listing its ordinary permissions too (`--scope` replaces the defaults), for example
+  `t3 auth pairing create --scope orchestration:read --scope orchestration:operate --scope
+  settings:write --scope preview:operate --scope desktop:operate`; that client can then pass the
+  permission on through the pairing dialog. `interactive=false` narrows a socket further to
+  watching. This also answers the concern in
   #32098 that cloud authorization alone can reach a machine.
 - **Revocation and switch-off.** A revoked or expired session loses its socket at once (the route
   races it against `SessionStore.awaitInvalidation`, as #32245 does for preview streams). Turning
@@ -103,11 +107,16 @@ Frames may be smaller than the viewport; clients map from the drawn frame to the
   viewer holds control, and a viewer that disconnects (phone locked, tab closed) hands control
   back. Taking control also takes the host-wide desktop lease that agents of every T3 server on
   this OS login take for each call, so a second server's agent cannot act during a takeover either.
+  Takeovers, hand-backs, disconnects and switch-off run one at a time, each to completion, and a
+  takeover rechecks after every wait, so a viewer that left or a switch-off cancels it and the
+  lease goes back.
 - **Bounded input.** At most 64 input messages per viewer in flight, text in batches of up to 1000
   characters, wheel deltas clamped, and the helper's input pipe capped at 256 KB (releases always
   pass). At most 8 viewers per machine.
-- **Passwords.** While a person holds control, every agent desktop call is refused, observation
-  included, so no screenshot reaches a model while a password or code is on screen. The server
+- **Passwords.** While a person holds control, every mediated agent desktop call is refused,
+  observation included, so T3's desktop tools return no screenshot to a model while a password or
+  code is on screen. (Tools outside T3's mediation, such as a provider's own computer use, are not
+  covered.) The server
   never stores or logs frames or input; input messages are not traced. On the phone, the text
   field is masked by default. Typed text goes to whatever field has focus on the machine, like a
   physical keyboard.
@@ -126,7 +135,11 @@ Frames may be smaller than the viewport; clients map from the drawn frame to the
   answered during the takeover still acts on nothing. Agent calls are not serialized by this
   gate; the host lease keeps its existing busy semantics.
 - Handing back keeps agents out until the person's held keys and buttons are released: the hub
-  asks the helper to release everything and waits for its acknowledgement before agents may act.
+  asks the helper to release everything and waits for its acknowledgement, which reports whether
+  the portal took every release. Without a clean acknowledgement within 1.5 s the capture ends,
+  and agents return only once the helper has exited, since its portal session and every key it
+  held go with it.
+- The agent's turn itself keeps running; only its desktop calls are refused until hand-back.
 - After that the next call runs normally. The agent is told to take a new screenshot because the
   screen changed under it.
 - Next step (not in this prototype): `request_human_takeover` (reason, optional hint), modelled on
@@ -152,10 +165,18 @@ OBS or a browser sharing the screen would most likely hit the same crash on that
 
 Consequences:
 
-- **Crash guard.** A stream that ends after `ready` without a single frame is how this crash looks
-  from the server. The hub then writes `desktop-live-view/screencast-crashed` into the server state
-  directory and never starts a screen stream on that machine again on its own; `reload` does not
-  bypass it. Deleting the file re-enables it. At most one crash per machine.
+- **Crash guard, per OS login and fail-closed.** Markers live in
+  `$XDG_STATE_HOME/t3code/desktop-live-view/` (default `~/.local/state/...`), shared by every T3
+  server and checkout on the login, and one capture lock per login keeps two servers from sharing
+  at once. `starting` is written before the stream starts and removed once a frame arrived or the
+  attempt ended harmlessly (refused at the machine, failed before the portal's Start); a `starting`
+  left behind therefore counts as a crash. An attempt that ends after Start without a frame writes
+  `crashed`, and the server also latches in memory in case the file cannot be written. If the
+  `starting` marker cannot be written, the share does not start. Deleting `crashed` (and a stale
+  `starting`) re-enables it.
+- **Warning before the first share.** Until a share has produced a frame on this login
+  (`verified`), viewers see the risk spelled out and must press **Start screen sharing anyway**;
+  nothing starts on its own.
 - **Fallback capture, next step, to be verified.** For such hosts: frames from screenshots at 1–3
   fps and input through a RemoteDesktop session _without_ a screen stream. Open points: GNOME 46
   only lets allowlisted callers use `org.gnome.Shell.Screenshot` directly, so frames would come
@@ -221,11 +242,12 @@ Both stay behind the same route, hub, protocol, control and viewers; only the he
 
 Verified:
 
-- Unit tests (`apps/server/src/desktop/DesktopLiveView.test.ts`, 16 tests, plus the existing bridge
+- Unit tests (`apps/server/src/desktop/DesktopLiveView.test.ts`, 25 tests, plus the existing bridge
   tests): keysyms, fan-out, consent and refusal states, input only from the controller, hand-back on
   disconnect, agent refused during a takeover and drained before the person's first input, crash
   guard, release acknowledgement before agents return, host lease held while a person drives,
-  modifier masks, wheel clamping, switch-off closing every viewer.
+  modifier masks, wheel clamping, switch-off closing every viewer, the login capture guard with
+  its markers, and takeovers cancelled by a disconnect or switch-off.
 - Typecheck of server, contracts, client-runtime, web and mobile.
 - On the real GNOME desktop: the consent dialog appears once on the machine, the restore token is
   written (`0600`) and the next start restores silently; the helper stops 20 s after the last viewer.

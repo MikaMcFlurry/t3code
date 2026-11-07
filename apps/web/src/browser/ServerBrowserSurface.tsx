@@ -139,6 +139,7 @@ const DESKTOP_STATUS_MESSAGES: Record<
   Exclude<DesktopStreamStatus["state"], "streaming">,
   string
 > = {
+  unverified: "Screen sharing has not worked on this machine yet.",
   starting: "Starting the screen capture...",
   consent: "Waiting for someone at the machine to allow screen sharing. This is asked once.",
   denied: "Screen sharing was declined on the machine.",
@@ -953,6 +954,11 @@ export function ServerBrowserSurface(props: {
           (desktopStatus.state === "unavailable" && control !== null) ? (
             <Button variant="outline" size="sm" onClick={() => send({ type: "reload" })}>
               Try again
+            </Button>
+          ) : null}
+          {desktopStatus.state === "unverified" && control !== null ? (
+            <Button variant="destructive" size="sm" onClick={() => send({ type: "reload" })}>
+              Start screen sharing anyway
             </Button>
           ) : null}
         </div>

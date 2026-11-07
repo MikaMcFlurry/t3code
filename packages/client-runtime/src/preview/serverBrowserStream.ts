@@ -17,11 +17,19 @@ export const previewStreamBasePath = (stream: PreviewStreamKind): string =>
 
 /** The live desktop capture: starting, waiting for consent on the machine, or why it stopped. */
 export interface DesktopStreamStatus {
-  readonly state: "starting" | "consent" | "streaming" | "denied" | "ended" | "unavailable";
+  readonly state:
+    | "unverified"
+    | "starting"
+    | "consent"
+    | "streaming"
+    | "denied"
+    | "ended"
+    | "unavailable";
   readonly detail?: string;
 }
 
 const DESKTOP_STREAM_STATES = new Set<string>([
+  "unverified",
   "starting",
   "consent",
   "streaming",

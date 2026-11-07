@@ -2,6 +2,7 @@
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -14,7 +15,11 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import { ServerConfig } from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { ComputerUseLinuxHostLease, userLeaseScopeKey } from "./ComputerUseLinuxHostLease.ts";
+import {
+  ComputerUseLinuxHostLease,
+  ComputerUseLinuxLeaseBusyError,
+  userLeaseScopeKey,
+} from "./ComputerUseLinuxHostLease.ts";
 import { desktopLiveControl } from "./DesktopLiveControl.ts";
 import { DESKTOP_LIVE_VIEW_PORTAL_SCRIPT } from "./DesktopLiveViewPortalScript.ts";
 
@@ -24,6 +29,7 @@ import { DESKTOP_LIVE_VIEW_PORTAL_SCRIPT } from "./DesktopLiveViewPortalScript.t
  * session was stopped there (GNOME's sharing indicator). unavailable: the host cannot stream.
  */
 export type DesktopLiveViewState =
+  | "unverified"
   | "starting"
   | "consent"
   | "streaming"
@@ -159,6 +165,27 @@ export interface DesktopLiveViewHostLease {
   readonly release: () => Promise<void>;
 }
 
+/** One screen capture, as the crash guard sees it. */
+export interface DesktopLiveViewCaptureRun {
+  /** The first frame arrived: screen sharing works on this machine. */
+  readonly succeeded: () => void;
+  /** The capture is over; `crashed` when it ended after the stream started and before a frame. */
+  readonly end: (crashed: boolean) => void;
+}
+
+/**
+ * Screen sharing can take the whole desktop session down (GNOME Shell 46 on GPUs without DRM
+ * format modifiers), so the guard is per OS login, armed before the stream starts, and fails
+ * closed: a marker left by an attempt that never finished counts as a crash.
+ */
+export interface DesktopLiveViewCaptureGuard {
+  readonly status: () => "verified" | "unverified" | "crashed";
+  /** Claims this login's one capture and arms the marker, or says why not. */
+  readonly begin: () => Promise<
+    DesktopLiveViewCaptureRun | { readonly refused: string; readonly crashed: boolean }
+  >;
+}
+
 // DOM modifier mask bits (Alt 1, Control 2, Meta 4, Shift 8) and their keysyms, left then right.
 const MODIFIER_KEYSYMS: ReadonlyArray<readonly [number, ReadonlyArray<number>]> = [
   [1, [0xffe9, 0xffea]],
@@ -172,8 +199,13 @@ const RELEASE_ACK_TIMEOUT_MS = 1500;
 const LEASE_WAIT_MS = 10_000;
 const LEASE_RETRY_MS = 200;
 
+const UNVERIFIED_DETAIL =
+  "Screen sharing has not worked on this machine yet. On some GPUs GNOME Shell 46 crashes when a screen share starts, which ends the desktop session and closes its apps. Start only if that is acceptable now.";
+
 const clampWheel = (value: unknown) =>
   Math.min(Math.max(finite(value), -MAX_WHEEL_DELTA), MAX_WHEEL_DELTA);
+
+type ReleaseOutcome = "applied" | "failed" | "timeout" | "gone";
 
 /**
  * One capture for the machine, shared by every viewer. It starts with the first viewer and
@@ -184,6 +216,7 @@ export class DesktopLiveViewHub {
   private readonly spawnHelper: SpawnDesktopLiveViewHelper;
   private readonly viewers = new Map<string, HubViewer>();
   private helper: DesktopLiveViewHelper | null = null;
+  private launching = false;
   private state: DesktopLiveViewState = "starting";
   private detail: string | undefined;
   private viewport: { width: number; height: number } | null = null;
@@ -191,26 +224,35 @@ export class DesktopLiveViewHub {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private startTimer: ReturnType<typeof setTimeout> | null = null;
   private enabled = true;
+  /** Set on a detected crash even when the marker cannot be written. */
+  private crashLatched = false;
   private hostLease: DesktopLiveViewHostLease | null = null;
+  /** Takeovers, hand-backs and switch-off run one at a time, each to completion. */
+  private handoffs: Promise<unknown> = Promise.resolve();
   private nextRelease = 0;
-  private readonly releaseAcks = new Map<number, () => void>();
+  private readonly releases = new Map<
+    number,
+    { readonly helper: DesktopLiveViewHelper; readonly settle: (outcome: ReleaseOutcome) => void }
+  >();
+  private readonly exits = new WeakMap<DesktopLiveViewHelper, Promise<void>>();
+  private readonly stopped = new WeakSet<DesktopLiveViewHelper>();
   private readonly stopListening: () => void;
   private readonly onHelperError: (status: Record<string, unknown>) => void;
-  private readonly crashGuard: DesktopLiveViewCrashGuard | null;
+  private readonly captureGuard: DesktopLiveViewCaptureGuard | null;
   private readonly acquireHostLease: (() => Promise<DesktopLiveViewHostLease | null>) | null;
 
   constructor(
     spawnHelper: SpawnDesktopLiveViewHelper,
     options: {
       readonly onHelperError?: (status: Record<string, unknown>) => void;
-      readonly crashGuard?: DesktopLiveViewCrashGuard;
+      readonly captureGuard?: DesktopLiveViewCaptureGuard;
       /** Resolves null while the lease is busy; the hub retries for a while. */
       readonly acquireHostLease?: () => Promise<DesktopLiveViewHostLease | null>;
     } = {},
   ) {
     this.spawnHelper = spawnHelper;
     this.onHelperError = options.onHelperError ?? (() => undefined);
-    this.crashGuard = options.crashGuard ?? null;
+    this.captureGuard = options.captureGuard ?? null;
     this.acquireHostLease = options.acquireHostLease ?? null;
     this.stopListening = desktopLiveControl.onChange(() => this.broadcastControl());
   }
@@ -220,10 +262,15 @@ export class DesktopLiveViewHub {
   }
 
   attach(viewer: HubViewer): void {
+    if (!this.enabled) {
+      viewer.push({ _tag: "closed", reason: SWITCHED_OFF_REASON });
+      return;
+    }
     this.viewers.set(viewer.id, viewer);
     this.cancelIdleStop();
     // Later viewers join what is there; after a refusal or failure, "reload" asks again.
-    if (this.helper === null && this.viewers.size === 1) this.startHelper();
+    if (this.helper === null && !this.launching && this.viewers.size === 1)
+      void this.startCapture(false);
     viewer.push({ _tag: "desktop", state: this.state, ...this.detailField() });
     if (this.viewport) viewer.push({ _tag: "viewport", ...this.viewport });
     viewer.push(this.controlFor(viewer));
@@ -233,8 +280,9 @@ export class DesktopLiveViewHub {
 
   async detach(viewerId: string): Promise<void> {
     const viewer = this.viewers.get(viewerId);
-    await desktopLiveControl.disconnect(viewerId, () => this.releaseInput(viewer));
+    // Leaving first makes a takeover this viewer still has pending give up.
     this.viewers.delete(viewerId);
+    await this.handoff(() => this.handBack(viewerId, viewer));
     if (this.viewers.size === 0) this.scheduleIdleStop();
   }
 
@@ -242,9 +290,17 @@ export class DesktopLiveViewHub {
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
     if (enabled) return;
+    const helper = this.helper;
     this.stopHelper();
     for (const viewer of this.viewers.values())
-      viewer.push({ _tag: "closed", reason: "Desktop live view was turned off on this machine." });
+      viewer.push({ _tag: "closed", reason: SWITCHED_OFF_REASON });
+    const controller = desktopLiveControl.humanController;
+    if (controller !== null && this.viewers.has(controller)) {
+      void this.handoff(async () => {
+        if (helper !== null) await this.exits.get(helper);
+        await this.handBack(controller, this.viewers.get(controller));
+      });
+    }
   }
 
   shutdown(): void {
@@ -262,11 +318,12 @@ export class DesktopLiveViewHub {
     try {
       switch (message.type) {
         case "takeControl":
-          return await this.take(viewerId);
+          return await this.handoff(() => this.take(viewerId));
         case "releaseControl":
-          return await desktopLiveControl.release(viewerId, () => this.releaseInput(viewer));
+          return await this.handoff(() => this.handBack(viewerId, viewer));
         case "reload":
-          if (this.helper === null) this.startHelper();
+          // Also the explicit "start anyway" on a machine where sharing never worked yet.
+          if (this.helper === null && !this.launching) await this.startCapture(true);
           return;
         case "mouse":
           return await this.mouse(viewerId, message);
@@ -304,32 +361,58 @@ export class DesktopLiveViewHub {
     }
   }
 
-  /** Takes the host-wide lease first, so agents in other T3 servers on this login stop too. */
+  private handoff<A>(run: () => Promise<A>): Promise<A> {
+    const result = this.handoffs.then(run);
+    this.handoffs = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  /**
+   * Takes the host-wide lease, then control. Rechecks after every wait: a viewer that left or a
+   * switch-off cancels the takeover and gives the lease back.
+   */
   private async take(viewerId: string) {
+    const wanted = () => this.enabled && this.viewers.get(viewerId)?.canOperate === true;
+    if (!wanted()) return;
     const controller = desktopLiveControl.humanController;
     if (controller === viewerId) return;
     if (controller !== null) throw new Error("Another viewer controls the desktop.");
-    if (this.acquireHostLease !== null && this.hostLease === null) {
+    let lease: DesktopLiveViewHostLease | null = null;
+    if (this.acquireHostLease !== null) {
       const deadline = performance.now() + LEASE_WAIT_MS;
-      let lease = await this.acquireHostLease();
-      while (lease === null && performance.now() < deadline) {
+      lease = await this.acquireHostLease();
+      while (lease === null && wanted() && performance.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, LEASE_RETRY_MS));
-        if (desktopLiveControl.humanController !== null) break;
         lease = await this.acquireHostLease();
       }
       if (lease === null) throw new Error("An agent is still using the desktop.");
-      if (desktopLiveControl.humanController !== null) {
-        await lease.release();
-        throw new Error("Another viewer took control first.");
+      if (!wanted()) {
+        await lease.release().catch(() => undefined);
+        return;
       }
-      this.hostLease = lease;
     }
+    this.hostLease = lease;
     try {
       await desktopLiveControl.control.take(viewerId);
     } catch (cause) {
       await this.dropHostLease();
       throw cause;
     }
+    // Draining the agent's running call took time; the viewer may have gone meanwhile.
+    if (!wanted()) await this.handBack(viewerId, undefined);
+  }
+
+  /** Releases what the viewer held, then the lease; agents stay out until both are done. */
+  private async handBack(viewerId: string, viewer: HubViewer | undefined) {
+    if (desktopLiveControl.humanController !== viewerId) return;
+    await desktopLiveControl.release(viewerId, async () => {
+      viewer?.pressedKeys.clear();
+      await this.releaseHeldInput();
+      await this.dropHostLease();
+    });
   }
 
   private async dropHostLease() {
@@ -338,24 +421,31 @@ export class DesktopLiveViewHub {
     await lease?.release().catch(() => undefined);
   }
 
-  /** Releases everything the viewer held and waits until the helper applied it. */
-  private async releaseInput(viewer: HubViewer | undefined) {
-    viewer?.pressedKeys.clear();
+  /**
+   * Asks the helper to release every key and button and waits for its answer. Without a clean
+   * answer the capture ends: its portal session goes, and every key it held goes with it.
+   */
+  private async releaseHeldInput() {
     const helper = this.helper;
-    if (helper !== null) {
-      const id = ++this.nextRelease;
-      const applied = new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, RELEASE_ACK_TIMEOUT_MS);
-        this.releaseAcks.set(id, () => {
-          clearTimeout(timer);
-          resolve();
-        });
-      });
+    if (helper === null) return;
+    const id = ++this.nextRelease;
+    const outcome = await new Promise<ReleaseOutcome>((resolve) => {
+      const timer = setTimeout(() => settle("timeout"), RELEASE_ACK_TIMEOUT_MS);
+      const settle = (result: ReleaseOutcome) => {
+        clearTimeout(timer);
+        this.releases.delete(id);
+        resolve(result);
+      };
+      this.releases.set(id, { helper, settle });
       helper.send({ t: "release", id });
-      await applied;
-      this.releaseAcks.delete(id);
-    }
-    await this.dropHostLease();
+    });
+    if (outcome === "applied" || outcome === "gone") return;
+    this.stopHelper();
+    await this.exits.get(helper);
+    this.setState(
+      "unavailable",
+      "The capture stopped because releasing held keys was not confirmed.",
+    );
   }
 
   private async mouse(viewerId: string, message: Record<string, unknown>) {
@@ -447,47 +537,103 @@ export class DesktopLiveViewHub {
     return this.detail === undefined ? {} : { detail: this.detail };
   }
 
-  private startHelper() {
+  /** `confirmed`: a viewer chose to start although sharing never worked on this machine. */
+  private async startCapture(confirmed: boolean) {
     this.lastFrame = null;
-    if (!this.enabled) return;
-    if (this.crashGuard?.isTripped()) {
+    if (!this.enabled || this.helper !== null || this.launching) return;
+    if (this.crashLatched) {
       this.setState("unavailable", CRASH_GUARD_DETAIL);
       return;
     }
+    let run: DesktopLiveViewCaptureRun | null = null;
+    const guard = this.captureGuard;
+    if (guard !== null) {
+      const status = guard.status();
+      if (status === "crashed") {
+        this.crashLatched = true;
+        this.setState("unavailable", CRASH_GUARD_DETAIL);
+        return;
+      }
+      if (status === "unverified" && !confirmed) {
+        this.setState("unverified", UNVERIFIED_DETAIL);
+        return;
+      }
+      this.launching = true;
+      this.setState("starting");
+      const begun = await guard.begin().finally(() => {
+        this.launching = false;
+      });
+      if ("refused" in begun) {
+        if (begun.crashed) this.crashLatched = true;
+        this.setState("unavailable", begun.refused);
+        return;
+      }
+      if (!this.enabled || this.viewers.size === 0 || this.helper !== null) {
+        begun.end(false);
+        return;
+      }
+      run = begun;
+    }
+    this.spawnCapture(run);
+  }
+
+  private spawnCapture(run: DesktopLiveViewCaptureRun | null) {
     this.setState("starting");
     let helper: DesktopLiveViewHelper | null = null;
-    // A stream that ends after "ready" without one frame is how a compositor crash looks from here.
-    let ready = false;
+    // The stream starts with the portal's Start call, which comes right after "consent".
+    let hazardous = false;
     let framed = false;
-    const tripIfCrashed = () => {
-      if (!ready || framed || this.crashGuard === null) return false;
-      this.crashGuard.trip();
-      return true;
+    let finished = false;
+    const finish = (crashed: boolean) => {
+      if (finished) return;
+      finished = true;
+      if (crashed) this.crashLatched = true;
+      run?.end(crashed);
     };
+    // Only a guarded capture can take the desktop down; the test source cannot.
+    const looksCrashed = () => run !== null && hazardous && !framed && !this.stopped.has(helper!);
+    let exited: () => void = () => undefined;
     helper = this.spawnHelper({
       onFrame: (jpeg) => {
+        if (!framed) {
+          framed = true;
+          run?.succeeded();
+        }
         if (this.helper !== helper) return;
-        framed = true;
         this.lastFrame = jpeg;
         for (const viewer of this.viewers.values()) viewer.push({ _tag: "frame", data: jpeg });
       },
       onStatus: (status) => {
-        if (this.helper !== helper) return;
-        if (status.type === "ready") ready = true;
-        if ((status.type === "error" || status.type === "closed") && tripIfCrashed()) {
-          this.onHelperError(status);
-          this.stopHelper();
-          this.setState("unavailable", CRASH_GUARD_DETAIL);
+        if (status.type === "consent" || status.type === "ready") hazardous = true;
+        if (status.type === "released") {
+          const release = this.releases.get(finite(status.id));
+          if (release?.helper === helper)
+            release.settle(status.ok === false ? "failed" : "applied");
           return;
         }
+        if (status.type === "denied") finish(false);
+        else if (status.type === "error" || status.type === "closed") {
+          const crashed = looksCrashed();
+          finish(crashed);
+          if (crashed && this.helper === helper) {
+            this.onHelperError(status);
+            this.stopHelper();
+            this.setState("unavailable", CRASH_GUARD_DETAIL);
+            return;
+          }
+        }
+        if (this.helper !== helper) return;
         this.onHelperStatus(status);
       },
       onExit: () => {
+        finish(looksCrashed());
+        for (const release of this.releases.values())
+          if (release.helper === helper) release.settle("gone");
+        exited();
         if (this.helper !== helper) return;
         this.helper = null;
         this.clearStartTimer();
-        this.ackPendingReleases();
-        if (tripIfCrashed()) this.setState("unavailable", CRASH_GUARD_DETAIL);
+        if (this.crashLatched) this.setState("unavailable", CRASH_GUARD_DETAIL);
         else if (
           this.state === "starting" ||
           this.state === "consent" ||
@@ -496,6 +642,12 @@ export class DesktopLiveViewHub {
           this.setState("unavailable", "The desktop capture stopped.");
       },
     });
+    this.exits.set(
+      helper,
+      new Promise<void>((resolve) => {
+        exited = resolve;
+      }),
+    );
     this.helper = helper;
     // A restore token the portal ignores still shows the dialog, so the deadline always runs.
     this.startTimer = setTimeout(() => {
@@ -524,9 +676,6 @@ export class DesktopLiveViewHub {
         this.setState("streaming");
         return;
       }
-      case "released":
-        this.releaseAcks.get(finite(status.id))?.();
-        return;
       case "denied":
         this.stopHelper();
         this.setState("denied");
@@ -543,18 +692,15 @@ export class DesktopLiveViewHub {
     }
   }
 
-  private ackPendingReleases() {
-    for (const ack of this.releaseAcks.values()) ack();
-    this.releaseAcks.clear();
-  }
-
+  /** Asks the current helper to stop; its exit, not this call, settles anything waiting on it. */
   private stopHelper() {
     this.clearStartTimer();
     const helper = this.helper;
     this.helper = null;
     this.lastFrame = null;
-    this.ackPendingReleases();
-    helper?.stop();
+    if (helper === null) return;
+    this.stopped.add(helper);
+    helper.stop();
   }
 
   private clearStartTimer() {
@@ -581,27 +727,87 @@ export class DesktopLiveViewHub {
   }
 }
 
-/** Remembers that a screen stream took the desktop down, so it never starts again on its own. */
-export interface DesktopLiveViewCrashGuard {
-  readonly isTripped: () => boolean;
-  readonly trip: () => void;
-}
+const SWITCHED_OFF_REASON = "Desktop live view was turned off on this machine.";
 
 const CRASH_GUARD_DETAIL =
-  "The last screen stream on this machine ended before its first frame, which is how a desktop crash looks (GNOME Shell 46 on GPUs without DRM format modifiers). Live view stays off here; see docs/desktop-live-view.md to reset it.";
+  "A screen share on this machine ended before its first frame, which is how a desktop crash looks (GNOME Shell 46 on GPUs without DRM format modifiers). Live view stays off for this login; see docs/desktop-live-view.md to reset it.";
 
-/** A marker file in the server state directory; deleting it re-enables the screen stream. */
-export const fileCrashGuard = (path: string): DesktopLiveViewCrashGuard => ({
-  isTripped: () => NodeFS.existsSync(path),
-  trip: () => {
+/**
+ * Markers per OS login, shared by every T3 server and checkout on it: `starting` is written before
+ * the stream starts and removed once a frame arrived or the attempt ended harmlessly, so one left
+ * behind means the attempt never finished. `verified` and `crashed` record the outcome.
+ */
+export const loginCaptureGuard = (input: {
+  readonly directory: string;
+  /** This login's single capture; resolves null while another process holds it. */
+  readonly acquireCaptureLock: () => Promise<{ readonly release: () => Promise<void> } | null>;
+}): DesktopLiveViewCaptureGuard => {
+  const file = (name: string) => NodePath.join(input.directory, name);
+  const write = (name: string, text: string) => {
+    NodeFS.mkdirSync(input.directory, { recursive: true, mode: 0o700 });
+    NodeFS.writeFileSync(file(name), text, { mode: 0o600 });
+  };
+  const exists = (name: string) => NodeFS.existsSync(file(name));
+  const remove = (name: string) => NodeFS.rmSync(file(name), { force: true });
+  const markCrashed = () => {
     try {
-      NodeFS.mkdirSync(NodePath.dirname(path), { recursive: true, mode: 0o700 });
-      NodeFS.writeFileSync(path, "A screen stream ended before its first frame.\n", {
-        mode: 0o600,
-      });
+      write("crashed", "A screen share ended before its first frame.\n");
     } catch {}
-  },
-});
+  };
+  return {
+    status: () => (exists("crashed") ? "crashed" : exists("verified") ? "verified" : "unverified"),
+    begin: async () => {
+      let lock: { readonly release: () => Promise<void> } | null;
+      try {
+        lock = await input.acquireCaptureLock();
+      } catch {
+        return {
+          refused: "The screen share could not claim this login's capture.",
+          crashed: false,
+        };
+      }
+      if (lock === null) {
+        return {
+          refused: "Another T3 server on this login is sharing the screen.",
+          crashed: false,
+        };
+      }
+      const held = lock;
+      const refuse = async (refused: string, crashed: boolean) => {
+        await held.release().catch(() => undefined);
+        return { refused, crashed };
+      };
+      if (exists("starting")) {
+        markCrashed();
+        return await refuse(CRASH_GUARD_DETAIL, true);
+      }
+      try {
+        write("starting", "A screen share is starting.\n");
+      } catch {
+        // Fail closed: without the marker a crash here could repeat unnoticed.
+        return await refuse(
+          "The screen share could not arm its crash guard, so it stays off.",
+          false,
+        );
+      }
+      return {
+        succeeded: () => {
+          try {
+            write("verified", "Screen sharing worked on this machine.\n");
+            remove("starting");
+          } catch {}
+        },
+        end: (crashed) => {
+          if (crashed) markCrashed();
+          try {
+            remove("starting");
+          } catch {}
+          void held.release().catch(() => undefined);
+        },
+      };
+    },
+  };
+};
 
 const SETUP_HINT =
   "Install it with: sudo apt install python3-gi gir1.2-gstreamer-1.0 gstreamer1.0-pipewire gstreamer1.0-plugins-good";
@@ -731,6 +937,31 @@ export const spawnPortalHelper =
 
 export const DESKTOP_LIVE_VIEW_PLATFORMS: ReadonlySet<NodeJS.Platform> = new Set(["linux"]);
 
+/** Per OS login, so every T3 server and checkout on it shares the crash markers. */
+const loginStateDir = (environment: NodeJS.ProcessEnv) =>
+  NodePath.join(
+    environment.XDG_STATE_HOME ??
+      NodePath.join(environment.HOME ?? NodeOS.homedir(), ".local", "state"),
+    "t3code",
+    "desktop-live-view",
+  );
+
+const isLeaseBusy = Schema.is(ComputerUseLinuxLeaseBusyError);
+
+/** One screen capture per OS login, across T3 servers. */
+const captureLockAcquirer = (platform: NodeJS.Platform) => async () => {
+  const lease = new ComputerUseLinuxHostLease({
+    platform,
+    scopeKey: `${await userLeaseScopeKey({ platform })}:desktop-capture`,
+  });
+  try {
+    return await lease.acquire();
+  } catch (cause) {
+    if (isLeaseBusy(cause)) return null;
+    throw cause;
+  }
+};
+
 /** The lease agents take for every desktop call, held for as long as a person drives. */
 const hostLeaseAcquirer = (platform: NodeJS.Platform) => async () => {
   try {
@@ -765,9 +996,14 @@ export const layer = Layer.effect(
         testSource,
       }),
       {
-        ...(testSource
+        ...(testSource || !DESKTOP_LIVE_VIEW_PLATFORMS.has(platform)
           ? {}
-          : { crashGuard: fileCrashGuard(NodePath.join(stateDir, "screencast-crashed")) }),
+          : {
+              captureGuard: loginCaptureGuard({
+                directory: loginStateDir(environment),
+                acquireCaptureLock: captureLockAcquirer(platform),
+              }),
+            }),
         ...(DESKTOP_LIVE_VIEW_PLATFORMS.has(platform)
           ? { acquireHostLease: hostLeaseAcquirer(platform) }
           : {}),

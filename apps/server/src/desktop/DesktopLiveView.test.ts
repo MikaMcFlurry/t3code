@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off -- the login capture guard is checked against a real temporary directory.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
 
 import {
@@ -7,8 +11,10 @@ import {
 import type { ComputerUseLinuxLease } from "./ComputerUseLinuxHostLease.ts";
 import { desktopLiveControl } from "./DesktopLiveControl.ts";
 import {
+  type DesktopLiveViewCaptureGuard,
   type DesktopLiveViewOutput,
   DesktopLiveViewHub,
+  loginCaptureGuard,
   type SpawnDesktopLiveViewHelper,
   keysymForKey,
 } from "./DesktopLiveView.ts";
@@ -21,7 +27,9 @@ interface FakeHelper {
   exit: () => void;
 }
 
-function fakeSpawner() {
+/** `acknowledge`: how the helper answers a release; false never answers. */
+function fakeSpawner(options: { acknowledge?: boolean | "failed" } = {}) {
+  const acknowledge = options.acknowledge ?? true;
   const helpers: Array<FakeHelper> = [];
   const spawn: SpawnDesktopLiveViewHelper = (events) => {
     const helper: FakeHelper = {
@@ -36,8 +44,10 @@ function fakeSpawner() {
       send: (command) => {
         helper.commands.push(command);
         // The real helper acknowledges a release once it applied it.
-        if (command.t === "release")
-          queueMicrotask(() => events.onStatus({ type: "released", id: command.id }));
+        if (command.t === "release" && acknowledge !== false)
+          queueMicrotask(() =>
+            events.onStatus({ type: "released", id: command.id, ok: acknowledge !== "failed" }),
+          );
       },
       stop: () => {
         helper.stopped = true;
@@ -321,42 +331,225 @@ const session = {
   threadId: "thread",
 };
 
-describe("DesktopLiveViewHub crash guard", () => {
-  it("stops starting screen streams after one ended before its first frame", () => {
-    let tripped = false;
+function fakeGuard(status: "verified" | "unverified" | "crashed") {
+  const events: Array<string> = [];
+  const guard: DesktopLiveViewCaptureGuard = {
+    status: () => status,
+    begin: async () => {
+      events.push("begin");
+      return {
+        succeeded: () => void events.push("succeeded"),
+        end: (crashed) => void events.push(crashed ? "end:crashed" : "end"),
+      };
+    },
+  };
+  return { guard, events };
+}
+
+/** Lets the async capture start and handoffs run their pending steps. */
+const settle = async () => {
+  for (let step = 0; step < 20; step++) await Promise.resolve();
+};
+
+describe("DesktopLiveViewHub capture guard", () => {
+  it("asks before the first screen share on a machine where it never worked", async () => {
     const spawner = fakeSpawner();
-    const hub = new DesktopLiveViewHub(spawner.spawn, {
-      crashGuard: { isTripped: () => tripped, trip: () => (tripped = true) },
-    });
+    const { guard, events } = fakeGuard("unverified");
+    const hub = new DesktopLiveViewHub(spawner.spawn, { captureGuard: guard });
     hubs.push(hub);
     const first = viewer("first");
     hub.attach(first.entry);
-    streaming(spawner.helpers[0]!);
-    // The compositor died: the helper ends with no frame after "ready".
-    spawner.helpers[0]!.exit();
-    expect(tripped).toBe(true);
-    expect(first.last("desktop")?.state).toBe("unavailable");
-    expect(first.last("desktop")?.detail).toContain("before its first frame");
-    return hub.input("first", { type: "reload" }).then(() => {
-      expect(spawner.helpers).toHaveLength(1);
-    });
+    await settle();
+    expect(spawner.helpers).toHaveLength(0);
+    expect(first.last("desktop")?.state).toBe("unverified");
+    expect(first.last("desktop")?.detail).toContain("ends the desktop session");
+    await hub.input("first", { type: "reload" });
+    expect(events).toEqual(["begin"]);
+    expect(spawner.helpers).toHaveLength(1);
   });
 
-  it("does not trip when frames arrived or the stream never started", () => {
-    let tripped = false;
+  it("latches after a stream that started and died without a frame", async () => {
     const spawner = fakeSpawner();
-    const hub = new DesktopLiveViewHub(spawner.spawn, {
-      crashGuard: { isTripped: () => tripped, trip: () => (tripped = true) },
-    });
+    const { guard, events } = fakeGuard("verified");
+    const hub = new DesktopLiveViewHub(spawner.spawn, { captureGuard: guard });
+    hubs.push(hub);
+    const first = viewer("first");
+    hub.attach(first.entry);
+    await settle();
+    // The portal's Start follows "consent"; the compositor died before "ready" or a frame.
+    spawner.helpers[0]!.status({ type: "consent", restorable: true });
+    spawner.helpers[0]!.exit();
+    expect(events).toEqual(["begin", "end:crashed"]);
+    expect(first.last("desktop")?.detail).toContain("before its first frame");
+    await hub.input("first", { type: "reload" });
+    expect(spawner.helpers).toHaveLength(1);
+  });
+
+  it("records success and harmless endings without latching", async () => {
+    const spawner = fakeSpawner();
+    const { guard, events } = fakeGuard("verified");
+    const hub = new DesktopLiveViewHub(spawner.spawn, { captureGuard: guard });
     hubs.push(hub);
     hub.attach(viewer("watcher").entry);
-    spawner.helpers[0]!.status({ type: "error", code: "missing-element", element: "pipewiresrc" });
-    expect(tripped).toBe(false);
-    void hub.input("watcher", { type: "reload" });
+    await settle();
+    spawner.helpers[0]!.status({ type: "consent", restorable: false });
+    spawner.helpers[0]!.status({ type: "denied", code: "start" });
+    await hub.input("watcher", { type: "reload" });
     streaming(spawner.helpers[1]!);
     spawner.helpers[1]!.frame(new Uint8Array([1]));
     spawner.helpers[1]!.exit();
-    expect(tripped).toBe(false);
+    expect(events).toEqual(["begin", "end", "begin", "succeeded", "end"]);
+  });
+
+  it("keeps the login's markers: a marker left by an unfinished start counts as a crash", async () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-live-view-guard-"));
+    try {
+      const locks: Array<string> = [];
+      const guard = loginCaptureGuard({
+        directory,
+        acquireCaptureLock: async () => {
+          locks.push("lock");
+          return { release: async () => void locks.push("unlock") };
+        },
+      });
+      expect(guard.status()).toBe("unverified");
+      const run = await guard.begin();
+      if ("refused" in run) throw new Error("refused");
+      expect(NodeFS.existsSync(NodePath.join(directory, "starting"))).toBe(true);
+      run.succeeded();
+      run.end(false);
+      expect(guard.status()).toBe("verified");
+      // A start that never finished, as after the compositor took the server's session down.
+      const second = await guard.begin();
+      if ("refused" in second) throw new Error("refused");
+      const third = await guard.begin();
+      expect(third).toMatchObject({ crashed: true });
+      expect(guard.status()).toBe("crashed");
+      expect(locks).toEqual(["lock", "unlock", "lock", "lock", "unlock"]);
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses while another server on the login is sharing the screen", async () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-live-view-guard-"));
+    try {
+      const guard = loginCaptureGuard({ directory, acquireCaptureLock: async () => null });
+      expect(await guard.begin()).toMatchObject({ crashed: false });
+      expect(NodeFS.existsSync(NodePath.join(directory, "starting"))).toBe(false);
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("DesktopLiveViewHub handoffs", () => {
+  function leasedHub(options: { busyFor?: number } = {}) {
+    const events: Array<string> = [];
+    let busy = options.busyFor ?? 0;
+    let gate: (() => void) | null = null;
+    const spawner = fakeSpawner();
+    const hub = new DesktopLiveViewHub(spawner.spawn, {
+      acquireHostLease: async () => {
+        if (busy > 0) {
+          busy -= 1;
+          return null;
+        }
+        if (gate === null) await new Promise<void>((resolve) => (gate = resolve));
+        events.push("acquire");
+        return { release: async () => void events.push("release") };
+      },
+    });
+    hubs.push(hub);
+    return { hub, spawner, events, open: () => (gate ??= () => undefined)?.() };
+  }
+
+  it("gives a pending takeover up when its viewer leaves, and returns the lease", async () => {
+    const { hub, spawner, events, open } = leasedHub();
+    hub.attach(viewer("driver").entry);
+    hub.attach(viewer("watcher").entry);
+    streaming(spawner.helpers[0]!);
+    const taking = hub.input("driver", { type: "takeControl" });
+    await settle();
+    const leaving = hub.detach("driver");
+    open();
+    await taking;
+    await leaving;
+    expect(desktopLiveControl.humanController).toBeNull();
+    expect(events).toEqual(["acquire", "release"]);
+  });
+
+  it("gives a pending takeover up when the setting is turned off", async () => {
+    const { hub, spawner, events, open } = leasedHub();
+    hub.attach(viewer("driver").entry);
+    streaming(spawner.helpers[0]!);
+    const taking = hub.input("driver", { type: "takeControl" });
+    await settle();
+    hub.setEnabled(false);
+    open();
+    await taking;
+    expect(desktopLiveControl.humanController).toBeNull();
+    expect(events).toEqual(["acquire", "release"]);
+  });
+
+  it("lets a second viewer take over only after the first hand-back returned its lease", async () => {
+    const { hub, spawner, events, open } = leasedHub();
+    open();
+    hub.attach(viewer("first").entry);
+    hub.attach(viewer("second").entry);
+    streaming(spawner.helpers[0]!);
+    await hub.input("first", { type: "takeControl" });
+    const handingBack = hub.input("first", { type: "releaseControl" });
+    const takingOver = hub.input("second", { type: "takeControl" });
+    await handingBack;
+    await takingOver;
+    expect(desktopLiveControl.humanController).toBe("second");
+    expect(events).toEqual(["acquire", "release", "acquire"]);
+  });
+
+  it("ends the capture and keeps agents out when a release is not confirmed", async () => {
+    vi.useFakeTimers();
+    const spawner = fakeSpawner({ acknowledge: false });
+    const hub = new DesktopLiveViewHub(spawner.spawn);
+    hubs.push(hub);
+    hub.attach(viewer("driver").entry);
+    streaming(spawner.helpers[0]!);
+    await hub.input("driver", { type: "takeControl" });
+    const handingBack = hub.input("driver", { type: "releaseControl" });
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(spawner.helpers[0]!.stopped).toBe(true);
+    let agentRan = false;
+    await desktopLiveControl.agent(async () => (agentRan = true)).catch(() => undefined);
+    expect(agentRan).toBe(false);
+    // Only the helper's exit, which takes its portal session and held keys along, lets agents in.
+    spawner.helpers[0]!.exit();
+    await handingBack;
+    await desktopLiveControl.agent(async () => (agentRan = true));
+    expect(agentRan).toBe(true);
+  });
+
+  it("treats a release the portal refused like an unconfirmed one", async () => {
+    const spawner = fakeSpawner({ acknowledge: "failed" });
+    const hub = new DesktopLiveViewHub(spawner.spawn);
+    hubs.push(hub);
+    hub.attach(viewer("driver").entry);
+    streaming(spawner.helpers[0]!);
+    await hub.input("driver", { type: "takeControl" });
+    const handingBack = hub.input("driver", { type: "releaseControl" });
+    await settle();
+    expect(spawner.helpers[0]!.stopped).toBe(true);
+    spawner.helpers[0]!.exit();
+    await handingBack;
+    expect(desktopLiveControl.humanController).toBeNull();
+  });
+
+  it("closes a viewer that attaches after the switch-off", () => {
+    const { hub } = makeHub();
+    hub.setEnabled(false);
+    const late = viewer("late");
+    hub.attach(late.entry);
+    expect(late.last("closed")?.reason).toContain("turned off");
+    expect(late.last("control")).toBeUndefined();
   });
 });
 

@@ -16,6 +16,7 @@ import { useAppearancePreferences } from "../settings/appearance/AppearancePrefe
 type DesktopLiveViewRouteScreenProps = StaticScreenProps<{ readonly environmentId: string }>;
 
 const STATUS_MESSAGES: Record<Exclude<DesktopStreamStatus["state"], "streaming">, string> = {
+  unverified: "Screen sharing has not worked on this machine yet.",
   starting: "Starting the screen capture...",
   consent: "Waiting for someone at the machine to allow screen sharing. This is asked once.",
   denied: "Screen sharing was declined on the machine.",
@@ -59,6 +60,13 @@ export function DesktopLiveViewRouteScreen({ route }: DesktopLiveViewRouteScreen
           <AppText selectable className="text-center text-sm text-foreground-muted">
             {status.detail ?? STATUS_MESSAGES[status.state]}
           </AppText>
+          {status.state === "unverified" ? (
+            <Button
+              label="Start screen sharing anyway"
+              tone="danger"
+              onPress={() => stream.current?.command({ type: "reload" })}
+            />
+          ) : null}
           {status.state === "denied" ||
           status.state === "ended" ||
           status.state === "unavailable" ? (

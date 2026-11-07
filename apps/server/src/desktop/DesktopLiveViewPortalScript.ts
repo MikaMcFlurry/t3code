@@ -120,12 +120,14 @@ def read_token():
 
 
 def notify(method, signature, values):
+    """True once the portal took the call, or when there is no session to send it to."""
     if state["session"] is None or state["closing"]:
-        return
+        return True
     try:
         call(REMOTE, method, signature, values)
+        return True
     except GLib.Error:
-        pass
+        return False
 
 
 def key(keysym, down):
@@ -134,24 +136,31 @@ def key(keysym, down):
     elif keysym in pressed_keys:
         pressed_keys.discard(keysym)
     else:
-        return
-    notify("NotifyKeyboardKeysym", "(oa{sv}iu)", (state["session"], {}, keysym, 1 if down else 0))
+        return True
+    return notify(
+        "NotifyKeyboardKeysym", "(oa{sv}iu)", (state["session"], {}, keysym, 1 if down else 0)
+    )
 
 
 def button(name, down):
     code = BUTTONS.get(name)
     if code is None or (down == (code in pressed_buttons)):
-        return
+        return True
     (pressed_buttons.add if down else pressed_buttons.discard)(code)
-    notify("NotifyPointerButton", "(oa{sv}iu)", (state["session"], {}, code, 1 if down else 0))
+    return notify(
+        "NotifyPointerButton", "(oa{sv}iu)", (state["session"], {}, code, 1 if down else 0)
+    )
 
 
 def release_all():
+    """Releases everything held; False if the portal refused any release."""
+    ok = True
     for keysym in list(pressed_keys):
-        key(keysym, False)
+        ok = key(keysym, False) and ok
     for name, code in BUTTONS.items():
         if code in pressed_buttons:
-            button(name, False)
+            ok = button(name, False) and ok
+    return ok
 
 
 def scroll(dx, dy):
@@ -169,9 +178,8 @@ def handle(message):
     kind = message.get("t")
     if kind == "release":
         # Acknowledged once applied, so control goes back only with nothing held down.
-        if not TEST_SOURCE:
-            release_all()
-        status({"type": "released", "id": int(message.get("id", 0))})
+        ok = True if TEST_SOURCE else release_all()
+        status({"type": "released", "id": int(message.get("id", 0)), "ok": ok})
         return
     if TEST_SOURCE:
         source = state["pipeline"].get_by_name("source") if state["pipeline"] else None
