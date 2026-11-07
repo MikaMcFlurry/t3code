@@ -6,7 +6,7 @@ import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environmen
 import { Dialog, DialogDescription, DialogHeader, DialogPopup, DialogTitle } from "../ui/dialog";
 
 /** `?desktopLiveView=primary` (or an environment id) opens the live view, e.g. from a push. */
-export const DESKTOP_LIVE_VIEW_SEARCH_PARAM = "desktopLiveView";
+const DESKTOP_LIVE_VIEW_SEARCH_PARAM = "desktopLiveView";
 
 // Read when the app loads: start-up redirects (welcome, last thread) drop the query string.
 const deepLinked = (() => {

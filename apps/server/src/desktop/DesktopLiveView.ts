@@ -916,9 +916,9 @@ const FRAME_KIND = 0x46;
 const STATUS_KIND = 0x4a;
 
 /** Frames are capped at this size; the viewport stays the screen's own size. */
-export const DESKTOP_LIVE_VIEW_FRAME = { maxWidth: 1920, maxHeight: 1080, quality: 60, fps: 10 };
+const DESKTOP_LIVE_VIEW_FRAME = { maxWidth: 1920, maxHeight: 1080, quality: 60, fps: 10 };
 
-export const spawnPortalHelper =
+const spawnPortalHelper =
   (options: {
     readonly tokenPath: string;
     readonly environment: NodeJS.ProcessEnv;
@@ -1000,7 +1000,7 @@ export const spawnPortalHelper =
     };
   };
 
-export const DESKTOP_LIVE_VIEW_PLATFORMS: ReadonlySet<NodeJS.Platform> = new Set(["linux"]);
+const DESKTOP_LIVE_VIEW_PLATFORMS: ReadonlySet<NodeJS.Platform> = new Set(["linux"]);
 
 /** Per OS login, so every T3 server and checkout on it shares the crash markers. */
 // From the account database like the host lease's key, not $HOME or $XDG_STATE_HOME: two servers
