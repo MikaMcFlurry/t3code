@@ -3,6 +3,7 @@ import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import * as Dialog from "../../components/ui/Dialog";
 import previewStreamScript from "@t3tools/mobile-preview-stream";
 import {
+  type DesktopStreamStatus,
   previewStreamControlLabel,
   previewStreamHostSetupMessage,
   type PreviewStreamControl,
@@ -53,6 +54,8 @@ type NativeStreamBridge = {
   /** Asks for fresh access after a refusal, once `delayMs` has passed. */
   readonly onRefused: (delayMs: number) => void;
   readonly onGone?: () => void;
+  /** The desktop live view's capture state; it also counts as the stream starting. */
+  readonly onDesktop?: (status: DesktopStreamStatus) => void;
   readonly onViewport?: (viewport: { readonly width: number; readonly height: number }) => void;
   readonly onControl?: (control: PreviewStreamControl | null) => void;
   readonly onPictureInPicture?: (state: PreviewPictureInPictureState, detail?: string) => void;
@@ -118,7 +121,10 @@ export function PreviewStreamWebView(
       readonly paused?: boolean;
     },
 ) {
-  const { access, error, refresh, retryAfter } = usePreviewStreamAccess(props.environmentId);
+  const { access, error, refresh, retryAfter } = usePreviewStreamAccess(
+    props.environmentId,
+    props.stream,
+  );
   if (access && !props.paused) {
     return (
       <AuthorizedPreviewStream
@@ -178,6 +184,7 @@ function AuthorizedPreviewStream({
     tabId: props.tabId,
     interactive: props.interactive,
     background: props.background,
+    ...(props.stream ? { stream: props.stream } : {}),
   } satisfies PreviewStreamConfiguration);
   return (
     <PreviewStreamDocumentView
@@ -218,6 +225,7 @@ function PreviewStreamDocumentView({
   pdfUri,
   onUnauthorized,
   onGone,
+  onDesktop,
   onViewport,
   onControl,
   onPictureInPicture,
@@ -380,9 +388,13 @@ function PreviewStreamDocumentView({
                   fail("This session can't open the browser stream. Reconnect to try again.");
                 }
                 return;
+              case "desktop":
+                clearBootstrapTimer();
+                onDesktop?.(message);
+                return;
               case "gone":
                 setGone(true);
-                fail("This tab was closed.");
+                fail(message.reason || "This tab was closed.");
                 onGone?.();
                 return;
               case "hostSetup":

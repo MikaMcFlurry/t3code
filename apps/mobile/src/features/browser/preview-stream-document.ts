@@ -1,6 +1,7 @@
 import type { DeviceHubAccess } from "@t3tools/client-runtime/device/hub-access";
 import type { PreviewStreamHostSetup } from "@t3tools/contracts";
 import type {
+  DesktopStreamStatus,
   PreviewStreamControl,
   PreviewStreamDownload,
   PreviewStreamFileChooser,
@@ -12,6 +13,8 @@ export interface PreviewStreamConfiguration {
   readonly tabId: string;
   readonly interactive: boolean;
   readonly background: string;
+  /** `desktop` streams the machine's whole screen from the desktop live view. */
+  readonly stream?: "preview" | "desktop";
 }
 
 export type PreviewStreamMessage =
@@ -22,7 +25,8 @@ export type PreviewStreamMessage =
       readonly detail?: string;
     }
   | { readonly type: "unauthorized" }
-  | { readonly type: "gone" }
+  | { readonly type: "gone"; readonly reason?: string }
+  | ({ readonly type: "desktop" } & DesktopStreamStatus)
   | ({ readonly type: "hostSetup" } & PreviewStreamHostSetup)
   | { readonly type: "viewport"; readonly width: number; readonly height: number }
   | { readonly type: "clipboard"; readonly text: string }

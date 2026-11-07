@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
 
+import { DesktopHumanControlError, desktopLiveControl } from "./DesktopLiveControl.ts";
 import type { ComputerUseLinuxLease } from "./ComputerUseLinuxHostLease.ts";
 import {
   ComputerUseLinuxOperationGate,
@@ -62,6 +63,8 @@ export class ComputerUseLinuxBridgeRefusedError extends Schema.TaggedError<Compu
     return this.reason;
   }
 }
+
+const isDesktopHumanControlError = Schema.is(DesktopHumanControlError);
 
 export class ComputerUseLinuxBridgeSessionError extends Schema.TaggedError<ComputerUseLinuxBridgeSessionError>()(
   "ComputerUseLinuxBridgeSessionError",
@@ -137,10 +140,20 @@ export class ComputerUseLinuxBridge {
       if (access === "interact" && !(await this.requestApproval(snapshot))) {
         throw new ComputerUseLinuxBridgeApprovalError({ toolName: snapshot.toolName });
       }
-      return this.hostLease.withLease(async () => {
-        this.assertActive();
-        return this.invokeBackend(snapshot);
-      });
+      // Checked after the approval: a card answered while a person drives still acts on nothing.
+      return desktopLiveControl
+        .agent(() =>
+          this.hostLease.withLease(async () => {
+            this.assertActive();
+            return this.invokeBackend(snapshot);
+          }),
+        )
+        .catch((cause: unknown) => {
+          if (isDesktopHumanControlError(cause)) {
+            throw new ComputerUseLinuxBridgeRefusedError({ reason: cause.message });
+          }
+          throw cause;
+        });
     });
   }
 

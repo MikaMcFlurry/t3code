@@ -307,6 +307,15 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
                     />
                   ) : null}
                 </SettingsSection>
+                <SettingsSection title="Desktop">
+                  <SettingsActionRow
+                    icon="desktopcomputer"
+                    label="Live view"
+                    onPress={() =>
+                      navigation.navigate("EnvironmentDesktopLiveView", { environmentId })
+                    }
+                  />
+                </SettingsSection>
                 <SettingsSection title="Providers">
                   <SettingsActionRow
                     icon="arrow.clockwise"
