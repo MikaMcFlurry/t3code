@@ -220,7 +220,8 @@ def on_sample(sink):
 
 def on_bus_message(_bus, message):
     if message.type == Gst.MessageType.ERROR:
-        status({"type": "error", "code": "pipeline"})
+        error, _debug = message.parse_error()
+        status({"type": "error", "code": "pipeline", "element": message.src.get_name(), "detail": error.message[:300]})
         shutdown()
     elif message.type == Gst.MessageType.EOS:
         shutdown()
@@ -294,8 +295,11 @@ def main():
         Gio.DBusCallFlags.NONE, -1, None, None,
     )
     descriptor = fds.get(reply.unpack()[0])
+    # Plain memory only: offered DMA-BUF formats send Mutter down its modifier path, which crashes
+    # GNOME Shell 46 on GPUs without DRM format modifiers (seen on AMD GCN3, Radeon R9 M395X).
     pipeline = Gst.parse_launch(
         "pipewiresrc fd=%d path=%d do-timestamp=true always-copy=true"
+        " ! video/x-raw,format={BGRx,BGRA,RGBx,RGBA}"
         " ! videorate drop-only=true max-rate=%d ! videoconvert ! videoscale"
         " ! video/x-raw,format=I420,width=[1,%d],height=[1,%d],pixel-aspect-ratio=1/1"
         " ! jpegenc quality=%d ! appsink name=sink emit-signals=true max-buffers=1 drop=true sync=false"
