@@ -3546,7 +3546,10 @@ describe("orchestration v2 provider switching", () => {
     ),
   );
 
-  it.live("lets a wake for the busy session go ahead of a waiting account switch", () =>
+  it.live.each([
+    ["lets a wake for the busy session go ahead of a waiting account switch", false],
+    ["keeps the queue held when the busy session's provider fails before its wake", true],
+  ] as const)("%s", ([, notificationFails]) =>
     Effect.scoped(
       Effect.gen(function* () {
         const cwd = yield* checkpointWorkspace("wake-before-waiting-switch");
@@ -3572,6 +3575,7 @@ describe("orchestration v2 provider switching", () => {
             capturedTurns,
             backgroundWork: firstBusy,
             holdRunOrdinal: 3,
+            ...(notificationFails ? { failedRunOrdinals: new Set([3]) } : {}),
             holdFirstTurn: notificationStarted,
             releaseFirstTurn: releaseNotification,
           }),
@@ -3642,14 +3646,14 @@ describe("orchestration v2 provider switching", () => {
               Stream.filter(done),
               Stream.runHead,
             );
-          const turnText = (text: string) => (projection: OrchestrationV2ThreadProjection) =>
-            projection.runs.some(
-              (run) =>
-                run.status === "completed" &&
-                projection.messages.some(
-                  (message) => message.id === run.userMessageId && message.text === text,
-                ),
+          const runFor = (projection: OrchestrationV2ThreadProjection, text: string) =>
+            projection.runs.find((run) =>
+              projection.messages.some(
+                (message) => message.id === run.userMessageId && message.text === text,
+              ),
             );
+          const turnText = (text: string) => (projection: OrchestrationV2ThreadProjection) =>
+            runFor(projection, text)?.status === "completed";
           yield* orchestrator.dispatch({
             type: "thread.create",
             createdBy: "user",
@@ -3672,28 +3676,59 @@ describe("orchestration v2 provider switching", () => {
           yield* sendFromUser(2, secondSelection);
           yield* sendFromAgent("notification", "Notification");
           yield* Deferred.await(notificationStarted);
-          // A wake arrives during that run, so it queues behind the waiting switch.
+          // A wake arrives during that run, so it queues behind the waiting switch, and so does a
+          // later user send to the busy session's account.
           yield* sendFromAgent("wake", "Background work finished");
+          yield* sendFromUser(5, CLAUDE_MODEL_SELECTION);
           yield* Deferred.succeed(releaseNotification, undefined);
+          if (notificationFails) {
+            // The failed provider holds the queue; the wake must not start on it.
+            yield* waitUntil(
+              (projection) => runFor(projection, "Background work finished")?.queueHeld === true,
+            );
+            assert.equal(
+              runFor(yield* orchestrator.getThreadProjection(threadId), "Background work finished")
+                ?.status,
+              "queued",
+            );
+            return;
+          }
           // The wake still runs: it keeps the busy session, and it may be what ends the work.
           yield* waitUntil(turnText("Notification"));
           yield* waitUntil(
-            (projection) => projection.runs.filter((run) => run.status === "queued").length === 1,
+            (projection) => runFor(projection, "Background work finished")?.status !== "queued",
           );
           yield* worker.drain();
           yield* waitUntil(turnText("Background work finished"));
+          // The user's later send to the busy session's account keeps its place behind the switch,
+          // however often the queue is tried while the work runs.
+          yield* orchestrator.dispatch({
+            type: "queue.resume",
+            commandId: CommandId.make("command:wake-before-waiting-switch:resume"),
+            threadId,
+          });
+          assert.equal(
+            runFor(yield* orchestrator.getThreadProjection(threadId), "Prompt 5")?.status,
+            "queued",
+          );
           yield* Ref.set(firstBusy, false);
-          yield* waitUntil((projection) => projection.runs.every((run) => run.status !== "queued"));
+          yield* waitUntil((projection) => runFor(projection, "Prompt 2")?.status !== "queued");
+          yield* worker.drain();
+          yield* waitUntil((projection) => runFor(projection, "Prompt 5")?.status !== "queued");
           yield* worker.drain();
           const done = yield* waitForIdle(threadId);
           assert.isTrue(done.runs.every((run) => run.status === "completed"));
           assert.deepEqual(
             (yield* Ref.get(capturedTurns)).map((turn) =>
-              ["Prompt 1", "Notification", "Background work finished", "Prompt 2"].findIndex(
-                (text) => turn.text.includes(text),
-              ),
+              [
+                "Prompt 1",
+                "Notification",
+                "Background work finished",
+                "Prompt 2",
+                "Prompt 5",
+              ].findIndex((text) => turn.text.includes(text)),
             ),
-            [0, 1, 2, 3],
+            [0, 1, 2, 3, 4],
           );
         }).pipe(
           Effect.provide(
