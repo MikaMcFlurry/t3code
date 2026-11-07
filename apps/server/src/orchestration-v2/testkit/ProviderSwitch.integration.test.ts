@@ -3012,7 +3012,7 @@ describe("orchestration v2 provider switching", () => {
             driver: CLAUDE_DRIVER,
             capabilities: ClaudeProviderCapabilitiesV2,
             modelSelection: CLAUDE_MODEL_SELECTION,
-            responseByRunOrdinal: { 1: "First account complete" },
+            responseByRunOrdinal: { 1: "First account complete", 3: "Wake complete" },
             capturedTurns,
             backgroundWork: firstBusy,
           }),
@@ -3021,7 +3021,7 @@ describe("orchestration v2 provider switching", () => {
             driver: CLAUDE_DRIVER,
             capabilities: ClaudeProviderCapabilitiesV2,
             modelSelection: secondSelection,
-            responseByRunOrdinal: { 2: "Waiting send complete", 3: "Later send complete" },
+            responseByRunOrdinal: { 2: "Waiting send complete", 4: "Later send complete" },
             capturedTurns,
           }),
         ];
@@ -3082,39 +3082,68 @@ describe("orchestration v2 provider switching", () => {
           yield* worker.drain();
           yield* waitForIdle(threadId);
 
+          const runStatus = (index: number) =>
+            orchestrator.streamStoredEvents.pipe(
+              Stream.mapEffect(() => orchestrator.getThreadProjection(threadId)),
+              Stream.map((projection) => projection.runs[index]?.status),
+              Stream.filter((status) => status !== undefined && status !== "queued"),
+              Stream.runHead,
+            );
           yield* send(2, secondSelection);
-          // The work ends, and another send arrives before the queue is retried.
-          yield* Ref.set(firstBusy, false);
-          yield* send(3, secondSelection);
-          assert.deepEqual(
-            (yield* orchestrator.getThreadProjection(threadId)).runs.map((run) => run.status),
-            ["completed", "queued", "queued"],
-          );
-
-          yield* orchestrator.streamStoredEvents.pipe(
-            Stream.mapEffect(() => orchestrator.getThreadProjection(threadId)),
-            Stream.filter((projection) => projection.runs[1]?.status !== "queued"),
-            Stream.runHead,
+          // A provider wake on the busy session does not queue behind the waiting switch:
+          // running it may be what ends that work.
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            createdBy: "agent",
+            creationSource: "provider",
+            commandId: CommandId.make("command:waiting-switch-order:wake"),
+            threadId,
+            messageId: MessageId.make("message:waiting-switch-order:wake"),
+            text: "Background work finished",
+            attachments: [],
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            dispatchMode: { type: "queue_after_active" },
+          });
+          assert.notEqual(
+            (yield* orchestrator.getThreadProjection(threadId)).runs[2]?.status,
+            "queued",
           );
           yield* worker.drain();
           yield* orchestrator.streamStoredEvents.pipe(
             Stream.mapEffect(() => orchestrator.getThreadProjection(threadId)),
-            Stream.filter((projection) => projection.runs[2]?.status !== "queued"),
+            Stream.filter((projection) => projection.runs[2]?.status === "completed"),
             Stream.runHead,
           );
+          // The work ends, and a user's send arrives before the queue is retried.
+          yield* Ref.set(firstBusy, false);
+          yield* send(4, secondSelection);
+          assert.deepEqual(
+            (yield* orchestrator.getThreadProjection(threadId)).runs.map((run) => run.status),
+            ["completed", "queued", "completed", "queued"],
+          );
+
+          yield* runStatus(1);
+          yield* worker.drain();
+          yield* runStatus(3);
           yield* worker.drain();
           const done = yield* waitForIdle(threadId);
           assert.deepEqual(
             done.runs.map((run) => [run.providerInstanceId, run.status]),
             [
               [CLAUDE_MODEL_SELECTION.instanceId, "completed"],
+              [CLAUDE_MODEL_SELECTION.instanceId, "completed"],
               [secondSelection.instanceId, "completed"],
               [secondSelection.instanceId, "completed"],
             ],
           );
+          // The waiting send ran before the later one.
           assert.deepEqual(
-            (yield* Ref.get(capturedTurns)).map((turn) => turn.text.includes("Prompt 3")),
-            [false, false, true],
+            (yield* Ref.get(capturedTurns)).map((turn) =>
+              ["Prompt 1", "Background work finished", "Prompt 2", "Prompt 4"].findIndex((text) =>
+                turn.text.includes(text),
+              ),
+            ),
+            [0, 1, 2, 3],
           );
         }).pipe(
           Effect.provide(
