@@ -324,7 +324,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
       settingKeys={["fallbackToAvailableAccounts"]}
       mixed={mixedAvailableAccounts}
       {...searchableSetting("fallback-available-accounts")}
-      description="When a model's account is out of usage, messages and threads that hit a limit continue with the same model on another account of that provider with usage left, then on another provider. New threads try the fallback model first."
+      description="When an account runs out of usage, threads that hit a limit continue with the same model on another account of that provider, then on another provider. New threads try the fallback model first."
       resetAction={
         settings.fallbackToAvailableAccounts ? (
           <SettingResetButton
