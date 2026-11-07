@@ -2,7 +2,8 @@
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { afterEach, describe, expect, it, vi } from "@effect/vitest";
+import { afterEach, describe, expect, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 
 import {
   ComputerUseLinuxBridge,
@@ -18,6 +19,11 @@ import {
   type SpawnDesktopLiveViewHelper,
   keysymForKey,
 } from "./DesktopLiveView.ts";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeFS>();
+  return { ...actual, writeFileSync: vi.fn(actual.writeFileSync) };
+});
 
 interface FakeHelper {
   readonly commands: Array<Record<string, unknown>>;
@@ -88,7 +94,7 @@ const makeHub = () => {
 afterEach(async () => {
   const controller = desktopLiveControl.humanController;
   if (controller !== null) await desktopLiveControl.control.release(controller);
-  for (const hub of hubs.splice(0)) hub.shutdown();
+  for (const hub of hubs.splice(0)) void hub.shutdown();
   vi.useRealTimers();
 });
 
@@ -339,7 +345,8 @@ function fakeGuard(status: "verified" | "unverified" | "crashed") {
       events.push("begin");
       return {
         succeeded: () => void events.push("succeeded"),
-        end: (crashed) => void events.push(crashed ? "end:crashed" : "end"),
+        crashed: () => void events.push("crashed"),
+        end: () => void events.push("end"),
       };
     },
   };
@@ -379,7 +386,7 @@ describe("DesktopLiveViewHub capture guard", () => {
     // The portal's Start follows "consent"; the compositor died before "ready" or a frame.
     spawner.helpers[0]!.status({ type: "consent", restorable: true });
     spawner.helpers[0]!.exit();
-    expect(events).toEqual(["begin", "end:crashed"]);
+    expect(events).toEqual(["begin", "crashed", "end"]);
     expect(first.last("desktop")?.detail).toContain("before its first frame");
     await hub.input("first", { type: "reload" });
     expect(spawner.helpers).toHaveLength(1);
@@ -394,7 +401,12 @@ describe("DesktopLiveViewHub capture guard", () => {
     await settle();
     spawner.helpers[0]!.status({ type: "consent", restorable: false });
     spawner.helpers[0]!.status({ type: "denied", code: "start" });
-    await hub.input("watcher", { type: "reload" });
+    // The refused helper still holds the login's capture until it exits.
+    const reloading = hub.input("watcher", { type: "reload" });
+    await settle();
+    expect(events).toEqual(["begin"]);
+    spawner.helpers[0]!.exit();
+    await reloading;
     streaming(spawner.helpers[1]!);
     spawner.helpers[1]!.frame(new Uint8Array([1]));
     spawner.helpers[1]!.exit();
@@ -417,7 +429,7 @@ describe("DesktopLiveViewHub capture guard", () => {
       if ("refused" in run) throw new Error("refused");
       expect(NodeFS.existsSync(NodePath.join(directory, "starting"))).toBe(true);
       run.succeeded();
-      run.end(false);
+      run.end();
       expect(guard.status()).toBe("verified");
       // A start that never finished, as after the compositor took the server's session down.
       const second = await guard.begin();
@@ -426,6 +438,71 @@ describe("DesktopLiveViewHub capture guard", () => {
       expect(third).toMatchObject({ crashed: true });
       expect(guard.status()).toBe("crashed");
       expect(locks).toEqual(["lock", "unlock", "lock", "lock", "unlock"]);
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rechecks for a crash another server recorded while it waited for the lock", async () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-live-view-guard-"));
+    try {
+      const locks: Array<string> = [];
+      const guard = loginCaptureGuard({
+        directory,
+        acquireCaptureLock: async () => {
+          NodeFS.writeFileSync(NodePath.join(directory, "crashed"), "another server\n");
+          locks.push("lock");
+          return { release: async () => void locks.push("unlock") };
+        },
+      });
+      expect(guard.status()).toBe("unverified");
+      expect(await guard.begin()).toMatchObject({ crashed: true });
+      expect(NodeFS.existsSync(NodePath.join(directory, "starting"))).toBe(false);
+      expect(locks).toEqual(["lock", "unlock"]);
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the unfinished-start marker when the crash cannot be written", async () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-live-view-guard-"));
+    try {
+      NodeFS.writeFileSync(NodePath.join(directory, "verified"), "an earlier share worked\n");
+      const lock = async () => ({ release: async () => undefined });
+      const guard = loginCaptureGuard({ directory, acquireCaptureLock: lock });
+      const run = await guard.begin();
+      if ("refused" in run) throw new Error("refused");
+      vi.mocked(NodeFS.writeFileSync).mockImplementationOnce(() => {
+        throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+      });
+      run.crashed();
+      run.end();
+      expect(NodeFS.existsSync(NodePath.join(directory, "starting"))).toBe(true);
+      // Another server still reads "verified", but its start finds the marker and refuses.
+      const other = loginCaptureGuard({ directory, acquireCaptureLock: lock });
+      expect(await other.begin()).toMatchObject({ crashed: true });
+      expect(other.status()).toBe("crashed");
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores a capture's late calls once it ended, so the next one keeps its marker", async () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-live-view-guard-"));
+    try {
+      const guard = loginCaptureGuard({
+        directory,
+        acquireCaptureLock: async () => ({ release: async () => undefined }),
+      });
+      const first = await guard.begin();
+      if ("refused" in first) throw new Error("refused");
+      first.end();
+      const second = await guard.begin();
+      if ("refused" in second) throw new Error("refused");
+      first.succeeded();
+      first.crashed();
+      expect(NodeFS.existsSync(NodePath.join(directory, "starting"))).toBe(true);
+      expect(guard.status()).toBe("unverified");
     } finally {
       NodeFS.rmSync(directory, { recursive: true, force: true });
     }
@@ -541,6 +618,75 @@ describe("DesktopLiveViewHub handoffs", () => {
     spawner.helpers[0]!.exit();
     await handingBack;
     expect(desktopLiveControl.humanController).toBeNull();
+  });
+
+  it("returns the lease after a switch-off only once the helper exited, though its driver left first", async () => {
+    const { hub, spawner, events, open } = leasedHub();
+    open();
+    hub.attach(viewer("driver").entry);
+    streaming(spawner.helpers[0]!);
+    await hub.input("driver", { type: "takeControl" });
+    const leaving = hub.detach("driver");
+    hub.setEnabled(false);
+    await settle();
+    let agentRan = false;
+    await desktopLiveControl.agent(async () => (agentRan = true)).catch(() => undefined);
+    expect(agentRan).toBe(false);
+    expect(events).toEqual(["acquire"]);
+    spawner.helpers[0]!.exit();
+    await leaving;
+    expect(events).toEqual(["acquire", "release"]);
+    await desktopLiveControl.agent(async () => (agentRan = true));
+    expect(agentRan).toBe(true);
+  });
+
+  it("keeps agents out after a capture error until the stopped helper exited", async () => {
+    const { hub, helpers } = makeHub();
+    hub.attach(viewer("driver").entry);
+    streaming(helpers[0]!);
+    await hub.input("driver", { type: "takeControl" });
+    helpers[0]!.status({ type: "error", code: "pipeline" });
+    expect(helpers[0]!.stopped).toBe(true);
+    const handingBack = hub.input("driver", { type: "releaseControl" });
+    await settle();
+    let agentRan = false;
+    await desktopLiveControl.agent(async () => (agentRan = true)).catch(() => undefined);
+    expect(agentRan).toBe(false);
+    helpers[0]!.exit();
+    await handingBack;
+    await desktopLiveControl.agent(async () => (agentRan = true));
+    expect(agentRan).toBe(true);
+  });
+
+  it("shuts down by returning the lease only after the helper exited", async () => {
+    const { hub, spawner, events, open } = leasedHub();
+    open();
+    hub.attach(viewer("driver").entry);
+    streaming(spawner.helpers[0]!);
+    await hub.input("driver", { type: "takeControl" });
+    const closing = hub.shutdown();
+    await settle();
+    expect(spawner.helpers[0]!.stopped).toBe(true);
+    expect(events).toEqual(["acquire"]);
+    spawner.helpers[0]!.exit();
+    await closing;
+    expect(events).toEqual(["acquire", "release"]);
+  });
+
+  it("holds the login's capture until the helper exits, though its end came earlier", async () => {
+    const spawner = fakeSpawner();
+    const { guard, events } = fakeGuard("verified");
+    const hub = new DesktopLiveViewHub(spawner.spawn, { captureGuard: guard });
+    hubs.push(hub);
+    hub.attach(viewer("watcher").entry);
+    await settle();
+    spawner.helpers[0]!.status({ type: "consent", restorable: true });
+    spawner.helpers[0]!.status({ type: "error", code: "pipeline" });
+    // Recorded at once, but the capture is only free again once the process is gone.
+    expect(events).toEqual(["begin", "crashed"]);
+    spawner.helpers[0]!.frame(new Uint8Array([1]));
+    spawner.helpers[0]!.exit();
+    expect(events).toEqual(["begin", "crashed", "end"]);
   });
 
   it("closes a viewer that attaches after the switch-off", () => {

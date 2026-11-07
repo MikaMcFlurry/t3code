@@ -94,10 +94,11 @@ Frames may be smaller than the viewport; clients map from the drawn frame to the
   desktop"), which no standard client grant includes: enabling the setting does not turn existing
   preview or Connect grants into whole-screen access. The pairing dialog only offers permissions
   the current session holds, so the first such client is bootstrapped on the machine itself with
-  the CLI, listing its ordinary permissions too (`--scope` replaces the defaults), for example
-  `t3 auth pairing create --scope orchestration:read --scope orchestration:operate --scope
-  settings:write --scope preview:operate --scope desktop:operate`; that client can then pass the
-  permission on through the pairing dialog. `interactive=false` narrows a socket further to
+  the CLI. `--scope` replaces the defaults, so list every permission that client needs; this
+  reduced example keeps threads, settings, previews and pairing: `t3 auth pairing create --scope
+  orchestration:read --scope orchestration:operate --scope settings:write --scope preview:operate
+  --scope access:read --scope access:write --scope desktop:operate`. Pairing others needs
+  `access:write`, so that client can then pass the permission on through the pairing dialog. `interactive=false` narrows a socket further to
   watching. This also answers the concern in
   #32098 that cloud authorization alone can reach a machine.
 - **Revocation and switch-off.** A revoked or expired session loses its socket at once (the route
@@ -136,9 +137,11 @@ Frames may be smaller than the viewport; clients map from the drawn frame to the
   gate; the host lease keeps its existing busy semantics.
 - Handing back keeps agents out until the person's held keys and buttons are released: the hub
   asks the helper to release everything and waits for its acknowledgement, which reports whether
-  the portal took every release. Without a clean acknowledgement within 1.5 s the capture ends,
-  and agents return only once the helper has exited, since its portal session and every key it
-  held go with it.
+  the portal took every release (a release the portal refused stays tracked and is retried).
+  Without a clean acknowledgement within 1.5 s the capture ends, and agents return only once the
+  helper has exited, since its portal session and every key it held go with it. The same holds
+  for a helper stopped for any other reason (switch-off, a capture error, server shutdown): the
+  desktop lease goes back only after that process is gone.
 - The agent's turn itself keeps running; only its desktop calls are refused until hand-back.
 - After that the next call runs normally. The agent is told to take a new screenshot because the
   screen changed under it.
@@ -167,13 +170,16 @@ Consequences:
 
 - **Crash guard, per OS login and fail-closed.** Markers live in
   `$XDG_STATE_HOME/t3code/desktop-live-view/` (default `~/.local/state/...`), shared by every T3
-  server and checkout on the login, and one capture lock per login keeps two servers from sharing
-  at once. `starting` is written before the stream starts and removed once a frame arrived or the
-  attempt ended harmlessly (refused at the machine, failed before the portal's Start); a `starting`
-  left behind therefore counts as a crash. An attempt that ends after Start without a frame writes
-  `crashed`, and the server also latches in memory in case the file cannot be written. If the
-  `starting` marker cannot be written, the share does not start. Deleting `crashed` (and a stale
-  `starting`) re-enables it.
+  server and checkout on the login, and one capture lock per login, held until the helper process
+  has exited, keeps two servers from sharing at once. Once it holds the lock a server checks
+  `crashed` and `starting` again, since another server may have recorded a crash meanwhile.
+  `starting` is written before the stream starts and removed once a frame arrived, the attempt
+  ended harmlessly (refused at the machine, failed before the portal's Start) or its crash is on
+  disk; a `starting` left behind therefore counts as a crash, and it stays when `crashed` cannot be
+  written. An attempt that ends after Start without a frame writes `crashed`, and the server also
+  latches in memory. If the `starting` marker cannot be written, the share does not start. A server
+  killed before the first frame leaves `starting` too, which then refuses on purpose. Deleting
+  `crashed` (and a stale `starting`) re-enables it.
 - **Warning before the first share.** Until a share has produced a frame on this login
   (`verified`), viewers see the risk spelled out and must press **Start screen sharing anyway**;
   nothing starts on its own.
@@ -242,12 +248,14 @@ Both stay behind the same route, hub, protocol, control and viewers; only the he
 
 Verified:
 
-- Unit tests (`apps/server/src/desktop/DesktopLiveView.test.ts`, 25 tests, plus the existing bridge
+- Unit tests (`apps/server/src/desktop/DesktopLiveView.test.ts`, 32 tests, plus the existing bridge
   tests): keysyms, fan-out, consent and refusal states, input only from the controller, hand-back on
   disconnect, agent refused during a takeover and drained before the person's first input, crash
   guard, release acknowledgement before agents return, host lease held while a person drives,
   modifier masks, wheel clamping, switch-off closing every viewer, the login capture guard with
-  its markers, and takeovers cancelled by a disconnect or switch-off.
+  its markers (crash recheck under the lock, marker kept when the crash cannot be written), and
+  takeovers cancelled by a disconnect or switch-off; the lease returned only after a stopped helper
+  exited.
 - Typecheck of server, contracts, client-runtime, web and mobile.
 - On the real GNOME desktop: the consent dialog appears once on the machine, the restore token is
   written (`0600`) and the next start restores silently; the helper stops 20 s after the last viewer.

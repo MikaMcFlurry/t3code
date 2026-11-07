@@ -131,25 +131,31 @@ def notify(method, signature, values):
 
 
 def key(keysym, down):
+    if not down and keysym not in pressed_keys:
+        return True
+    # A press counts as held even if refused; a release only once the portal took it.
     if down:
         pressed_keys.add(keysym)
-    elif keysym in pressed_keys:
-        pressed_keys.discard(keysym)
-    else:
-        return True
-    return notify(
+    ok = notify(
         "NotifyKeyboardKeysym", "(oa{sv}iu)", (state["session"], {}, keysym, 1 if down else 0)
     )
+    if ok and not down:
+        pressed_keys.discard(keysym)
+    return ok
 
 
 def button(name, down):
     code = BUTTONS.get(name)
     if code is None or (down == (code in pressed_buttons)):
         return True
-    (pressed_buttons.add if down else pressed_buttons.discard)(code)
-    return notify(
+    if down:
+        pressed_buttons.add(code)
+    ok = notify(
         "NotifyPointerButton", "(oa{sv}iu)", (state["session"], {}, code, 1 if down else 0)
     )
+    if ok and not down:
+        pressed_buttons.discard(code)
+    return ok
 
 
 def release_all():

@@ -169,8 +169,10 @@ export interface DesktopLiveViewHostLease {
 export interface DesktopLiveViewCaptureRun {
   /** The first frame arrived: screen sharing works on this machine. */
   readonly succeeded: () => void;
-  /** The capture is over; `crashed` when it ended after the stream started and before a frame. */
-  readonly end: (crashed: boolean) => void;
+  /** The stream started and ended before a frame, which is how a desktop crash looks. */
+  readonly crashed: () => void;
+  /** The helper exited, so this login's capture is free again. */
+  readonly end: () => void;
 }
 
 /**
@@ -198,6 +200,7 @@ const MAX_WHEEL_DELTA = 2400;
 const RELEASE_ACK_TIMEOUT_MS = 1500;
 const LEASE_WAIT_MS = 10_000;
 const LEASE_RETRY_MS = 200;
+const SHUTDOWN_WAIT_MS = 5_000;
 
 const UNVERIFIED_DETAIL =
   "Screen sharing has not worked on this machine yet. On some GPUs GNOME Shell 46 crashes when a screen share starts, which ends the desktop session and closes its apps. Start only if that is acceptable now.";
@@ -236,6 +239,8 @@ export class DesktopLiveViewHub {
   >();
   private readonly exits = new WeakMap<DesktopLiveViewHelper, Promise<void>>();
   private readonly stopped = new WeakSet<DesktopLiveViewHelper>();
+  /** Helpers asked to stop that have not exited: until then their portal session holds input. */
+  private readonly retiring = new Set<DesktopLiveViewHelper>();
   private readonly stopListening: () => void;
   private readonly onHelperError: (status: Record<string, unknown>) => void;
   private readonly captureGuard: DesktopLiveViewCaptureGuard | null;
@@ -290,24 +295,24 @@ export class DesktopLiveViewHub {
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
     if (enabled) return;
-    const helper = this.helper;
     this.stopHelper();
     for (const viewer of this.viewers.values())
       viewer.push({ _tag: "closed", reason: SWITCHED_OFF_REASON });
+    // A controller that already left has its hand-back queued by `detach`.
     const controller = desktopLiveControl.humanController;
-    if (controller !== null && this.viewers.has(controller)) {
-      void this.handoff(async () => {
-        if (helper !== null) await this.exits.get(helper);
-        await this.handBack(controller, this.viewers.get(controller));
-      });
-    }
+    if (controller !== null && this.viewers.has(controller))
+      void this.handoff(() => this.handBack(controller, this.viewers.get(controller)));
   }
 
-  shutdown(): void {
+  /** Ends the capture; the desktop lease goes back once no helper can still hold a key. */
+  async shutdown(): Promise<void> {
     this.stopListening();
     this.cancelIdleStop();
     this.stopHelper();
-    void this.dropHostLease();
+    await this.handoff(async () => {
+      await this.retiredHelpersExited();
+      await this.dropHostLease();
+    });
   }
 
   async input(viewerId: string, raw: unknown): Promise<void> {
@@ -423,29 +428,37 @@ export class DesktopLiveViewHub {
 
   /**
    * Asks the helper to release every key and button and waits for its answer. Without a clean
-   * answer the capture ends: its portal session goes, and every key it held goes with it.
+   * answer the capture ends: its portal session goes, and every key it held goes with it. Either
+   * way this resolves only once no stopped helper is still running.
    */
   private async releaseHeldInput() {
     const helper = this.helper;
-    if (helper === null) return;
-    const id = ++this.nextRelease;
-    const outcome = await new Promise<ReleaseOutcome>((resolve) => {
-      const timer = setTimeout(() => settle("timeout"), RELEASE_ACK_TIMEOUT_MS);
-      const settle = (result: ReleaseOutcome) => {
-        clearTimeout(timer);
-        this.releases.delete(id);
-        resolve(result);
-      };
-      this.releases.set(id, { helper, settle });
-      helper.send({ t: "release", id });
-    });
-    if (outcome === "applied" || outcome === "gone") return;
-    this.stopHelper();
-    await this.exits.get(helper);
-    this.setState(
-      "unavailable",
-      "The capture stopped because releasing held keys was not confirmed.",
-    );
+    if (helper !== null) {
+      const id = ++this.nextRelease;
+      const outcome = await new Promise<ReleaseOutcome>((resolve) => {
+        const timer = setTimeout(() => settle("timeout"), RELEASE_ACK_TIMEOUT_MS);
+        const settle = (result: ReleaseOutcome) => {
+          clearTimeout(timer);
+          this.releases.delete(id);
+          resolve(result);
+        };
+        this.releases.set(id, { helper, settle });
+        helper.send({ t: "release", id });
+      });
+      // A helper something else stopped meanwhile is waited out below like any other.
+      if ((outcome === "failed" || outcome === "timeout") && this.helper === helper) {
+        this.stopHelper();
+        this.setState(
+          "unavailable",
+          "The capture stopped because releasing held keys was not confirmed.",
+        );
+      }
+    }
+    await this.retiredHelpersExited();
+  }
+
+  private async retiredHelpersExited() {
+    await Promise.all(Array.from(this.retiring, (helper) => this.exits.get(helper)));
   }
 
   private async mouse(viewerId: string, message: Record<string, unknown>) {
@@ -560,16 +573,19 @@ export class DesktopLiveViewHub {
       }
       this.launching = true;
       this.setState("starting");
-      const begun = await guard.begin().finally(() => {
-        this.launching = false;
-      });
+      // A stopped helper holds this login's capture until it exits; claiming it now would fail.
+      const begun = await this.retiredHelpersExited()
+        .then(() => guard.begin())
+        .finally(() => {
+          this.launching = false;
+        });
       if ("refused" in begun) {
         if (begun.crashed) this.crashLatched = true;
         this.setState("unavailable", begun.refused);
         return;
       }
       if (!this.enabled || this.viewers.size === 0 || this.helper !== null) {
-        begun.end(false);
+        begun.end();
         return;
       }
       run = begun;
@@ -583,23 +599,28 @@ export class DesktopLiveViewHub {
     // The stream starts with the portal's Start call, which comes right after "consent".
     let hazardous = false;
     let framed = false;
-    let finished = false;
-    const finish = (crashed: boolean) => {
-      if (finished) return;
-      finished = true;
-      if (crashed) this.crashLatched = true;
-      run?.end(crashed);
+    let crashNoted = false;
+    // Recorded at once; the login's capture stays claimed until the helper has exited.
+    const noteCrash = () => {
+      if (crashNoted) return;
+      crashNoted = true;
+      this.crashLatched = true;
+      run?.crashed();
     };
     // Only a guarded capture can take the desktop down; the test source cannot.
     const looksCrashed = () => run !== null && hazardous && !framed && !this.stopped.has(helper!);
     let exited: () => void = () => undefined;
+    const exit = new Promise<void>((resolve) => {
+      exited = resolve;
+    });
     helper = this.spawnHelper({
       onFrame: (jpeg) => {
+        // A stopped helper's late frames prove nothing about the capture now running.
+        if (this.helper !== helper) return;
         if (!framed) {
           framed = true;
           run?.succeeded();
         }
-        if (this.helper !== helper) return;
         this.lastFrame = jpeg;
         for (const viewer of this.viewers.values()) viewer.push({ _tag: "frame", data: jpeg });
       },
@@ -611,11 +632,9 @@ export class DesktopLiveViewHub {
             release.settle(status.ok === false ? "failed" : "applied");
           return;
         }
-        if (status.type === "denied") finish(false);
-        else if (status.type === "error" || status.type === "closed") {
-          const crashed = looksCrashed();
-          finish(crashed);
-          if (crashed && this.helper === helper) {
+        if ((status.type === "error" || status.type === "closed") && looksCrashed()) {
+          noteCrash();
+          if (this.helper === helper) {
             this.onHelperError(status);
             this.stopHelper();
             this.setState("unavailable", CRASH_GUARD_DETAIL);
@@ -626,7 +645,9 @@ export class DesktopLiveViewHub {
         this.onHelperStatus(status);
       },
       onExit: () => {
-        finish(looksCrashed());
+        if (looksCrashed()) noteCrash();
+        run?.end();
+        this.retiring.delete(helper!);
         for (const release of this.releases.values())
           if (release.helper === helper) release.settle("gone");
         exited();
@@ -642,12 +663,7 @@ export class DesktopLiveViewHub {
           this.setState("unavailable", "The desktop capture stopped.");
       },
     });
-    this.exits.set(
-      helper,
-      new Promise<void>((resolve) => {
-        exited = resolve;
-      }),
-    );
+    this.exits.set(helper, exit);
     this.helper = helper;
     // A restore token the portal ignores still shows the dialog, so the deadline always runs.
     this.startTimer = setTimeout(() => {
@@ -700,6 +716,7 @@ export class DesktopLiveViewHub {
     this.lastFrame = null;
     if (helper === null) return;
     this.stopped.add(helper);
+    this.retiring.add(helper);
     helper.stop();
   }
 
@@ -734,8 +751,9 @@ const CRASH_GUARD_DETAIL =
 
 /**
  * Markers per OS login, shared by every T3 server and checkout on it: `starting` is written before
- * the stream starts and removed once a frame arrived or the attempt ended harmlessly, so one left
- * behind means the attempt never finished. `verified` and `crashed` record the outcome.
+ * the stream starts and removed once a frame arrived, the attempt ended harmlessly or its crash
+ * is on disk, so one left behind means the attempt never finished. `verified` and `crashed` record
+ * the outcome. The capture lock is held until the helper has exited.
  */
 export const loginCaptureGuard = (input: {
   readonly directory: string;
@@ -749,10 +767,14 @@ export const loginCaptureGuard = (input: {
   };
   const exists = (name: string) => NodeFS.existsSync(file(name));
   const remove = (name: string) => NodeFS.rmSync(file(name), { force: true });
+  /** False when the marker could not be written. */
   const markCrashed = () => {
     try {
       write("crashed", "A screen share ended before its first frame.\n");
-    } catch {}
+      return true;
+    } catch {
+      return false;
+    }
   };
   return {
     status: () => (exists("crashed") ? "crashed" : exists("verified") ? "verified" : "unverified"),
@@ -777,6 +799,8 @@ export const loginCaptureGuard = (input: {
         await held.release().catch(() => undefined);
         return { refused, crashed };
       };
+      // Another server may have recorded a crash while this one waited for the lock.
+      if (exists("crashed")) return await refuse(CRASH_GUARD_DETAIL, true);
       if (exists("starting")) {
         markCrashed();
         return await refuse(CRASH_GUARD_DETAIL, true);
@@ -790,18 +814,31 @@ export const loginCaptureGuard = (input: {
           false,
         );
       }
+      let over = false;
+      // The last durable sign of an unfinished attempt stays until its crash is on disk.
+      let keepStarting = false;
       return {
         succeeded: () => {
+          if (over) return;
           try {
             write("verified", "Screen sharing worked on this machine.\n");
+          } catch {}
+          try {
             remove("starting");
           } catch {}
         },
-        end: (crashed) => {
-          if (crashed) markCrashed();
-          try {
-            remove("starting");
-          } catch {}
+        crashed: () => {
+          if (over) return;
+          keepStarting = !markCrashed();
+        },
+        end: () => {
+          if (over) return;
+          over = true;
+          if (!keepStarting) {
+            try {
+              remove("starting");
+            } catch {}
+          }
           void held.release().catch(() => undefined);
         },
       };
@@ -1018,7 +1055,16 @@ export const layer = Layer.effect(
           ),
       },
     );
-    yield* Effect.addFinalizer(() => Effect.sync(() => hub.shutdown()));
+    // A helper exits within seconds of being stopped, and the lease ends with this process anyway;
+    // the bound is plain because finalizers cannot be interrupted.
+    yield* Effect.addFinalizer(() =>
+      Effect.promise(() =>
+        Promise.race([
+          hub.shutdown(),
+          new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_WAIT_MS).unref()),
+        ]),
+      ),
+    );
     // Turning the setting off ends every open viewer, not only the next connection.
     hub.setEnabled(
       yield* settings.getSettings.pipe(
