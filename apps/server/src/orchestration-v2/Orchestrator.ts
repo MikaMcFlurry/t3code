@@ -94,6 +94,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
@@ -1280,6 +1281,53 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     return false;
   });
 
+  // An account switch resumes the replaced session's native thread, so it waits while that
+  // session still runs background work. A hand-off or a fresh session leaves the work running.
+  const switchWaitsForBackgroundWork = Effect.fn("Orchestrator.switchWaitsForBackgroundWork")(
+    function* (input: {
+      readonly projection: OrchestrationV2ThreadProjection;
+      readonly activeProviderThread: OrchestrationV2ProviderThread | undefined;
+      readonly modelSelection: ModelSelection;
+    }) {
+      const { projection, activeProviderThread, modelSelection } = input;
+      if (
+        activeProviderThread === undefined ||
+        activeProviderThread.providerInstanceId === modelSelection.instanceId
+      ) {
+        return false;
+      }
+      const plan = yield* providerSwitchService.plan({
+        projection: {
+          ...projection,
+          thread: {
+            ...projection.thread,
+            modelSelection: {
+              ...projection.thread.modelSelection,
+              instanceId: activeProviderThread.providerInstanceId,
+            },
+          },
+        },
+        targetModelSelection: modelSelection,
+      });
+      if (plan.transition.type !== "restart_and_resume") return false;
+      for (const session of projection.providerSessions) {
+        if (
+          plan.releaseProviderSessionIds.includes(session.id) &&
+          session.status !== "stopped" &&
+          session.status !== "error" &&
+          (yield* sessionHasBackgroundWork(session, projection.providerThreads))
+        ) {
+          return true;
+        }
+      }
+      return false;
+    },
+  );
+  // Threads whose next queued send waits on that work. The check below retries their queue,
+  // so every guard in startNextQueuedRun still applies. In memory only: a restart ends the
+  // replaced session and its work, and the recovery that resumes queues starts the send.
+  const backgroundWorkWaits = new Set<ThreadId>();
+
   // Runs in every command transaction; avoid reading thousands of finished leaf nodes.
   const readCommandProjection = (threadId: ThreadId) =>
     projectionStore
@@ -1716,7 +1764,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ]);
   });
 
-  const startNextQueuedRun = Effect.fn("Orchestrator.startNextQueuedRun")(
+  const startQueuedRunOnce = Effect.fn("Orchestrator.startQueuedRunOnce")(
     function* (
       threadId: ThreadId,
       options?: {
@@ -1971,29 +2019,35 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       // Nobody waits on a queued start to refuse it. A handoff runs in its own session, so a
       // busy one stays up; a restart resumes the busy session's native thread, so wait instead.
-      // A fresh run resumes nothing, so it never waits.
+      // A fresh run resumes nothing, so it never waits. The wait needs no hold: the
+      // background-work check below starts the queue again once that work has ended.
       if (
         busySessionIds.size > 0 &&
         !freshContext &&
         switchPlan?.transition.type === "restart_and_resume"
       ) {
         yield* Effect.logInfo(
-          "Holding the queue: the replaced provider session still runs background work",
+          "Queue waits: the replaced provider session still runs background work",
           { threadId, runId: queuedRun.id, providerSessionIds: Array.from(busySessionIds) },
         );
-        yield* writeSystemEvents(
-          projection.runs
-            .filter((run) => run.status === "queued")
-            .map((run) => ({
-              type: "run.updated" as const,
-              threadId,
-              runId: run.id,
-              providerInstanceId: run.providerInstanceId,
-              occurredAt: now,
-              payload: { ...run, queueHeld: true },
-            })),
-        );
-        return;
+        backgroundWorkWaits.add(threadId);
+        // A later automatic send that keeps the busy session, such as a wake delivering its
+        // buffered background results, goes first: it can be what ends the work this send waits
+        // on. A user's sends keep their order.
+        const sessionRun =
+          options?.queuedRunId === undefined
+            ? queuedRunsInDeliveryOrder(projection).find(
+                (run) =>
+                  run.id !== queuedRun.id &&
+                  run.queueHeld !== true &&
+                  run.freshContext !== true &&
+                  projection.messages.find((message) => message.id === run.userMessageId)
+                    ?.createdBy !== "user" &&
+                  queuedRunModelSelection(projection, run).instanceId ===
+                    activeProviderThread?.providerInstanceId,
+              )
+            : undefined;
+        return sessionRun?.id;
       }
       const sessionsToDetach = releasableSessions.filter(
         (session) => !busySessionIds.has(session.id),
@@ -2503,6 +2557,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         Effect.catch((cause) => failQueuedRunStart(threadId, cause, options?.queuedRunId)),
       ),
   );
+
+  const startNextQueuedRun = Effect.fn("Orchestrator.startNextQueuedRun")(function* (
+    threadId: ThreadId,
+    options?: {
+      readonly failedRunId?: RunId;
+      readonly endedRunId?: RunId;
+      readonly queuedRunId?: RunId;
+    },
+  ) {
+    const sessionRunId = yield* startQueuedRunOnce(threadId, options);
+    if (sessionRunId !== undefined) {
+      // Same failure and end context, so a failed provider still holds the queue.
+      yield* startQueuedRunOnce(threadId, { ...options, queuedRunId: sessionRunId });
+    }
+  });
 
   // Under load a resumed provider can time out before taking the prompt; the restart still owes the turn.
   const retryContinuationStart = Effect.fn("Orchestrator.retryContinuationStart")(function* (
@@ -6113,12 +6182,29 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       projection.thread.worktreePath === null
         ? latestRun
         : undefined;
-    const queueBehindRun = activeRun ?? worktreeMissingRun;
-    const pendingMergeBackTransfers = pendingMergeBackTransfersForThread(projection);
     const startsOrQueuesRun =
       dispatchMode.type === "defer_start" ||
       dispatchMode.type === "start_immediately" ||
       dispatchMode.type === "queue_after_active";
+    // A send that would wait if it were queued waits here too, queued, instead of being refused.
+    // A user's send also queues behind sends already waiting on that work, so it cannot overtake
+    // them. Server and agent messages do not: a provider wake may be what drains that work.
+    const switchWaitRun =
+      activeRun === undefined &&
+      worktreeMissingRun === undefined &&
+      latestRun != null &&
+      startsOrQueuesRun &&
+      ((command.createdBy === "user" && backgroundWorkWaits.has(command.threadId)) ||
+        (!freshContext &&
+          (yield* switchWaitsForBackgroundWork({
+            projection,
+            activeProviderThread,
+            modelSelection,
+          }).pipe(mapDispatchError(command)))))
+        ? latestRun
+        : undefined;
+    const queueBehindRun = activeRun ?? worktreeMissingRun ?? switchWaitRun;
+    const pendingMergeBackTransfers = pendingMergeBackTransfersForThread(projection);
     const shouldQueue = queueBehindRun !== undefined && startsOrQueuesRun;
     // Client messages resume held queues; server continuations and scheduled tasks do not.
     // Provider failure or usage limits re-hold the queue.
@@ -6243,6 +6329,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   }),
               ),
             );
+      if (switchWaitRun !== undefined) backgroundWorkWaits.add(command.threadId);
       const queueIsHeld = projection.runs.some(
         (candidate) => candidate.status === "queued" && candidate.queueHeld === true,
       );
@@ -6528,7 +6615,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       isProviderSwitch &&
       activeProviderThread.nativeThreadRef !== null &&
       providerSwitchPlan?.transition.type === "restart_and_resume";
-    const sessionsToDetach = uniqueSessions([
+    const releasableSessions = uniqueSessions([
       ...projection.providerSessions.filter(
         (session) =>
           providerSwitchPlan?.releaseProviderSessionIds.includes(session.id) &&
@@ -6537,17 +6624,30 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ),
       ...(freshContext ? sessionsReleasedByFreshContext(projection, activeProviderThread) : []),
     ]);
-    for (const detaching of sessionsToDetach) {
-      if (yield* sessionHasBackgroundWork(detaching, projection.providerThreads)) {
-        return yield* new OrchestratorDispatchError({
-          commandId: command.commandId,
-          commandType: command.type,
-          cause: freshContext
-            ? "The current session is still running background agents or commands, and a fresh session would end them. Wait for them to finish, or press Stop, then send the message again."
-            : "The previous provider is still running background agents or commands, and switching would end them. Wait for them to finish, or press Stop, then send the message again.",
-        });
+    // As when a queued start runs: a hand-off or a fresh session leaves a busy session up
+    // instead of ending its background work. An account switch that would resume its native
+    // thread was held above, so one that still reaches here is refused.
+    const busySessionIds = new Set<ProviderSessionId>();
+    for (const session of releasableSessions) {
+      if (yield* sessionHasBackgroundWork(session, projection.providerThreads)) {
+        busySessionIds.add(session.id);
       }
     }
+    if (
+      busySessionIds.size > 0 &&
+      !freshContext &&
+      providerSwitchPlan?.transition.type === "restart_and_resume"
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause:
+          "The previous account is still running background agents or commands, and switching would end them. Wait for them to finish, or press Stop, then send the message again.",
+      });
+    }
+    const sessionsToDetach = releasableSessions.filter(
+      (session) => !busySessionIds.has(session.id),
+    );
 
     if (
       pendingForkTransfer === undefined &&
@@ -14242,6 +14342,49 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ),
     Effect.forkScoped,
   );
+
+  // Retries the queue of threads whose next send waits on a replaced session's background
+  // work. The thread leaves the set under its lock, so a send dispatched meanwhile still queues
+  // behind; a send that still waits registers again, and held sends stay held. A failed start
+  // keeps the retry for about five minutes, then the queue waits for the user.
+  const backgroundWorkWaitFailures = new Map<ThreadId, number>();
+  yield* Effect.suspend(() =>
+    Effect.forEach(
+      Array.from(backgroundWorkWaits),
+      (threadId) =>
+        threadDispatch
+          .withLock(
+            threadId,
+            Effect.gen(function* () {
+              // A running turn starts the queue when it ends; until then the wait stands.
+              const projection = yield* readCommandProjection(threadId);
+              if (projection.runs.some(isActiveRun)) return;
+              backgroundWorkWaits.delete(threadId);
+              yield* startNextQueuedRun(threadId);
+            }),
+          )
+          .pipe(
+            Effect.tap(() => Effect.sync(() => backgroundWorkWaitFailures.delete(threadId))),
+            Effect.catchCause((cause) =>
+              Effect.gen(function* () {
+                const failures = (backgroundWorkWaitFailures.get(threadId) ?? 0) + 1;
+                if (failures < 150) {
+                  backgroundWorkWaitFailures.set(threadId, failures);
+                  backgroundWorkWaits.add(threadId);
+                } else {
+                  backgroundWorkWaitFailures.delete(threadId);
+                  backgroundWorkWaits.delete(threadId);
+                }
+                yield* Effect.logWarning(
+                  "Failed to start a queued send after background work ended",
+                  { threadId, failures, cause },
+                );
+              }),
+            ),
+          ),
+      { discard: true },
+    ),
+  ).pipe(Effect.repeat(Schedule.spaced("2 seconds")), Effect.forkScoped);
 
   const recoverDelegatedTasks = Effect.gen(function* () {
     yield* projectionStore.getRecoveryThreadIds("subagent-results").pipe(
