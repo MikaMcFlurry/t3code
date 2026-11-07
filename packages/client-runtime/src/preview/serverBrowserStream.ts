@@ -56,6 +56,18 @@ export interface PreviewStreamControl {
   };
 }
 
+/** The desktop live view's wording: only T3's own desktop tools wait for the person. */
+export const desktopStreamControlLabel = (control: PreviewStreamControl | null): string =>
+  !control
+    ? "Connecting..."
+    : control.controller === "you"
+      ? "You have control. T3's desktop tools wait."
+      : control.controller === "another-viewer"
+        ? "Another viewer has control"
+        : control.canOperate
+          ? "Watching. The agent can act."
+          : "Read-only";
+
 export const previewStreamControlLabel = (control: PreviewStreamControl | null): string =>
   !control
     ? "Connecting..."

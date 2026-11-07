@@ -53,7 +53,8 @@ GNOME (Mutter) ──xdg-desktop-portal RemoteDesktop session──▶ portal he
   monitor through `ScreenCast.SelectSources` on the same session. `persist_mode=2` goes on
   `SelectDevices` (the spec forbids it on `SelectSources` for remote desktop sessions), so the
   person at the machine answers one dialog once. The single-use restore token is rewritten after
-  every start into the server's state directory (`0600`, never logged or sent to a client).
+  every start into the server's state directory (a fresh `0600` file in a `0700` directory,
+  renamed into place and read without following links; never logged or sent to a client).
 - **Frames.** `pipewiresrc` → plain-memory caps → `videorate` (max 10 fps) → scale to at most
   1920×1080 → convert → `jpegenc` (q 60) → `appsink`. Scaling before converting handles a quarter
   of the pixels on a 4K screen. Mutter only sends frames on damage, so an idle screen costs nothing.
@@ -104,6 +105,14 @@ Frames may be smaller than the viewport; clients map from the drawn frame to the
 - **Revocation and switch-off.** A revoked or expired session loses its socket at once (the route
   races it against `SessionStore.awaitInvalidation`, as #32245 does for preview streams). Turning
   the setting off closes every open viewer and stops the capture, and `reload` cannot restart it.
+  Server shutdown is final the same way: a start still claiming the capture gives it back without
+  spawning, and the desktop lease goes back once the helper has exited.
+- **Who starts the capture.** The first viewer does, read-only ones included, since watching needs
+  it; where no restore token exists that shows the portal dialog on the machine, and on an
+  unverified login nothing starts until an operating viewer confirms. `reload` (also **Start screen
+  sharing anyway** and **Try again**) is accepted only from viewers that may operate, all of whom
+  already hold `desktop:operate`. Clients show the entry points only where the setting is on and
+  the session holds that scope.
 - **Who may drive.** One viewer at a time, as with preview tabs: `takeControl` fails while another
   viewer holds control, and a viewer that disconnects (phone locked, tab closed) hands control
   back. Taking control also takes the host-wide desktop lease that agents of every T3 server on
@@ -137,7 +146,8 @@ Frames may be smaller than the viewport; clients map from the drawn frame to the
   gate; the host lease keeps its existing busy semantics.
 - Handing back keeps agents out until the person's held keys and buttons are released: the hub
   asks the helper to release everything and waits for its acknowledgement, which reports whether
-  the portal took every release (a release the portal refused stays tracked and is retried).
+  the portal took every release (a release the portal refused stays tracked and is retried, and
+  one asked for while the helper is already closing reports failure).
   Without a clean acknowledgement within 1.5 s the capture ends, and agents return only once the
   helper has exited, since its portal session and every key it held go with it. The same holds
   for a helper stopped for any other reason (switch-off, a capture error, server shutdown): the
@@ -169,8 +179,10 @@ OBS or a browser sharing the screen would most likely hit the same crash on that
 Consequences:
 
 - **Crash guard, per OS login and fail-closed.** Markers live in
-  `$XDG_STATE_HOME/t3code/desktop-live-view/` (default `~/.local/state/...`), shared by every T3
-  server and checkout on the login, and one capture lock per login, held until the helper process
+  `~/.local/state/t3code/desktop-live-view/` under the home directory from the account database,
+  not `$HOME` or `$XDG_STATE_HOME` (the host lease finds its key the same way), so every T3 server
+  and checkout on the login shares them whatever its environment. The directory is kept at `0700`
+  and each marker is written to a fresh file and renamed into place, and one capture lock per login, held until the helper process
   has exited, keeps two servers from sharing at once. Once it holds the lock a server checks
   `crashed` and `starting` again, since another server may have recorded a crash meanwhile.
   `starting` is written before the stream starts and removed once a frame arrived, the attempt
@@ -236,19 +248,25 @@ Both stay behind the same route, hub, protocol, control and viewers; only the he
   desktop (UAC prompts, Ctrl+Alt+Del, the lock screen) can neither be captured nor driven from the
   user session, and elevated windows reject input from a non-elevated helper (UIPI); the helper
   should report both as explicit "unavailable" states. A UAC prompt needs "prompt on the normal
-  desktop" or a SYSTEM service, which is out of scope. The fork's Windows backend (Windows-MCP)
-  has no stream to reuse.
+  desktop" or a SYSTEM service, which is out of scope. The helper must be per-monitor DPI aware
+  (v2), or capture size and `SendInput` coordinates disagree on scaled displays, and it needs an
+  active interactive session: after an RDP client disconnects, or before anyone logs in, there is
+  no input desktop to capture or drive. The fork's Windows backend (Windows-MCP) has no stream to
+  reuse.
 - **macOS:** ScreenCaptureKit for frames and `CGEventPost` for input, which need the Screen
   Recording and Accessibility permissions. Those attach to the identity of the process that does
   the capture and posting, so both must run inside a stable signed GUI helper, which is exactly
-  the helper proposed in #18803; signing alone grants nothing to other subprocesses. Secure input
-  fields still accept posted events; the login window and FileVault unlock do not.
+  the helper proposed in #18803; signing alone grants nothing to other subprocesses. Secure Event
+  Input mainly stops other processes from observing keystrokes, so posted events are expected to
+  reach ordinary password fields, but apps that turn it on may behave differently and that needs
+  testing (the helper can check `IsSecureEventInputEnabled()`); the login window and FileVault
+  unlock are out of reach. Typing uses `CGEventKeyboardSetUnicodeString` rather than keysyms.
 
 ## Evidence (2026-11-07)
 
 Verified:
 
-- Unit tests (`apps/server/src/desktop/DesktopLiveView.test.ts`, 32 tests, plus the existing bridge
+- Unit tests (`apps/server/src/desktop/DesktopLiveView.test.ts`, 33 tests, plus the existing bridge
   tests): keysyms, fan-out, consent and refusal states, input only from the controller, hand-back on
   disconnect, agent refused during a takeover and drained before the person's first input, crash
   guard, release acknowledgement before agents return, host lease held while a person drives,

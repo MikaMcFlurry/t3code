@@ -82,8 +82,9 @@ export function refreshPreviewStreamAccess(
 export function readPreviewStreamAccess(
   environmentId: EnvironmentId,
   refresh: boolean,
+  stream: PreviewStreamKind = "preview",
 ): Promise<DeviceHubAccess | null> {
-  const atom = previewStreamAccessAtom(streamAccessKey(environmentId));
+  const atom = previewStreamAccessAtom(streamAccessKey(environmentId, stream));
   if (refresh) appAtomRegistry.refresh(atom);
   return Effect.runPromise(
     AtomRegistry.getResult(appAtomRegistry, atom, { suspendOnWaiting: true }).pipe(

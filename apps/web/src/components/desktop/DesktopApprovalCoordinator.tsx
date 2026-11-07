@@ -1,9 +1,11 @@
-import type { DesktopApprovalRespondInput } from "@t3tools/contracts";
+import { AuthDesktopOperateScope, type DesktopApprovalRespondInput } from "@t3tools/contracts";
 import { useState } from "react";
 
 import { desktopApprovalEnvironment } from "../../state/desktopApprovals";
+import { useServerConfigs } from "../../state/entities";
 import { usePrimaryEnvironmentId } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
+import { useEnvironmentScope } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
 import {
   AlertDialog,
@@ -26,6 +28,11 @@ export function DesktopApprovalCoordinator() {
   });
   const [responding, setResponding] = useState(false);
   const request = approvals.data?.requests[0] ?? null;
+  // Only where the live view is switched on and this session may watch it.
+  const configs = useServerConfigs();
+  const liveViewOn =
+    environmentId !== null && configs.get(environmentId)?.settings.enableDesktopLiveView === true;
+  const canWatch = useEnvironmentScope(environmentId, AuthDesktopOperateScope);
 
   const decide = async (decision: DesktopApprovalRespondInput["decision"]) => {
     if (environmentId === null || request === null || responding) return;
@@ -60,13 +67,15 @@ export function DesktopApprovalCoordinator() {
               : JSON.stringify(request.arguments, null, 2)}
         </pre>
         <AlertDialogFooter>
-          <Button
-            className="sm:me-auto"
-            variant="ghost"
-            onClick={() => environmentId !== null && openDesktopLiveView(environmentId)}
-          >
-            Show desktop
-          </Button>
+          {liveViewOn && canWatch ? (
+            <Button
+              className="sm:me-auto"
+              variant="ghost"
+              onClick={() => environmentId !== null && openDesktopLiveView(environmentId)}
+            >
+              Show desktop
+            </Button>
+          ) : null}
           <Button disabled={responding} variant="outline" onClick={() => void decide("deny")}>
             Deny
           </Button>

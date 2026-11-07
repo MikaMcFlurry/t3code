@@ -2,6 +2,7 @@ import {
   createPreviewFramePainter,
   createPreviewStreamClient,
   type DesktopStreamStatus,
+  desktopStreamControlLabel,
   previewStreamControlLabel,
   previewStreamModifiers,
   type PreviewStreamClient,
@@ -123,17 +124,6 @@ async function copyPageText(text: string) {
     });
   }
 }
-
-const desktopControlLabel = (control: PreviewStreamControl | null): string =>
-  !control
-    ? "Connecting..."
-    : control.controller === "you"
-      ? "You have control. The agent waits."
-      : control.controller === "another-viewer"
-        ? "Another viewer has control"
-        : control.canOperate
-          ? "Watching. The agent can act."
-          : "Read-only";
 
 const DESKTOP_STATUS_MESSAGES: Record<
   Exclude<DesktopStreamStatus["state"], "streaming">,
@@ -791,7 +781,7 @@ export function ServerBrowserSurface(props: {
         )}
       >
         <span role="status" className="text-xs text-muted-foreground">
-          {desktop ? desktopControlLabel(control) : previewStreamControlLabel(control)}
+          {desktop ? desktopStreamControlLabel(control) : previewStreamControlLabel(control)}
         </span>
         {desktop && control?.controller === "you" ? (
           <Button variant="ghost" size="xs" className="ml-auto" onClick={focusInput}>

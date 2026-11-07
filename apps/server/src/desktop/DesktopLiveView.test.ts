@@ -13,6 +13,7 @@ import type { ComputerUseLinuxLease } from "./ComputerUseLinuxHostLease.ts";
 import { desktopLiveControl } from "./DesktopLiveControl.ts";
 import {
   type DesktopLiveViewCaptureGuard,
+  type DesktopLiveViewCaptureRun,
   type DesktopLiveViewOutput,
   DesktopLiveViewHub,
   loginCaptureGuard,
@@ -671,6 +672,36 @@ describe("DesktopLiveViewHub handoffs", () => {
     spawner.helpers[0]!.exit();
     await closing;
     expect(events).toEqual(["acquire", "release"]);
+  });
+
+  it("shuts down a start still claiming the login's capture without spawning, then closes late viewers", async () => {
+    const spawner = fakeSpawner();
+    const events: Array<string> = [];
+    let claim: (run: DesktopLiveViewCaptureRun) => void = () => undefined;
+    const hub = new DesktopLiveViewHub(spawner.spawn, {
+      captureGuard: {
+        status: () => "verified",
+        begin: () => new Promise((resolve) => (claim = resolve)),
+      },
+    });
+    hubs.push(hub);
+    hub.attach(viewer("watcher").entry);
+    await settle();
+    let closed = false;
+    const closing = hub.shutdown().then(() => (closed = true));
+    await settle();
+    expect(closed).toBe(false);
+    claim({
+      succeeded: () => void events.push("succeeded"),
+      crashed: () => void events.push("crashed"),
+      end: () => void events.push("end"),
+    });
+    await closing;
+    expect(events).toEqual(["end"]);
+    expect(spawner.helpers).toHaveLength(0);
+    const late = viewer("late");
+    hub.attach(late.entry);
+    expect(late.last("closed")?.reason).toContain("shutting down");
   });
 
   it("holds the login's capture until the helper exits, though its end came earlier", async () => {

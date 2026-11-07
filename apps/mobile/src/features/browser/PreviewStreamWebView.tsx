@@ -4,6 +4,7 @@ import * as Dialog from "../../components/ui/Dialog";
 import previewStreamScript from "@t3tools/mobile-preview-stream";
 import {
   type DesktopStreamStatus,
+  desktopStreamControlLabel,
   previewStreamControlLabel,
   previewStreamHostSetupMessage,
   type PreviewStreamControl,
@@ -54,8 +55,9 @@ type NativeStreamBridge = {
   /** Asks for fresh access after a refusal, once `delayMs` has passed. */
   readonly onRefused: (delayMs: number) => void;
   readonly onGone?: () => void;
-  /** The desktop live view's capture state; it also counts as the stream starting. */
-  readonly onDesktop?: (status: DesktopStreamStatus) => void;
+  /** The desktop live view's capture state; it also counts as the stream starting. Null once
+   * the stream itself failed, so the screen drops its banner for the viewer's own error. */
+  readonly onDesktop?: (status: DesktopStreamStatus | null) => void;
   readonly onViewport?: (viewport: { readonly width: number; readonly height: number }) => void;
   readonly onControl?: (control: PreviewStreamControl | null) => void;
   readonly onPictureInPicture?: (state: PreviewPictureInPictureState, detail?: string) => void;
@@ -152,7 +154,10 @@ export function PreviewStreamWebView(
               error ? "text-center text-sm text-foreground-muted" : "text-sm text-foreground-muted"
             }
           >
-            {error || "Connecting to browser..."}
+            {error ||
+              (props.stream === "desktop"
+                ? "Connecting to desktop..."
+                : "Connecting to browser...")}
           </AppText>
           {error && (
             <View className="items-center">
@@ -219,6 +224,7 @@ function AuthorizedPreviewStream({
 
 function PreviewStreamDocumentView({
   ref,
+  stream,
   configuration,
   background,
   compact,
@@ -234,6 +240,7 @@ function PreviewStreamDocumentView({
   onStreaming,
   onRecoverProcess,
 }: Omit<NativeStreamBridge, "onUnauthorized" | "onRefused"> & {
+  readonly stream?: PreviewStreamConfiguration["stream"];
   readonly configuration: string;
   readonly background: string;
   readonly onUnauthorized: () => boolean;
@@ -248,6 +255,10 @@ function PreviewStreamDocumentView({
   const [status, setStatus] = useState<"connecting" | "streaming" | "error">("connecting");
   const [error, setError] = useState<string | null>(null);
   const [gone, setGone] = useState(false);
+  const desktop = stream === "desktop";
+  const viewer = desktop ? "Desktop viewer" : "Browser viewer";
+  // The screen above explains a capture that is not streaming; no spinner underneath it.
+  const [desktopWaiting, setDesktopWaiting] = useState(false);
   const [hostSetup, setHostSetup] = useState<PreviewStreamHostSetup | null>(null);
   const [control, setControl] = useState<PreviewStreamControl | null>(null);
   const dialogRef = useRef<PreviewStreamControl["dialog"]>(null);
@@ -291,11 +302,12 @@ function PreviewStreamDocumentView({
     setControl(null);
     setFileChooser(null);
     onControl?.(null);
+    onDesktop?.(null);
     setError(message);
     setStatus("error");
   };
   const bootstrapTimedOut = useEffectEvent(() =>
-    fail("Browser viewer could not start. Reconnect to try again."),
+    fail(`${viewer} could not start. Reconnect to try again.`),
   );
   const streamEnded = useEffectEvent(() => {
     onStreamingChange?.(false);
@@ -327,14 +339,14 @@ function PreviewStreamDocumentView({
   }));
   const processTerminated = () => {
     if (!active.current || failed.current) return;
-    if (!onRecoverProcess()) fail("Browser viewer stopped. Reconnect to try again.");
+    if (!onRecoverProcess()) fail(`${viewer} stopped. Reconnect to try again.`);
   };
   return (
     <View className="flex-1" style={{ backgroundColor: background }}>
       {!compact ? (
         <View className="flex-row items-center justify-between gap-2 border-b border-secondary-border px-3 py-2">
           <AppText className="text-xs text-foreground-muted">
-            {previewStreamControlLabel(control)}
+            {desktop ? desktopStreamControlLabel(control) : previewStreamControlLabel(control)}
           </AppText>
           {control?.canOperate ? (
             <Button
@@ -363,8 +375,8 @@ function PreviewStreamDocumentView({
           allowsPictureInPictureMediaPlayback
           mediaPlaybackRequiresUserAction={false}
           style={{ flex: 1, backgroundColor: background }}
-          onError={() => fail("Browser viewer could not load. Reconnect to try again.")}
-          onHttpError={() => fail("Browser viewer could not load. Reconnect to try again.")}
+          onError={() => fail(`${viewer} could not load. Reconnect to try again.`)}
+          onHttpError={() => fail(`${viewer} could not load. Reconnect to try again.`)}
           onContentProcessDidTerminate={processTerminated}
           onRenderProcessGone={processTerminated}
           onShouldStartLoadWithRequest={(request) =>
@@ -385,11 +397,16 @@ function PreviewStreamDocumentView({
               }
               case "unauthorized":
                 if (!onUnauthorized()) {
-                  fail("This session can't open the browser stream. Reconnect to try again.");
+                  fail(
+                    desktop
+                      ? "This device may not watch the desktop, or its session expired. Pair it with the 'Watch and control the desktop' permission."
+                      : "This session can't open the browser stream. Reconnect to try again.",
+                  );
                 }
                 return;
               case "desktop":
                 clearBootstrapTimer();
+                setDesktopWaiting(message.state !== "streaming");
                 onDesktop?.(message);
                 return;
               case "gone":
@@ -494,7 +511,7 @@ function PreviewStreamDocumentView({
           )}
         </View>
       ) : null}
-      {status !== "streaming" ? (
+      {status !== "streaming" && !(status === "connecting" && desktopWaiting) ? (
         <View
           className="absolute inset-0 items-center justify-center gap-4 px-6"
           style={{ backgroundColor: background }}
@@ -505,7 +522,11 @@ function PreviewStreamDocumentView({
               accessibilityLiveRegion="polite"
               className="text-center text-sm text-foreground-muted"
             >
-              {status === "error" ? error : "Connecting to browser..."}
+              {status === "error"
+                ? error
+                : desktop
+                  ? "Connecting to desktop..."
+                  : "Connecting to browser..."}
             </AppText>
           )}
           {status === "error" && hostSetup && !compact ? (

@@ -589,6 +589,9 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.enableAgentBrowserAccess !== DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess
       ? ["Agent browser access"]
       : []),
+    ...(settings.enableDesktopLiveView !== DEFAULT_UNIFIED_SETTINGS.enableDesktopLiveView
+      ? ["Desktop live view"]
+      : []),
   ];
 
   const restoreDefaults = async () => {
@@ -715,6 +718,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       browserAutoShowFloatingPreview: DEFAULT_UNIFIED_SETTINGS.browserAutoShowFloatingPreview,
       pullRequestLinksOpenInApp: DEFAULT_UNIFIED_SETTINGS.pullRequestLinksOpenInApp,
       enableAgentBrowserAccess: DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess,
+      enableDesktopLiveView: DEFAULT_UNIFIED_SETTINGS.enableDesktopLiveView,
     });
     onRestored?.();
   };

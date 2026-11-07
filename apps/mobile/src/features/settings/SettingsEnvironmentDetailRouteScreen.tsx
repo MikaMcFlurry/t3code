@@ -2,6 +2,7 @@ import * as Dialog from "../../components/ui/Dialog";
 import { useAtom, useAtomValue } from "@effect/atom-react";
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import {
+  AuthDesktopOperateScope,
   AuthProvidersManageScope,
   AuthOrchestrationReadScope,
   managedUpdatesDenial,
@@ -90,6 +91,7 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
     ) ?? false;
   const canManageProviders = useEnvironmentScope(environmentId, AuthProvidersManageScope);
   const canRead = useEnvironmentScope(environmentId, AuthOrchestrationReadScope);
+  const canWatchDesktop = useEnvironmentScope(environmentId, AuthDesktopOperateScope);
   const busy = !connected || pending !== null || running || providerBusy;
   const disabled = !allowed || busy;
   const version = config?.environment.serverVersion;
@@ -307,15 +309,20 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
                     />
                   ) : null}
                 </SettingsSection>
-                <SettingsSection title="Desktop">
-                  <SettingsActionRow
-                    icon="desktopcomputer"
-                    label="Live view"
-                    onPress={() =>
-                      navigation.navigate("EnvironmentDesktopLiveView", { environmentId })
-                    }
-                  />
-                </SettingsSection>
+                {config?.settings.enableDesktopLiveView === true ? (
+                  <SettingsSection title="Desktop">
+                    <SettingsActionRow
+                      icon="desktopcomputer"
+                      label={
+                        canWatchDesktop ? "Live view" : "Live view needs the desktop permission"
+                      }
+                      disabled={!canWatchDesktop}
+                      onPress={() =>
+                        navigation.navigate("EnvironmentDesktopLiveView", { environmentId })
+                      }
+                    />
+                  </SettingsSection>
+                ) : null}
                 <SettingsSection title="Providers">
                   <SettingsActionRow
                     icon="arrow.clockwise"

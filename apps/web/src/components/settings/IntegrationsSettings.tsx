@@ -22,6 +22,7 @@ import {
   DEFAULT_BROWSER_SEARCH_ENGINE,
   DEFAULT_BROWSER_VIEWPORT,
   DEFAULT_PREVIEW_APPEARANCE,
+  AuthDesktopOperateScope,
   DEFAULT_PREVIEW_ZOOM_FACTOR,
   DEFAULT_SERVER_SETTINGS,
   FILL_PREVIEW_VIEWPORT,
@@ -1182,6 +1183,7 @@ function DesktopLiveViewSetting() {
   const { connectedEnvironments } = useSettingsScope();
   // Open shows one machine's screen; with several in scope it would have to guess which.
   const machine = connectedEnvironments.length === 1 ? connectedEnvironments[0]! : null;
+  const canWatch = useEnvironmentScope(machine?.environmentId ?? null, AuthDesktopOperateScope);
 
   return (
     <SettingsRow
@@ -1204,13 +1206,19 @@ function DesktopLiveViewSetting() {
       control={
         <div className="flex items-center gap-2">
           {settings.enableDesktopLiveView && machine !== null ? (
-            <Button
-              variant="outline"
-              size="xs"
-              onClick={() => openDesktopLiveView(machine.environmentId)}
-            >
-              Open
-            </Button>
+            canWatch ? (
+              <Button
+                variant="outline"
+                size="xs"
+                onClick={() => openDesktopLiveView(machine.environmentId)}
+              >
+                Open
+              </Button>
+            ) : (
+              <span className="text-xs text-muted-foreground">
+                Needs the &quot;Watch and control the desktop&quot; permission
+              </span>
+            )
           ) : null}
           <ScopedSwitch
             settingKeys={["enableDesktopLiveView"]}

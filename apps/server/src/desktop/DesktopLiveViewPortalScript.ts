@@ -15,9 +15,14 @@ import json
 import os
 import struct
 import sys
+import tempfile
 import threading
 
 LOCK = threading.Lock()
+# Input and shutdown change the held keys and the session one at a time.
+INPUT_LOCK = threading.Lock()
+# Longer than any command the server sends.
+MAX_LINE = 65536
 
 
 def emit(kind, payload):
@@ -104,16 +109,22 @@ def request(interface, method, signature, build):
 def save_token(token):
     directory = os.path.dirname(TOKEN_PATH)
     os.makedirs(directory, mode=0o700, exist_ok=True)
-    temporary = "%s.%d.tmp" % (TOKEN_PATH, os.getpid())
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w") as handle:
-        handle.write(token)
-    os.replace(temporary, TOKEN_PATH)
+    os.chmod(directory, 0o700)
+    # A fresh, exclusively created file: nothing planted at a guessable name is followed.
+    descriptor, temporary = tempfile.mkstemp(dir=directory, prefix=".restore-token.")
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(token)
+        os.replace(temporary, TOKEN_PATH)
+    except OSError:
+        os.unlink(temporary)
+        raise
 
 
 def read_token():
     try:
-        with open(TOKEN_PATH) as handle:
+        descriptor = os.open(TOKEN_PATH, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor) as handle:
             return handle.read().strip() or None
     except OSError:
         return None
@@ -121,8 +132,11 @@ def read_token():
 
 def notify(method, signature, values):
     """True once the portal took the call, or when there is no session to send it to."""
-    if state["session"] is None or state["closing"]:
+    if state["session"] is None:
         return True
+    if state["closing"]:
+        # The session is on its way out: only its end, not this call, lets go of what it holds.
+        return False
     try:
         call(REMOTE, method, signature, values)
         return True
@@ -212,9 +226,18 @@ def handle(message):
 
 
 def read_input():
-    for line in sys.stdin.buffer:
+    while True:
+        line = sys.stdin.buffer.readline(MAX_LINE)
+        if not line:
+            break
+        if not line.endswith(b"\n"):
+            # Too long to be a command: skip the rest of the line.
+            while line and not line.endswith(b"\n"):
+                line = sys.stdin.buffer.readline(MAX_LINE)
+            continue
         try:
-            handle(json.loads(line))
+            with INPUT_LOCK:
+                handle(json.loads(line))
         except Exception:
             # One bad command must not end input handling for the rest of the session.
             continue
@@ -222,10 +245,11 @@ def read_input():
 
 
 def shutdown(*_args):
-    if state["closing"]:
-        return False
-    release_all()
-    state["closing"] = True
+    with INPUT_LOCK:
+        if state["closing"]:
+            return False
+        release_all()
+        state["closing"] = True
     if state["pipeline"] is not None:
         state["pipeline"].set_state(Gst.State.NULL)
     if state["session"] is not None:
@@ -343,7 +367,12 @@ def main():
         status({"type": "denied" if code == 1 else "error", "code": "start"})
         return 3
     if results.get("restore_token"):
-        save_token(results["restore_token"])
+        try:
+            save_token(results["restore_token"])
+        except OSError:
+            # The machine asks again next time; this session is fine, and dying here would
+            # look like a crash to the server.
+            pass
     streams = results.get("streams") or []
     if not streams or (results.get("devices", 0) & POINTER) == 0:
         status({"type": "error", "code": "no-stream"})

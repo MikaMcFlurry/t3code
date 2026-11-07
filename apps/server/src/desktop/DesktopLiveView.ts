@@ -227,6 +227,10 @@ export class DesktopLiveViewHub {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private startTimer: ReturnType<typeof setTimeout> | null = null;
   private enabled = true;
+  /** Set by `shutdown`: nothing starts or takes over from then on. */
+  private closed = false;
+  /** Starts in flight, which `shutdown` lets finish (they spawn nothing once it began). */
+  private launches: Promise<void> = Promise.resolve();
   /** Set on a detected crash even when the marker cannot be written. */
   private crashLatched = false;
   private hostLease: DesktopLiveViewHostLease | null = null;
@@ -267,8 +271,8 @@ export class DesktopLiveViewHub {
   }
 
   attach(viewer: HubViewer): void {
-    if (!this.enabled) {
-      viewer.push({ _tag: "closed", reason: SWITCHED_OFF_REASON });
+    if (!this.enabled || this.closed) {
+      viewer.push({ _tag: "closed", reason: this.closed ? STOPPING_REASON : SWITCHED_OFF_REASON });
       return;
     }
     this.viewers.set(viewer.id, viewer);
@@ -306,9 +310,12 @@ export class DesktopLiveViewHub {
 
   /** Ends the capture; the desktop lease goes back once no helper can still hold a key. */
   async shutdown(): Promise<void> {
+    this.closed = true;
     this.stopListening();
     this.cancelIdleStop();
     this.stopHelper();
+    // A start still claiming the login's capture gives it back without spawning.
+    await this.launches;
     await this.handoff(async () => {
       await this.retiredHelpersExited();
       await this.dropHostLease();
@@ -318,7 +325,7 @@ export class DesktopLiveViewHub {
   async input(viewerId: string, raw: unknown): Promise<void> {
     const viewer = this.viewers.get(viewerId);
     const message = asRecord(raw);
-    if (!viewer?.canOperate || !message || !this.enabled) return;
+    if (!viewer?.canOperate || !message || !this.enabled || this.closed) return;
     const control = desktopLiveControl.control;
     try {
       switch (message.type) {
@@ -380,7 +387,8 @@ export class DesktopLiveViewHub {
    * switch-off cancels the takeover and gives the lease back.
    */
   private async take(viewerId: string) {
-    const wanted = () => this.enabled && this.viewers.get(viewerId)?.canOperate === true;
+    const wanted = () =>
+      this.enabled && !this.closed && this.viewers.get(viewerId)?.canOperate === true;
     if (!wanted()) return;
     const controller = desktopLiveControl.humanController;
     if (controller === viewerId) return;
@@ -551,9 +559,19 @@ export class DesktopLiveViewHub {
   }
 
   /** `confirmed`: a viewer chose to start although sharing never worked on this machine. */
-  private async startCapture(confirmed: boolean) {
+  private startCapture(confirmed: boolean): Promise<void> {
+    const launch = this.launchCapture(confirmed);
+    const earlier = this.launches;
+    this.launches = launch.then(
+      () => earlier,
+      () => earlier,
+    );
+    return launch;
+  }
+
+  private async launchCapture(confirmed: boolean) {
     this.lastFrame = null;
-    if (!this.enabled || this.helper !== null || this.launching) return;
+    if (!this.enabled || this.closed || this.helper !== null || this.launching) return;
     if (this.crashLatched) {
       this.setState("unavailable", CRASH_GUARD_DETAIL);
       return;
@@ -584,7 +602,7 @@ export class DesktopLiveViewHub {
         this.setState("unavailable", begun.refused);
         return;
       }
-      if (!this.enabled || this.viewers.size === 0 || this.helper !== null) {
+      if (!this.enabled || this.closed || this.viewers.size === 0 || this.helper !== null) {
         begun.end();
         return;
       }
@@ -745,6 +763,7 @@ export class DesktopLiveViewHub {
 }
 
 const SWITCHED_OFF_REASON = "Desktop live view was turned off on this machine.";
+const STOPPING_REASON = "This T3 server is shutting down.";
 
 const CRASH_GUARD_DETAIL =
   "A screen share on this machine ended before its first frame, which is how a desktop crash looks (GNOME Shell 46 on GPUs without DRM format modifiers). Live view stays off for this login; see docs/desktop-live-view.md to reset it.";
@@ -763,7 +782,16 @@ export const loginCaptureGuard = (input: {
   const file = (name: string) => NodePath.join(input.directory, name);
   const write = (name: string, text: string) => {
     NodeFS.mkdirSync(input.directory, { recursive: true, mode: 0o700 });
-    NodeFS.writeFileSync(file(name), text, { mode: 0o600 });
+    NodeFS.chmodSync(input.directory, 0o700);
+    // A fresh file renamed into place, so nothing planted at the marker's name is followed.
+    const draft = file(`.${name}.${NodeCrypto.randomUUID()}.tmp`);
+    NodeFS.writeFileSync(draft, text, { mode: 0o600, flag: "wx" });
+    try {
+      NodeFS.renameSync(draft, file(name));
+    } catch (cause) {
+      NodeFS.rmSync(draft, { force: true });
+      throw cause;
+    }
   };
   const exists = (name: string) => NodeFS.existsSync(file(name));
   const remove = (name: string) => NodeFS.rmSync(file(name), { force: true });
@@ -975,13 +1003,10 @@ export const spawnPortalHelper =
 export const DESKTOP_LIVE_VIEW_PLATFORMS: ReadonlySet<NodeJS.Platform> = new Set(["linux"]);
 
 /** Per OS login, so every T3 server and checkout on it shares the crash markers. */
-const loginStateDir = (environment: NodeJS.ProcessEnv) =>
-  NodePath.join(
-    environment.XDG_STATE_HOME ??
-      NodePath.join(environment.HOME ?? NodeOS.homedir(), ".local", "state"),
-    "t3code",
-    "desktop-live-view",
-  );
+// From the account database like the host lease's key, not $HOME or $XDG_STATE_HOME: two servers
+// started with different environments must still read the same markers.
+const loginStateDir = () =>
+  NodePath.join(NodeOS.userInfo().homedir, ".local", "state", "t3code", "desktop-live-view");
 
 const isLeaseBusy = Schema.is(ComputerUseLinuxLeaseBusyError);
 
@@ -1037,7 +1062,7 @@ export const layer = Layer.effect(
           ? {}
           : {
               captureGuard: loginCaptureGuard({
-                directory: loginStateDir(environment),
+                directory: loginStateDir(),
                 acquireCaptureLock: captureLockAcquirer(platform),
               }),
             }),

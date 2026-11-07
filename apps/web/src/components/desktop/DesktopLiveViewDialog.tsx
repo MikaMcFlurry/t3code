@@ -47,11 +47,13 @@ export function DesktopLiveViewDialog() {
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- leaves the address bar clean once the deep link has opened the view
   useEffect(() => {
+    // Kept until the target resolves, so a reload before that still opens the view.
+    if (environmentId === null) return;
     const url = new URL(window.location.href);
     if (!url.searchParams.has(DESKTOP_LIVE_VIEW_SEARCH_PARAM)) return;
     url.searchParams.delete(DESKTOP_LIVE_VIEW_SEARCH_PARAM);
     window.history.replaceState(window.history.state, "", url);
-  }, []);
+  }, [environmentId]);
 
   return (
     <Dialog
@@ -64,8 +66,9 @@ export function DesktopLiveViewDialog() {
         <DialogHeader>
           <DialogTitle>Desktop live view{machine ? ` · ${machine}` : ""}</DialogTitle>
           <DialogDescription>
-            Take control to type a password, solve a captcha or answer a system prompt. The
-            agent&apos;s desktop actions wait until you release control.
+            Take control to type a password, solve a captcha or answer a system prompt. T3&apos;s
+            desktop tools wait until you release control; a provider&apos;s own computer use, such
+            as Codex Computer Use, does not.
           </DialogDescription>
         </DialogHeader>
         {environmentId !== null ? (
