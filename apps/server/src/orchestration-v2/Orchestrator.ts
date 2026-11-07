@@ -2840,7 +2840,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           { threadId, runId: queuedRun.id, providerSessionIds: Array.from(busySessionIds) },
         );
         backgroundWorkWaits.add(threadId);
-        return;
+        // A later send that keeps the busy session, such as a wake delivering its buffered
+        // background results, goes first: it can be what ends the work this send waits on.
+        const sessionRun =
+          options?.queuedRunId === undefined
+            ? queuedRunsInDeliveryOrder(projection).find(
+                (run) =>
+                  run.id !== queuedRun.id &&
+                  run.queueHeld !== true &&
+                  run.freshContext !== true &&
+                  queuedRunModelSelection(projection, run).instanceId ===
+                    activeProviderThread?.providerInstanceId,
+              )
+            : undefined;
+        return sessionRun?.id;
       }
       const sessionsToDetach = releasableSessions.filter(
         (session) => !busySessionIds.has(session.id),
@@ -3391,11 +3404,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   );
 
   // A provider failure hold leaves buffered wakes unheld, so a second pass starts the first one.
+  // A queue head that waits on background work names a later send that keeps the busy session,
+  // so a second pass starts that one.
   const startNextQueuedRun = (...args: Parameters<typeof startNextQueuedRunOnce>) =>
     startNextQueuedRunOnce(...args).pipe(
-      Effect.flatMap((wakeLeftUnheld) =>
-        wakeLeftUnheld === true ? startNextQueuedRunOnce(args[0]) : Effect.void,
+      Effect.flatMap((next) =>
+        next === true
+          ? startNextQueuedRunOnce(args[0])
+          : typeof next === "string"
+            ? startNextQueuedRunOnce(args[0], { queuedRunId: next })
+            : Effect.void,
       ),
+      Effect.asVoid,
     );
 
   // Under load a resumed provider can time out before taking the prompt; the restart still owes the turn.
@@ -16573,6 +16593,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   backgroundWorkWaits.add(threadId);
                 } else {
                   backgroundWorkWaitFailures.delete(threadId);
+                  backgroundWorkWaits.delete(threadId);
                 }
                 yield* Effect.logWarning(
                   "Failed to start a queued send after background work ended",
