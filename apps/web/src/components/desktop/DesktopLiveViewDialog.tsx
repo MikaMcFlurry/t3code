@@ -2,7 +2,7 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import { useEffect, useSyncExternalStore } from "react";
 
 import { ServerBrowserSurface } from "~/browser/ServerBrowserSurface";
-import { usePrimaryEnvironmentId } from "../../state/environments";
+import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environments";
 import { Dialog, DialogDescription, DialogHeader, DialogPopup, DialogTitle } from "../ui/dialog";
 
 /** `?desktopLiveView=primary` (or an environment id) opens the live view, e.g. from a push. */
@@ -42,6 +42,8 @@ export function DesktopLiveViewDialog() {
   const requested = useSyncExternalStore(subscribe, () => openEnvironment);
   const primary = usePrimaryEnvironmentId();
   const environmentId = requested === "primary" ? primary : requested;
+  const { environments } = useEnvironments();
+  const machine = environments.find((entry) => entry.environmentId === environmentId)?.label;
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- leaves the address bar clean once the deep link has opened the view
   useEffect(() => {
@@ -60,7 +62,7 @@ export function DesktopLiveViewDialog() {
     >
       <DialogPopup className="h-[85vh] sm:max-w-6xl" bottomStickOnMobile={false}>
         <DialogHeader>
-          <DialogTitle>Desktop live view</DialogTitle>
+          <DialogTitle>Desktop live view{machine ? ` · ${machine}` : ""}</DialogTitle>
           <DialogDescription>
             Take control to type a password, solve a captcha or answer a system prompt. The
             agent&apos;s desktop actions wait until you release control.

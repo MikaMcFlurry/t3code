@@ -9,10 +9,12 @@ import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import type * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import { ServerConfig } from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { ComputerUseLinuxHostLease, userLeaseScopeKey } from "./ComputerUseLinuxHostLease.ts";
 import { desktopLiveControl } from "./DesktopLiveControl.ts";
 import { DESKTOP_LIVE_VIEW_PORTAL_SCRIPT } from "./DesktopLiveViewPortalScript.ts";
 
@@ -39,7 +41,9 @@ export type DesktopLiveViewOutput =
       readonly controller: "agent" | "you" | "another-viewer";
       readonly generation: number;
     }
-  | { readonly _tag: "desktop"; readonly state: DesktopLiveViewState; readonly detail?: string };
+  | { readonly _tag: "desktop"; readonly state: DesktopLiveViewState; readonly detail?: string }
+  /** The viewer must go: the feature was turned off. */
+  | { readonly _tag: "closed"; readonly reason: string };
 
 export interface DesktopLiveViewer {
   readonly output: Queue.Dequeue<DesktopLiveViewOutput>;
@@ -48,12 +52,14 @@ export interface DesktopLiveViewer {
 
 export class DesktopLiveViewUnavailableError extends Schema.TaggedError<DesktopLiveViewUnavailableError>()(
   "DesktopLiveViewUnavailableError",
-  { reason: Schema.Literals(["disabled", "platform"]) },
+  { reason: Schema.Literals(["disabled", "platform", "full"]) },
 ) {
   override get message(): string {
     return this.reason === "disabled"
       ? "Desktop live view is turned off in this server's settings."
-      : "Desktop live view needs a Linux desktop session on this server.";
+      : this.reason === "full"
+        ? "Too many viewers are watching this desktop."
+        : "Desktop live view needs a Linux desktop session on this server.";
   }
 }
 
@@ -148,6 +154,27 @@ interface HubViewer {
   readonly pressedKeys: Map<string, number>;
 }
 
+/** Holds the host-wide desktop lease, which agents in every T3 server on this login also take. */
+export interface DesktopLiveViewHostLease {
+  readonly release: () => Promise<void>;
+}
+
+// DOM modifier mask bits (Alt 1, Control 2, Meta 4, Shift 8) and their keysyms, left then right.
+const MODIFIER_KEYSYMS: ReadonlyArray<readonly [number, ReadonlyArray<number>]> = [
+  [1, [0xffe9, 0xffea]],
+  [2, [0xffe3, 0xffe4]],
+  [4, [0xffeb, 0xffec]],
+  [8, [0xffe1, 0xffe2]],
+];
+const MAX_TEXT_CHARACTERS = 1000;
+const MAX_WHEEL_DELTA = 2400;
+const RELEASE_ACK_TIMEOUT_MS = 1500;
+const LEASE_WAIT_MS = 10_000;
+const LEASE_RETRY_MS = 200;
+
+const clampWheel = (value: unknown) =>
+  Math.min(Math.max(finite(value), -MAX_WHEEL_DELTA), MAX_WHEEL_DELTA);
+
 /**
  * One capture for the machine, shared by every viewer. It starts with the first viewer and
  * stops a little after the last one leaves. Viewers only watch until one takes control; agents
@@ -162,22 +189,34 @@ export class DesktopLiveViewHub {
   private viewport: { width: number; height: number } | null = null;
   private lastFrame: Uint8Array | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
-  private consentTimer: ReturnType<typeof setTimeout> | null = null;
+  private startTimer: ReturnType<typeof setTimeout> | null = null;
+  private enabled = true;
+  private hostLease: DesktopLiveViewHostLease | null = null;
+  private nextRelease = 0;
+  private readonly releaseAcks = new Map<number, () => void>();
   private readonly stopListening: () => void;
   private readonly onHelperError: (status: Record<string, unknown>) => void;
   private readonly crashGuard: DesktopLiveViewCrashGuard | null;
+  private readonly acquireHostLease: (() => Promise<DesktopLiveViewHostLease | null>) | null;
 
   constructor(
     spawnHelper: SpawnDesktopLiveViewHelper,
     options: {
       readonly onHelperError?: (status: Record<string, unknown>) => void;
       readonly crashGuard?: DesktopLiveViewCrashGuard;
+      /** Resolves null while the lease is busy; the hub retries for a while. */
+      readonly acquireHostLease?: () => Promise<DesktopLiveViewHostLease | null>;
     } = {},
   ) {
     this.spawnHelper = spawnHelper;
     this.onHelperError = options.onHelperError ?? (() => undefined);
     this.crashGuard = options.crashGuard ?? null;
+    this.acquireHostLease = options.acquireHostLease ?? null;
     this.stopListening = desktopLiveControl.onChange(() => this.broadcastControl());
+  }
+
+  get viewerCount(): number {
+    return this.viewers.size;
   }
 
   attach(viewer: HubViewer): void {
@@ -194,36 +233,38 @@ export class DesktopLiveViewHub {
 
   async detach(viewerId: string): Promise<void> {
     const viewer = this.viewers.get(viewerId);
-    await desktopLiveControl.control.disconnect(viewerId, async () => {
-      if (viewer) this.releaseKeys(viewer);
-      this.helper?.send({ t: "release" });
-    });
+    await desktopLiveControl.disconnect(viewerId, () => this.releaseInput(viewer));
     this.viewers.delete(viewerId);
     if (this.viewers.size === 0) this.scheduleIdleStop();
+  }
+
+  /** Follows the setting: turning it off ends every viewer and the capture at once. */
+  setEnabled(enabled: boolean): void {
+    this.enabled = enabled;
+    if (enabled) return;
+    this.stopHelper();
+    for (const viewer of this.viewers.values())
+      viewer.push({ _tag: "closed", reason: "Desktop live view was turned off on this machine." });
   }
 
   shutdown(): void {
     this.stopListening();
     this.cancelIdleStop();
     this.stopHelper();
+    void this.dropHostLease();
   }
 
   async input(viewerId: string, raw: unknown): Promise<void> {
     const viewer = this.viewers.get(viewerId);
     const message = asRecord(raw);
-    if (!viewer?.canOperate || !message) return;
+    if (!viewer?.canOperate || !message || !this.enabled) return;
     const control = desktopLiveControl.control;
     try {
       switch (message.type) {
         case "takeControl":
-          await control.take(viewerId);
-          return;
+          return await this.take(viewerId);
         case "releaseControl":
-          await control.release(viewerId, async () => {
-            this.releaseKeys(viewer);
-            this.helper?.send({ t: "release" });
-          });
-          return;
+          return await desktopLiveControl.release(viewerId, () => this.releaseInput(viewer));
         case "reload":
           if (this.helper === null) this.startHelper();
           return;
@@ -232,15 +273,21 @@ export class DesktopLiveViewHub {
         case "wheel": {
           const point = this.point(message);
           if (!point) return;
+          const dx = clampWheel(message.deltaX);
+          const dy = clampWheel(message.deltaY);
           return await control.humanLatest(
             viewerId,
-            `${WHEEL_KEY}:${Math.sign(finite(message.deltaX))}:${Math.sign(finite(message.deltaY))}`,
-            { ...point, dx: finite(message.deltaX), dy: finite(message.deltaY) },
+            `${WHEEL_KEY}:${Math.sign(dx)}:${Math.sign(dy)}`,
+            { ...point, dx, dy },
             async (wheel) => {
               this.helper?.send({ t: "move", x: wheel.x, y: wheel.y });
               this.helper?.send({ t: "wheel", dx: wheel.dx, dy: wheel.dy });
             },
-            (waiting, next) => ({ ...next, dx: waiting.dx + next.dx, dy: waiting.dy + next.dy }),
+            (waiting, next) => ({
+              ...next,
+              dx: clampWheel(waiting.dx + next.dx),
+              dy: clampWheel(waiting.dy + next.dy),
+            }),
           );
         }
         case "key":
@@ -255,6 +302,60 @@ export class DesktopLiveViewHub {
       // Not this viewer's turn, or control changed underneath; the next control message says so.
       this.broadcastControl();
     }
+  }
+
+  /** Takes the host-wide lease first, so agents in other T3 servers on this login stop too. */
+  private async take(viewerId: string) {
+    const controller = desktopLiveControl.humanController;
+    if (controller === viewerId) return;
+    if (controller !== null) throw new Error("Another viewer controls the desktop.");
+    if (this.acquireHostLease !== null && this.hostLease === null) {
+      const deadline = performance.now() + LEASE_WAIT_MS;
+      let lease = await this.acquireHostLease();
+      while (lease === null && performance.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, LEASE_RETRY_MS));
+        if (desktopLiveControl.humanController !== null) break;
+        lease = await this.acquireHostLease();
+      }
+      if (lease === null) throw new Error("An agent is still using the desktop.");
+      if (desktopLiveControl.humanController !== null) {
+        await lease.release();
+        throw new Error("Another viewer took control first.");
+      }
+      this.hostLease = lease;
+    }
+    try {
+      await desktopLiveControl.control.take(viewerId);
+    } catch (cause) {
+      await this.dropHostLease();
+      throw cause;
+    }
+  }
+
+  private async dropHostLease() {
+    const lease = this.hostLease;
+    this.hostLease = null;
+    await lease?.release().catch(() => undefined);
+  }
+
+  /** Releases everything the viewer held and waits until the helper applied it. */
+  private async releaseInput(viewer: HubViewer | undefined) {
+    viewer?.pressedKeys.clear();
+    const helper = this.helper;
+    if (helper !== null) {
+      const id = ++this.nextRelease;
+      const applied = new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, RELEASE_ACK_TIMEOUT_MS);
+        this.releaseAcks.set(id, () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+      helper.send({ t: "release", id });
+      await applied;
+      this.releaseAcks.delete(id);
+    }
+    await this.dropHostLease();
   }
 
   private async mouse(viewerId: string, message: Record<string, unknown>) {
@@ -281,8 +382,19 @@ export class DesktopLiveViewHub {
     if (message.action === "down") {
       const keysym = keysymForKey(key, code);
       if (keysym === null) return;
+      // Shortcuts such as the viewer's Copy arrive as one key with a modifier mask.
+      const held = new Set(viewer.pressedKeys.values());
+      const missing = MODIFIER_KEYSYMS.filter(
+        ([bit, keysyms]) =>
+          (finite(message.modifiers) & bit) !== 0 &&
+          !keysyms.includes(keysym) &&
+          !keysyms.some((each) => held.has(each)),
+      ).map(([, keysyms]) => keysyms[0]!);
+      for (const modifier of missing) this.helper?.send({ t: "key", keysym: modifier, down: true });
       viewer.pressedKeys.set(code || key, keysym);
       this.helper?.send({ t: "key", keysym, down: true });
+      for (const modifier of missing.toReversed())
+        this.helper?.send({ t: "key", keysym: modifier, down: false });
     } else if (message.action === "up") {
       const keysym = viewer.pressedKeys.get(code || key) ?? keysymForKey(key, code);
       viewer.pressedKeys.delete(code || key);
@@ -291,16 +403,12 @@ export class DesktopLiveViewHub {
   }
 
   private typeText(text: string) {
-    for (const character of text.slice(0, 4000)) {
+    const keysyms: Array<number> = [];
+    for (const character of [...text].slice(0, MAX_TEXT_CHARACTERS)) {
       const keysym = keysymForCodePoint(character.codePointAt(0) ?? 0);
-      if (keysym === null) continue;
-      this.helper?.send({ t: "key", keysym, down: true });
-      this.helper?.send({ t: "key", keysym, down: false });
+      if (keysym !== null) keysyms.push(keysym);
     }
-  }
-
-  private releaseKeys(viewer: HubViewer) {
-    viewer.pressedKeys.clear();
+    if (keysyms.length > 0) this.helper?.send({ t: "text", keysyms });
   }
 
   /** Input arrives in the viewport's coordinate space; anything outside it is clamped. */
@@ -341,6 +449,7 @@ export class DesktopLiveViewHub {
 
   private startHelper() {
     this.lastFrame = null;
+    if (!this.enabled) return;
     if (this.crashGuard?.isTripped()) {
       this.setState("unavailable", CRASH_GUARD_DETAIL);
       return;
@@ -376,28 +485,35 @@ export class DesktopLiveViewHub {
       onExit: () => {
         if (this.helper !== helper) return;
         this.helper = null;
-        this.clearConsentTimer();
+        this.clearStartTimer();
+        this.ackPendingReleases();
         if (tripIfCrashed()) this.setState("unavailable", CRASH_GUARD_DETAIL);
-        else if (this.state === "starting" || this.state === "consent" || this.state === "streaming")
+        else if (
+          this.state === "starting" ||
+          this.state === "consent" ||
+          this.state === "streaming"
+        )
           this.setState("unavailable", "The desktop capture stopped.");
       },
     });
     this.helper = helper;
+    // A restore token the portal ignores still shows the dialog, so the deadline always runs.
+    this.startTimer = setTimeout(() => {
+      this.startTimer = null;
+      if (this.helper !== helper || this.state === "streaming") return;
+      this.stopHelper();
+      this.setState("unavailable", "Nobody answered the screen sharing prompt on the machine.");
+    }, CONSENT_TIMEOUT_MS);
+    this.startTimer.unref?.();
   }
 
   private onHelperStatus(status: Record<string, unknown>) {
     switch (status.type) {
       case "consent":
-        if (status.restorable === true) return;
-        this.setState("consent");
-        this.clearConsentTimer();
-        this.consentTimer = setTimeout(() => {
-          this.stopHelper();
-          this.setState("unavailable", "Nobody answered the screen sharing prompt on the machine.");
-        }, CONSENT_TIMEOUT_MS);
+        if (status.restorable !== true) this.setState("consent");
         return;
       case "ready": {
-        this.clearConsentTimer();
+        this.clearStartTimer();
         const width = finite(status.width);
         const height = finite(status.height);
         if (width > 0 && height > 0) {
@@ -408,6 +524,9 @@ export class DesktopLiveViewHub {
         this.setState("streaming");
         return;
       }
+      case "released":
+        this.releaseAcks.get(finite(status.id))?.();
+        return;
       case "denied":
         this.stopHelper();
         this.setState("denied");
@@ -424,17 +543,23 @@ export class DesktopLiveViewHub {
     }
   }
 
+  private ackPendingReleases() {
+    for (const ack of this.releaseAcks.values()) ack();
+    this.releaseAcks.clear();
+  }
+
   private stopHelper() {
-    this.clearConsentTimer();
+    this.clearStartTimer();
     const helper = this.helper;
     this.helper = null;
     this.lastFrame = null;
+    this.ackPendingReleases();
     helper?.stop();
   }
 
-  private clearConsentTimer() {
-    if (this.consentTimer !== null) clearTimeout(this.consentTimer);
-    this.consentTimer = null;
+  private clearStartTimer() {
+    if (this.startTimer !== null) clearTimeout(this.startTimer);
+    this.startTimer = null;
   }
 
   private scheduleIdleStop() {
@@ -514,6 +639,8 @@ const HELPER_ENVIRONMENT_ALLOWLIST = [
 ] as const;
 
 const MAX_HELPER_MESSAGE_BYTES = 32 * 1024 * 1024;
+const MAX_HELPER_INPUT_BACKLOG_BYTES = 256 * 1024;
+const MAX_VIEWERS = 8;
 const FRAME_KIND = 0x46;
 const STATUS_KIND = 0x4a;
 
@@ -585,7 +712,11 @@ export const spawnPortalHelper =
     child.on("exit", exit);
     return {
       send: (command) => {
-        if (!exited && child.stdin.writable) child.stdin.write(`${JSON.stringify(command)}\n`);
+        if (exited || !child.stdin.writable) return;
+        // A helper that stops reading gets no more input piling up; releases still go through.
+        if (child.stdin.writableLength > MAX_HELPER_INPUT_BACKLOG_BYTES && command.t !== "release")
+          return;
+        child.stdin.write(`${JSON.stringify(command)}\n`);
       },
       stop: () => {
         if (exited) return;
@@ -599,6 +730,20 @@ export const spawnPortalHelper =
   };
 
 export const DESKTOP_LIVE_VIEW_PLATFORMS: ReadonlySet<NodeJS.Platform> = new Set(["linux"]);
+
+/** The lease agents take for every desktop call, held for as long as a person drives. */
+const hostLeaseAcquirer = (platform: NodeJS.Platform) => async () => {
+  try {
+    const lease = new ComputerUseLinuxHostLease({
+      platform,
+      scopeKey: await userLeaseScopeKey({ platform }),
+    });
+    return await lease.acquire();
+  } catch {
+    // Busy (an agent call is running), or no lease is possible here; the hub retries or refuses.
+    return null;
+  }
+};
 
 export const layer = Layer.effect(
   DesktopLiveView,
@@ -620,7 +765,12 @@ export const layer = Layer.effect(
         testSource,
       }),
       {
-        ...(testSource ? {} : { crashGuard: fileCrashGuard(NodePath.join(stateDir, "screencast-crashed")) }),
+        ...(testSource
+          ? {}
+          : { crashGuard: fileCrashGuard(NodePath.join(stateDir, "screencast-crashed")) }),
+        ...(DESKTOP_LIVE_VIEW_PLATFORMS.has(platform)
+          ? { acquireHostLease: hostLeaseAcquirer(platform) }
+          : {}),
         // The helper reports codes and GStreamer messages only, never frames or input.
         onHelperError: (status) =>
           void runFork(
@@ -633,6 +783,19 @@ export const layer = Layer.effect(
       },
     );
     yield* Effect.addFinalizer(() => Effect.sync(() => hub.shutdown()));
+    // Turning the setting off ends every open viewer, not only the next connection.
+    hub.setEnabled(
+      yield* settings.getSettings.pipe(
+        Effect.map((current) => current.enableDesktopLiveView),
+        Effect.orElseSucceed(() => false),
+      ),
+    );
+    yield* (yield* settings.subscribeChanges).pipe(
+      Stream.runForEach((current) =>
+        Effect.sync(() => hub.setEnabled(current.enableDesktopLiveView)),
+      ),
+      Effect.forkScoped,
+    );
     return DesktopLiveView.of({
       attachViewer: Effect.fn("DesktopLiveView.attachViewer")(function* (input) {
         if (!DESKTOP_LIVE_VIEW_PLATFORMS.has(platform)) {
@@ -643,6 +806,9 @@ export const layer = Layer.effect(
           Effect.orElseSucceed(() => false),
         );
         if (!enabled) return yield* new DesktopLiveViewUnavailableError({ reason: "disabled" });
+        if (hub.viewerCount >= MAX_VIEWERS) {
+          return yield* new DesktopLiveViewUnavailableError({ reason: "full" });
+        }
         const output = yield* Queue.make<DesktopLiveViewOutput>({
           capacity: VIEWER_OUTPUT_LIMIT,
           strategy: "dropping",
@@ -653,7 +819,7 @@ export const layer = Layer.effect(
           // A stalled viewer keeps only the latest state it cannot do without.
           const dropped = runSyncExit(Queue.clear(output));
           if (dropped._tag === "Failure") return;
-          const kept = (["desktop", "viewport", "control"] as const).flatMap(
+          const kept = (["desktop", "viewport", "control", "closed"] as const).flatMap(
             (tag) => [...dropped.value, next].findLast((item) => item._tag === tag) ?? [],
           );
           for (const item of kept) Queue.offerUnsafe(output, item);

@@ -25,6 +25,8 @@ const settle = (work: Promise<unknown>) =>
 class DesktopLiveControl {
   private readonly listeners = new Set<() => void>();
   private readonly agentCalls = new Set<Promise<void>>();
+  /** Hand-backs in progress: agents stay out until the person's keys and buttons are released. */
+  private handingBack = 0;
   readonly control: SessionControl = new SessionControl(null, () => {
     // Runs inside the ownership change, so the drain is queued ahead of the person's first input.
     if (this.control.controller !== null) {
@@ -42,9 +44,25 @@ class DesktopLiveControl {
     return this.control.controller;
   }
 
+  /** Hands control back once `cleanup` (releasing held input) has run; agents wait for both. */
+  async release(viewerId: string, cleanup: () => Promise<void>): Promise<void> {
+    this.handingBack += 1;
+    try {
+      await this.control.release(viewerId, cleanup);
+    } finally {
+      this.handingBack -= 1;
+    }
+  }
+
+  /** As `release`, for a viewer that went away; a no-op unless it held control. */
+  async disconnect(viewerId: string, cleanup: () => Promise<void>): Promise<void> {
+    if (this.control.controller === viewerId) await this.release(viewerId, cleanup);
+  }
+
   /** Runs an agent's desktop call unless a person holds control. Calls are not serialized here. */
   agent<A>(run: () => Promise<A>): Promise<A> {
-    if (this.control.controller !== null) return Promise.reject(new DesktopHumanControlError());
+    if (this.control.controller !== null || this.handingBack > 0)
+      return Promise.reject(new DesktopHumanControlError());
     const work = run();
     const settled = settle(work).finally(() => this.agentCalls.delete(settled));
     this.agentCalls.add(settled);

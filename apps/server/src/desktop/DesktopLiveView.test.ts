@@ -33,7 +33,12 @@ function fakeSpawner() {
     };
     helpers.push(helper);
     return {
-      send: (command) => helper.commands.push(command),
+      send: (command) => {
+        helper.commands.push(command);
+        // The real helper acknowledges a release once it applied it.
+        if (command.t === "release")
+          queueMicrotask(() => events.onStatus({ type: "released", id: command.id }));
+      },
       stop: () => {
         helper.stopped = true;
       },
@@ -191,17 +196,91 @@ describe("DesktopLiveViewHub", () => {
       // The release sends the keysym the press did, even if Shift changed the key meanwhile.
       { t: "key", keysym: 0x41, down: true },
       { t: "key", keysym: 0x41, down: false },
-      { t: "key", keysym: 0x6f, down: true },
-      { t: "key", keysym: 0x6f, down: false },
-      { t: "key", keysym: 0x6b, down: true },
-      { t: "key", keysym: 0x6b, down: false },
-      { t: "key", keysym: 0xff0d, down: true },
-      { t: "key", keysym: 0xff0d, down: false },
+      // Text goes as one batch.
+      { t: "text", keysyms: [0x6f, 0x6b, 0xff0d] },
     ]);
 
     await hub.input("driver", { type: "releaseControl" });
-    expect(helper.commands.at(-1)).toEqual({ t: "release" });
+    expect(helper.commands.at(-1)).toMatchObject({ t: "release" });
     expect(driver.last("control")?.controller).toBe("agent");
+  });
+
+  it("presses the modifiers of a shortcut that arrives as one key with a mask", async () => {
+    const { hub, helpers } = makeHub();
+    hub.attach(viewer("driver").entry);
+    streaming(helpers[0]!);
+    await hub.input("driver", { type: "takeControl" });
+    await hub.input("driver", {
+      type: "key",
+      action: "down",
+      key: "c",
+      code: "KeyC",
+      modifiers: 2,
+    });
+    await hub.input("driver", { type: "key", action: "up", key: "c", code: "KeyC", modifiers: 2 });
+    expect(helpers[0]!.commands).toEqual([
+      { t: "key", keysym: 0xffe3, down: true },
+      { t: "key", keysym: 0x63, down: true },
+      { t: "key", keysym: 0xffe3, down: false },
+      { t: "key", keysym: 0x63, down: false },
+    ]);
+  });
+
+  it("clamps wheel deltas a client could inflate", async () => {
+    const { hub, helpers } = makeHub();
+    hub.attach(viewer("driver").entry);
+    streaming(helpers[0]!);
+    await hub.input("driver", { type: "takeControl" });
+    await hub.input("driver", { type: "wheel", x: 5, y: 5, deltaX: 0, deltaY: 1e308 });
+    expect(helpers[0]!.commands.at(-1)).toEqual({ t: "wheel", dx: 0, dy: 2400 });
+  });
+
+  it("closes every viewer and the capture when the setting is turned off", async () => {
+    const { hub, helpers } = makeHub();
+    const first = viewer("first");
+    hub.attach(first.entry);
+    streaming(helpers[0]!);
+    hub.setEnabled(false);
+    expect(helpers[0]!.stopped).toBe(true);
+    expect(first.last("closed")?.reason).toContain("turned off");
+    await hub.input("first", { type: "reload" });
+    expect(helpers).toHaveLength(1);
+  });
+
+  it("keeps agents out until the person's held input is released", async () => {
+    const { hub, helpers } = makeHub();
+    hub.attach(viewer("driver").entry);
+    streaming(helpers[0]!);
+    await hub.input("driver", { type: "takeControl" });
+    let agentRan = false;
+    const releasing = hub.input("driver", { type: "releaseControl" });
+    // Ownership is already gone, but the release is not yet acknowledged.
+    await desktopLiveControl.agent(async () => (agentRan = true)).catch(() => undefined);
+    expect(agentRan).toBe(false);
+    await releasing;
+    await desktopLiveControl.agent(async () => (agentRan = true));
+    expect(agentRan).toBe(true);
+  });
+
+  it("holds the host-wide lease while a person drives, waiting out a busy one", async () => {
+    let busy = 2;
+    const events: Array<string> = [];
+    const spawner = fakeSpawner();
+    const hub = new DesktopLiveViewHub(spawner.spawn, {
+      acquireHostLease: async () => {
+        if (busy-- > 0) return null;
+        events.push("acquired");
+        return { release: async () => void events.push("released") };
+      },
+    });
+    hubs.push(hub);
+    hub.attach(viewer("driver").entry);
+    streaming(spawner.helpers[0]!);
+    await hub.input("driver", { type: "takeControl" });
+    expect(events).toEqual(["acquired"]);
+    expect(desktopLiveControl.humanController).toBe("driver");
+    await hub.input("driver", { type: "releaseControl" });
+    expect(events).toEqual(["acquired", "released"]);
   });
 
   it("ignores input from a read-only viewer", async () => {
@@ -223,7 +302,7 @@ describe("DesktopLiveViewHub", () => {
     await hub.input("driver", { type: "takeControl" });
     await hub.detach("driver");
     expect(desktopLiveControl.humanController).toBeNull();
-    expect(helpers[0]!.commands).toContainEqual({ t: "release" });
+    expect(helpers[0]!.commands.some((command) => command.t === "release")).toBe(true);
     expect(helpers[0]!.stopped).toBe(false);
     vi.advanceTimersByTime(20_000);
     expect(helpers[0]!.stopped).toBe(true);

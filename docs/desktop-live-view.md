@@ -25,6 +25,13 @@ call, and desktop approvals only show in the web app.
 
 The live view adds a capture source and one route; it does not add a new viewer.
 
+Related upstream work it should line up with rather than duplicate: draft #16531 floats the window
+a computer-use agent drives over the chat, polling it every 1.5 s through Cua's
+`get_window_state` (web and desktop, watch only); draft #28050 lets Claude and Codex drive remote
+desktops through agentcast's MCP (agent input only, refuses on UAC). Neither gives a person a live
+view with takeover on every client, and both could feed the same viewer: #16531's frames for a
+single window, this route for the whole screen.
+
 ## Architecture
 
 ```
@@ -83,14 +90,22 @@ Frames may be smaller than the viewport; clients map from the drawn frame to the
   dialog on the machine itself is a second, OS-level consent, and GNOME shows its screen-sharing
   indicator in the top bar for as long as the capture runs; stopping it there ends the session for
   every viewer (`ended`).
-- **Who may watch.** The whole screen is more than one preview tab, so watching already needs
-  `preview:operate` (preview tabs need `orchestration:read`). Upstream this should become its own
-  scope (for example `desktop:view` / `desktop:operate`) that a pairing or T3 Connect grant does
-  not include by default; that also answers the concern in #32098 that cloud authorization alone
-  can reach a machine.
+- **Who may watch and drive.** Its own scope, `desktop:operate` ("Watch and control the
+  desktop"), which no standard client grant includes: enabling the setting does not turn existing
+  preview or Connect grants into whole-screen access. A device gets it only when someone pairs it
+  with that permission (pairing dialog or `t3 auth pairing create --scope desktop:operate`).
+  `interactive=false` narrows a socket further to watching. This also answers the concern in
+  #32098 that cloud authorization alone can reach a machine.
+- **Revocation and switch-off.** A revoked or expired session loses its socket at once (the route
+  races it against `SessionStore.awaitInvalidation`, as #32245 does for preview streams). Turning
+  the setting off closes every open viewer and stops the capture, and `reload` cannot restart it.
 - **Who may drive.** One viewer at a time, as with preview tabs: `takeControl` fails while another
   viewer holds control, and a viewer that disconnects (phone locked, tab closed) hands control
-  back, releasing every key and button it held.
+  back. Taking control also takes the host-wide desktop lease that agents of every T3 server on
+  this OS login take for each call, so a second server's agent cannot act during a takeover either.
+- **Bounded input.** At most 64 input messages per viewer in flight, text in batches of up to 1000
+  characters, wheel deltas clamped, and the helper's input pipe capped at 256 KB (releases always
+  pass). At most 8 viewers per machine.
 - **Passwords.** While a person holds control, every agent desktop call is refused, observation
   included, so no screenshot reaches a model while a password or code is on screen. The server
   never stores or logs frames or input; input messages are not traced. On the phone, the text
@@ -98,20 +113,22 @@ Frames may be smaller than the viewport; clients map from the drawn frame to the
   physical keyboard.
 - **Child process.** The helper gets an allowlisted environment (session bus, display, `HOME`,
   `PATH`, locale), no T3 secrets, and only the stdin/stdout pipes.
-- **Not done in the prototype:** an audit line per viewer (who watched, who drove, when), a
-  per-viewer "watching" notice on the machine, and a cap on concurrent viewers.
+- **Not done in the prototype:** an audit line per viewer (who watched, who drove, when) and a
+  per-viewer "watching" notice on the machine.
 
 ## Agent behaviour during a takeover
 
 - `takeControl` reserves control immediately; desktop calls that are already running finish
   before the person's first input is applied (the drain is queued inside the ownership change).
 - A call that starts while a person holds control fails with a server-authored message the agent
-  sees: *"A person is using this desktop through T3's live view. Wait until they hand it back,
-  then take a new screenshot before acting."* It runs after the approval card, so an approval
+  sees: _"A person is using this desktop through T3's live view. Wait until they hand it back,
+  then take a new screenshot before acting."_ It runs after the approval card, so an approval
   answered during the takeover still acts on nothing. Agent calls are not serialized by this
   gate; the host lease keeps its existing busy semantics.
-- After `releaseControl` the next call runs normally. The agent is told to take a new screenshot
-  because the screen changed under it.
+- Handing back keeps agents out until the person's held keys and buttons are released: the hub
+  asks the helper to release everything and waits for its acknowledgement before agents may act.
+- After that the next call runs normally. The agent is told to take a new screenshot because the
+  screen changed under it.
 - Next step (not in this prototype): `request_human_takeover` (reason, optional hint), modelled on
   `request_secret`: a card in the thread with **Open live view** and **Done**, a phone push that
   deep-links to the live view (`?desktopLiveView=…` on web, `settings/environments/:id/desktop`
@@ -139,10 +156,13 @@ Consequences:
   from the server. The hub then writes `desktop-live-view/screencast-crashed` into the server state
   directory and never starts a screen stream on that machine again on its own; `reload` does not
   bypass it. Deleting the file re-enables it. At most one crash per machine.
-- **Fallback capture, next step.** For such hosts: frames from `org.gnome.Shell.Screenshot`
-  (what `gnome-screenshot` uses, already proven on the test machines) at 1–3 fps, input through a
-  RemoteDesktop session *without* a screen stream (relative pointer motion after homing to a corner,
-  keysyms as now). Enough for a password or a captcha; it needs its own one-time consent.
+- **Fallback capture, next step, to be verified.** For such hosts: frames from screenshots at 1–3
+  fps and input through a RemoteDesktop session _without_ a screen stream. Open points: GNOME 46
+  only lets allowlisted callers use `org.gnome.Shell.Screenshot` directly, so frames would come
+  through `gnome-screenshot` (as the agent toolkit does on these machines) or the Screenshot
+  portal; and without a stream there is only relative pointer motion, so the viewer needs a
+  trackpad-style mode or cursor feedback rather than absolute clicks. Enough for a password or a
+  captcha; it needs its own one-time consent.
 - **Upstream GNOME.** The crash deserves a mutter report with the trace; T3 should not paper over it.
 - **Test source.** `T3CODE_DESKTOP_LIVE_VIEW_TEST_SOURCE=1` makes the helper stream a moving 4K test
   pattern instead (a click toggles the pattern), so the whole T3 side can be checked end to end on a
@@ -169,34 +189,43 @@ Consequences:
   credentials outside T3, another port, and a separate client on each device.
 - **Reusing `computer-use-linux`'s portal session:** it holds a keyboard-only RemoteDesktop grant
   without a stream, and restore tokens are single-use, so sharing it would break its persistence.
-- **libei/InputCapture:** for capturing input on the host, not injecting it.
+- **libei:** a real alternative for the input half. RemoteDesktop v2 can hand out an EIS
+  connection (`ConnectToEIS`) for emulated input; worth adopting where the portal offers it. The
+  InputCapture portal is the other direction (capturing the host's input) and does not apply.
 
-The portal session is the only option that works on GNOME, KDE and wlroots with OS-level consent,
-needs no extra packages on Ubuntu, and gives frames and input from one grant.
+On GNOME and KDE the RemoteDesktop portal gives frames and input from one grant with OS-level
+consent and needs no extra packages on Ubuntu. Plain `xdg-desktop-portal-wlr` implements
+ScreenCast and Screenshot but not RemoteDesktop, so wlroots compositors would get a view without
+input; the helper should probe the portal interfaces and report what it can do.
 
 ## Windows and macOS
 
 Both stay behind the same route, hub, protocol, control and viewers; only the helper changes.
 
-- **Windows:** a small helper using Windows.Graphics.Capture (or DXGI Desktop Duplication) and
-  `SendInput`. Limits to state up front: the secure desktop (UAC prompts, Ctrl+Alt+Del, the lock
-  screen) can neither be captured nor driven from the user session; a UAC prompt needs
-  "prompt on the normal desktop" or a service running as SYSTEM, which is out of scope. Elevated
-  windows reject input from a non-elevated helper (UIPI). There is no OS consent dialog, so the T3
-  setting is the only gate; the fork's Windows backend (Windows-MCP) has no stream to reuse.
+- **Windows:** a small helper using DXGI Desktop Duplication, or Windows.Graphics.Capture through
+  its monitor interop (`CreateForMonitor`), which skips the user-facing picker but draws a capture
+  border where the system requires one; input through `SendInput`. Neither path asks the person
+  for consent, so the T3 setting and scope are the gates. Limits to state up front: the secure
+  desktop (UAC prompts, Ctrl+Alt+Del, the lock screen) can neither be captured nor driven from the
+  user session, and elevated windows reject input from a non-elevated helper (UIPI); the helper
+  should report both as explicit "unavailable" states. A UAC prompt needs "prompt on the normal
+  desktop" or a SYSTEM service, which is out of scope. The fork's Windows backend (Windows-MCP)
+  has no stream to reuse.
 - **macOS:** ScreenCaptureKit for frames and `CGEventPost` for input, which need the Screen
-  Recording and Accessibility permissions. They attach to a stable signed app, which is exactly
-  the helper proposed in #18803; the live view would be one of its capabilities. Secure input
+  Recording and Accessibility permissions. Those attach to the identity of the process that does
+  the capture and posting, so both must run inside a stable signed GUI helper, which is exactly
+  the helper proposed in #18803; signing alone grants nothing to other subprocesses. Secure input
   fields still accept posted events; the login window and FileVault unlock do not.
 
 ## Evidence (2026-11-07)
 
 Verified:
 
-- Unit tests (`apps/server/src/desktop/DesktopLiveView.test.ts`, 11 tests, plus the existing bridge
+- Unit tests (`apps/server/src/desktop/DesktopLiveView.test.ts`, 16 tests, plus the existing bridge
   tests): keysyms, fan-out, consent and refusal states, input only from the controller, hand-back on
   disconnect, agent refused during a takeover and drained before the person's first input, crash
-  guard.
+  guard, release acknowledgement before agents return, host lease held while a person drives,
+  modifier masks, wheel clamping, switch-off closing every viewer.
 - Typecheck of server, contracts, client-runtime, web and mobile.
 - On the real GNOME desktop: the consent dialog appears once on the machine, the restore token is
   written (`0600`) and the next start restores silently; the helper stops 20 s after the last viewer.

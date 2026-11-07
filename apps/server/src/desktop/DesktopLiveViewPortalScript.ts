@@ -158,7 +158,8 @@ def scroll(dx, dy):
     # Browsers report about 100 per wheel notch; a notch is one discrete step here.
     for axis, delta in ((0, dy), (1, dx)):
         wheel[axis] += delta
-        steps = int(wheel[axis] / 100)
+        wheel[axis] = max(-5000.0, min(5000.0, wheel[axis]))
+        steps = max(-50, min(50, int(wheel[axis] / 100)))
         if steps:
             wheel[axis] -= steps * 100
             notify("NotifyPointerAxisDiscrete", "(oa{sv}ui)", (state["session"], {}, axis, steps))
@@ -166,11 +167,22 @@ def scroll(dx, dy):
 
 def handle(message):
     kind = message.get("t")
+    if kind == "release":
+        # Acknowledged once applied, so control goes back only with nothing held down.
+        if not TEST_SOURCE:
+            release_all()
+        status({"type": "released", "id": int(message.get("id", 0))})
+        return
     if TEST_SOURCE:
         source = state["pipeline"].get_by_name("source") if state["pipeline"] else None
         if kind == "button" and message.get("down") and source is not None:
             # videotestsrc patterns: 1 snow, 18 ball.
             source.set_property("pattern", 1 if int(source.get_property("pattern")) != 1 else 18)
+        return
+    if kind == "text":
+        for keysym in list(message.get("keysyms", []))[:1000]:
+            key(int(keysym), True)
+            key(int(keysym), False)
         return
     if kind == "move":
         notify(
@@ -183,15 +195,14 @@ def handle(message):
         scroll(float(message.get("dx", 0)), float(message.get("dy", 0)))
     elif kind == "key":
         key(int(message["keysym"]), bool(message.get("down")))
-    elif kind == "release":
-        release_all()
 
 
 def read_input():
     for line in sys.stdin.buffer:
         try:
             handle(json.loads(line))
-        except (ValueError, KeyError, TypeError):
+        except Exception:
+            # One bad command must not end input handling for the rest of the session.
             continue
     GLib.idle_add(shutdown)
 

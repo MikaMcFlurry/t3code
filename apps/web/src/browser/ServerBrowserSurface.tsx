@@ -972,7 +972,9 @@ export function ServerBrowserSurface(props: {
         // The page can be invisible beneath an empty or unreachable state; reconnect must remain reachable.
         <div className="visible absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-background p-3 text-center">
           <p role="alert" className="text-xs text-muted-foreground">
-            Browser connection was refused.
+            {desktop
+              ? "This device may not watch the desktop. Pair it with the 'Watch and control the desktop' permission."
+              : "Browser connection was refused."}
           </p>
           <Button
             variant="outline"

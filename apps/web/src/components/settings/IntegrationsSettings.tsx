@@ -1179,6 +1179,9 @@ function AgentDesktopApprovalSetting() {
 function DesktopLiveViewSetting() {
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
+  const { connectedEnvironments } = useSettingsScope();
+  // Open shows one machine's screen; with several in scope it would have to guess which.
+  const machine = connectedEnvironments.length === 1 ? connectedEnvironments[0]! : null;
 
   return (
     <SettingsRow
@@ -1200,8 +1203,12 @@ function DesktopLiveViewSetting() {
       }
       control={
         <div className="flex items-center gap-2">
-          {settings.enableDesktopLiveView ? (
-            <Button variant="outline" size="xs" onClick={() => openDesktopLiveView()}>
+          {settings.enableDesktopLiveView && machine !== null ? (
+            <Button
+              variant="outline"
+              size="xs"
+              onClick={() => openDesktopLiveView(machine.environmentId)}
+            >
               Open
             </Button>
           ) : null}

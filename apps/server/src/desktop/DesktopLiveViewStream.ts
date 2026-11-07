@@ -1,5 +1,5 @@
 import * as NodeHttpServerRequest from "@effect/platform-node/NodeHttpServerRequest";
-import { AuthPreviewOperateScope } from "@t3tools/contracts";
+import { AuthDesktopOperateScope } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -7,6 +7,7 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as Socket from "effect/socket/Socket";
 
 import { authenticateMediaRequest } from "../auth/http.ts";
+import * as SessionStore from "../auth/SessionStore.ts";
 import { requestUrl } from "../requestUrl.ts";
 import * as DesktopLiveView from "./DesktopLiveView.ts";
 
@@ -14,6 +15,8 @@ const DESKTOP_STREAM_ROUTE_PREFIX = "/api/desktop-stream";
 /** The server does not offer a live view: turned off, or no supported desktop. */
 const UNAVAILABLE_CODE = 4404;
 const MAX_SOCKET_BUFFER_BYTES = 8 * 1024 * 1024;
+/** Input still being applied for one viewer; more is dropped, as a person cannot outrun this. */
+const MAX_PENDING_INPUT = 64;
 const textDecoder = new TextDecoder();
 
 const parseMessage = (chunk: Uint8Array | string): unknown => {
@@ -34,6 +37,7 @@ const isAck = (message: unknown) =>
  */
 const makeHandler = Effect.fnUntraced(function* (
   liveView: DesktopLiveView.DesktopLiveView["Service"],
+  sessions: SessionStore.SessionStore["Service"],
 ) {
   const request = yield* HttpServerRequest.HttpServerRequest;
   const url = requestUrl(request);
@@ -44,8 +48,8 @@ const makeHandler = Effect.fnUntraced(function* (
   ) {
     return HttpServerResponse.text("Not Found", { status: 404 });
   }
-  // The whole screen is more than one preview tab: watching needs the operate scope too.
-  yield* authenticateMediaRequest(AuthPreviewOperateScope);
+  // The whole screen is more than a preview tab: its own scope, outside standard client grants.
+  const session = yield* authenticateMediaRequest(AuthDesktopOperateScope);
   const canOperate = url.value.searchParams.get("interactive") !== "false";
   return yield* Effect.scoped(
     Effect.gen(function* () {
@@ -73,6 +77,7 @@ const makeHandler = Effect.fnUntraced(function* (
       // frames instead of falling behind, and input replies never queue behind images.
       let inFlight = false;
       let pending: Uint8Array | null = null;
+      let pendingInput = 0;
       const write = (data: Uint8Array | string) =>
         Effect.suspend(() => {
           const bytes = typeof data === "string" ? Buffer.byteLength(data) : data.byteLength;
@@ -92,6 +97,11 @@ const makeHandler = Effect.fnUntraced(function* (
             pending = output.data;
             return Effect.void;
           }
+          if (output._tag === "closed") {
+            return writer
+              .write(new Socket.CloseEvent(UNAVAILABLE_CODE, output.reason))
+              .pipe(Effect.andThen(Effect.interrupt));
+          }
           const { _tag: type, ...data } = output;
           return write(
             JSON.stringify(
@@ -103,9 +113,15 @@ const makeHandler = Effect.fnUntraced(function* (
       const receive = Effect.fnUntraced(function* (chunk: Uint8Array | string) {
         const message = parseMessage(chunk);
         if (!isAck(message)) {
-          return yield* canOperate
-            ? viewer.input(message).pipe(Effect.forkScoped, Effect.asVoid)
-            : Effect.void;
+          if (!canOperate || pendingInput >= MAX_PENDING_INPUT) return;
+          pendingInput += 1;
+          return yield* viewer
+            .input(message)
+            .pipe(
+              Effect.ensuring(Effect.sync(() => (pendingInput -= 1))),
+              Effect.forkScoped,
+              Effect.asVoid,
+            );
         }
         const next = pending;
         inFlight = false;
@@ -115,7 +131,18 @@ const makeHandler = Effect.fnUntraced(function* (
       const receiveInput = reader.pull.pipe(
         Effect.flatMap((chunks) => Effect.forEach(chunks, receive, { discard: true })),
       );
-      return yield* Effect.raceFirst(Effect.forever(sendOutput), Effect.forever(receiveInput));
+      // A revoked or expired session loses the screen at once, not at its next reconnect.
+      const revoked = sessions
+        .awaitInvalidation(session.sessionId, session.proofKeyThumbprint)
+        .pipe(
+          Effect.andThen(writer.write(new Socket.CloseEvent(1008, "session ended"))),
+          Effect.ignore,
+        );
+      yield* Effect.raceFirst(
+        Effect.raceFirst(Effect.forever(sendOutput), Effect.forever(receiveInput)),
+        revoked,
+      );
+      return HttpServerResponse.empty();
     }),
   ).pipe(Effect.orElseSucceed(() => HttpServerResponse.empty()));
 });
@@ -123,6 +150,7 @@ const makeHandler = Effect.fnUntraced(function* (
 export const routeLayer = HttpRouter.use((router) =>
   Effect.gen(function* () {
     const liveView = yield* DesktopLiveView.DesktopLiveView;
-    yield* router.add("GET", `${DESKTOP_STREAM_ROUTE_PREFIX}/*`, makeHandler(liveView));
+    const sessions = yield* SessionStore.SessionStore;
+    yield* router.add("GET", `${DESKTOP_STREAM_ROUTE_PREFIX}/*`, makeHandler(liveView, sessions));
   }),
 );
