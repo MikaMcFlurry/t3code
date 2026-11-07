@@ -2548,8 +2548,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           { threadId, runId: queuedRun.id, providerSessionIds: Array.from(busySessionIds) },
         );
         backgroundWorkWaits.add(threadId);
-        // A later send that keeps the busy session, such as a wake delivering its buffered
-        // background results, goes first: it can be what ends the work this send waits on.
+        // A later automatic send that keeps the busy session, such as a wake delivering its
+        // buffered background results, goes first: it can be what ends the work this send waits
+        // on. A user's sends keep their order.
         const sessionRun =
           options?.queuedRunId === undefined
             ? queuedRunsInDeliveryOrder(projection).find(
@@ -2557,6 +2558,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   run.id !== queuedRun.id &&
                   run.queueHeld !== true &&
                   run.freshContext !== true &&
+                  projection.messages.find((message) => message.id === run.userMessageId)
+                    ?.createdBy !== "user" &&
                   queuedRunModelSelection(projection, run).instanceId ===
                     activeProviderThread?.providerInstanceId,
               )
@@ -3109,7 +3112,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) {
     const sessionRunId = yield* startQueuedRunOnce(threadId, options);
     if (sessionRunId !== undefined) {
-      yield* startQueuedRunOnce(threadId, { queuedRunId: sessionRunId });
+      // Same failure and end context, so a failed provider still holds the queue.
+      yield* startQueuedRunOnce(threadId, { ...options, queuedRunId: sessionRunId });
     }
   });
 
