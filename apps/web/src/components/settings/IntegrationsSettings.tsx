@@ -7,6 +7,7 @@ import {
   AuthSettingsWriteScope,
   BrowserImportFailureReason,
   BROWSER_PROFILE_MAX_COUNT,
+  type AgentDesktopApproval,
   type BrowserLinkTarget,
   type BrowserProfile,
   BrowserSearchEngine,
@@ -1073,6 +1074,104 @@ function AgentBrowserAccessSetting() {
   );
 }
 
+function AgentDesktopAccessSetting() {
+  const { scope } = useSettingsScope();
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  const isProjectScope = scope.kind === "project" || scope.kind === "checkout";
+
+  return (
+    <SettingsRow
+      serverScoped
+      settingKeys={["enableAgentDesktopAccess"]}
+      {...searchableSetting("agent-desktop-access")}
+      description={
+        <>
+          {isProjectScope
+            ? "Allow agents in this project to see and control this machine's desktop."
+            : "Allow agents to see and control this machine's desktop. Projects can override it."}{" "}
+          Linux needs <code>computer-use-linux</code> on the server&apos;s PATH, and GNOME asks once
+          to share the screen. Windows needs <code>uv</code>; T3 runs Windows-MCP through it. Shell,
+          file, registry and process tools stay off. Applies when the agent session next starts.
+        </>
+      }
+      resetAction={
+        settings.enableAgentDesktopAccess !== DEFAULT_SERVER_SETTINGS.enableAgentDesktopAccess ? (
+          <SettingResetButton
+            label="default desktop control"
+            onClick={() =>
+              updateSettings({
+                enableAgentDesktopAccess: DEFAULT_SERVER_SETTINGS.enableAgentDesktopAccess,
+              })
+            }
+          />
+        ) : null
+      }
+      control={
+        <ScopedSwitch
+          settingKeys={["enableAgentDesktopAccess"]}
+          aria-label="Agent desktop control"
+          checked={settings.enableAgentDesktopAccess}
+          onCheckedChange={(enabled) => updateSettings({ enableAgentDesktopAccess: enabled })}
+        />
+      }
+    />
+  );
+}
+
+const DESKTOP_APPROVAL_LABELS: Record<AgentDesktopApproval, string> = {
+  "every-action": "Ask every time",
+  "full-access-threads": "Not in full access",
+  standing: "Never ask",
+};
+
+function AgentDesktopApprovalSetting() {
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+
+  return (
+    <SettingsRow
+      serverScoped
+      settingKeys={["agentDesktopApproval"]}
+      {...searchableSetting("agent-desktop-approval")}
+      description="When an agent's click, typing or other desktop action waits for your approval. Not in full access: threads running in full access act without asking. Never ask: a standing approval for every thread with desktop control. Stop or a new session still ends it."
+      resetAction={
+        settings.agentDesktopApproval !== DEFAULT_SERVER_SETTINGS.agentDesktopApproval ? (
+          <SettingResetButton
+            label="desktop approval"
+            onClick={() =>
+              updateSettings({ agentDesktopApproval: DEFAULT_SERVER_SETTINGS.agentDesktopApproval })
+            }
+          />
+        ) : null
+      }
+      control={
+        <Select
+          value={settings.agentDesktopApproval}
+          onValueChange={(value) => {
+            if (value === "every-action" || value === "full-access-threads" || value === "standing") {
+              updateSettings({ agentDesktopApproval: value });
+            }
+          }}
+        >
+          <SelectTrigger size="sm" className="w-full sm:w-44" aria-label="Desktop approval">
+            <SelectValue>{DESKTOP_APPROVAL_LABELS[settings.agentDesktopApproval]}</SelectValue>
+          </SelectTrigger>
+          <SelectPopup align="end" alignItemWithTrigger={false}>
+            {(Object.keys(DESKTOP_APPROVAL_LABELS) as ReadonlyArray<AgentDesktopApproval>).map(
+              (approval) => (
+                <SelectItem hideIndicator key={approval} value={approval}>
+                  {DESKTOP_APPROVAL_LABELS[approval]}
+                </SelectItem>
+              ),
+            )}
+          </SelectPopup>
+        </Select>
+      }
+    />
+  );
+}
+
 function BrowserAutoShowFloatingPreviewSetting({ disabled }: { readonly disabled: boolean }) {
   const autoShow = useClientSettings((settings) => settings.browserAutoShowFloatingPreview);
   const updateSettings = useUpdatePrimarySettings();
@@ -1584,6 +1683,8 @@ export function BrowserSettingsPanel() {
     <SettingsPageContainer>
       <SettingsSection id="browser-agent-access" title="Agent access">
         <AgentBrowserAccessSetting />
+        <AgentDesktopAccessSetting />
+        <AgentDesktopApprovalSetting />
       </SettingsSection>
       <SettingsSection id="browser" title="Browsing">
         <SettingsUnavailableGroup message={desktopOnlyMessage}>

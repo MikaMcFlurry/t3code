@@ -1039,8 +1039,66 @@ export const BackgroundActivitySettings = Schema.Struct({
 }).pipe(Schema.withDecodingDefault(Effect.succeed({})));
 export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 
+/**
+ * When an agent's desktop interaction waits for the user: every time, never in threads that
+ * run in full access, or never (a standing grant for every thread with desktop access).
+ */
+export const AgentDesktopApproval = Schema.Literals([
+  "every-action",
+  "full-access-threads",
+  "standing",
+]);
+export type AgentDesktopApproval = typeof AgentDesktopApproval.Type;
+
 export const ResponseStreamingMode = Schema.Literals(["turn", "paragraph"]);
 export type ResponseStreamingMode = typeof ResponseStreamingMode.Type;
+
+/**
+ * Names both providers accept; T3 reserves its own server and the mediated desktop bridge.
+ * This blocks the canonical raw bridge name, not an operator-controlled alias or wrapper command:
+ * arbitrary central MCP transports remain trusted configuration outside this schema's visibility.
+ */
+export const CentralMcpServerName = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(64),
+  Schema.isPattern(/^(?!(?:t3-code|computer-use-linux)$)[a-zA-Z0-9][a-zA-Z0-9_-]*$/),
+);
+
+export const CentralMcpServerTransport = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("stdio"),
+    command: TrimmedNonEmptyString,
+    args: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+    env: Schema.Record(Schema.String, Schema.String).pipe(
+      Schema.withDecodingDefault(Effect.succeed({})),
+    ),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("http"),
+    url: TrimmedNonEmptyString,
+    headers: Schema.Record(Schema.String, Schema.String).pipe(
+      Schema.withDecodingDefault(Effect.succeed({})),
+    ),
+  }),
+]);
+export type CentralMcpServerTransport = typeof CentralMcpServerTransport.Type;
+
+/** Optional fail-closed session scope for MCP servers with host-level capabilities. */
+export const CentralMcpServerSessionScope = Schema.Struct({
+  providerInstanceIds: Schema.Array(ProviderInstanceId).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  threadIds: Schema.Array(ThreadId).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+});
+export type CentralMcpServerSessionScope = typeof CentralMcpServerSessionScope.Type;
+
+/** An MCP server T3 adds globally, or only to sessions matching its optional scope. */
+export const CentralMcpServer = Schema.Struct({
+  name: CentralMcpServerName,
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  transport: CentralMcpServerTransport,
+  sessionScope: Schema.optionalKey(CentralMcpServerSessionScope),
+});
+export type CentralMcpServer = typeof CentralMcpServer.Type;
 
 const StorageRetentionDays = Schema.NullOr(
   Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 3650 })),
@@ -1089,6 +1147,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "defaultProjectScripts",
   "enableAgentBrowserAccess",
   "enableAgentDeviceAccess",
+  "enableAgentDesktopAccess",
   "textGenerationModelSelection",
   "threadTitleInstructions",
   "sourceControlWriterModelSelection",
@@ -1127,6 +1186,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   defaultProjectScripts: Schema.optionalKey(Schema.Array(ProjectScript)),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
   enableAgentDeviceAccess: Schema.optionalKey(Schema.Boolean),
+  enableAgentDesktopAccess: Schema.optionalKey(Schema.Boolean),
   textGenerationModelSelection: Schema.optionalKey(ModelSelection),
   threadTitleInstructions: Schema.optionalKey(TrimmedString),
   sourceControlWriterModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
@@ -1288,6 +1348,12 @@ export const ServerSettings = Schema.Struct({
   speechPostProcessingModelSelection: Schema.NullOr(ModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  /** Desktop control is high impact and must be explicitly enabled for a new session. */
+  enableAgentDesktopAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  agentDesktopApproval: AgentDesktopApproval.pipe(
+    Schema.catchDecoding(() => Effect.succeedSome("every-action" as const)),
+    Schema.withDecodingDefault(Effect.succeed("every-action" as const)),
+  ),
   projectAgentBrowserAccessOverrides: Schema.Record(ProjectId, Schema.Boolean).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
@@ -1306,6 +1372,9 @@ export const ServerSettings = Schema.Struct({
   ),
   fallbackModelSelection: Schema.NullOr(ModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  centralMcpServers: Schema.Array(CentralMcpServer).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
   ),
   defaultRuntimeMode: RuntimeMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE)),
@@ -1706,6 +1775,8 @@ export const ServerSettingsPatch = Schema.Struct({
   speechModelUnloadTimeout: Schema.optionalKey(SpeechModelUnloadTimeout),
   speechProjectCustomWords: Schema.optionalKey(SpeechCustomWords),
   speechPostProcessingModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
+  enableAgentDesktopAccess: Schema.optionalKey(Schema.Boolean),
+  agentDesktopApproval: Schema.optionalKey(AgentDesktopApproval),
   projectAgentBrowserAccessOverrides: Schema.optionalKey(
     Schema.Record(ProjectId, Schema.NullOr(Schema.Boolean)),
   ),
@@ -1720,6 +1791,7 @@ export const ServerSettingsPatch = Schema.Struct({
   defaultModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   defaultRuntimeMode: Schema.optionalKey(RuntimeMode),
   fallbackModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
+  centralMcpServers: Schema.optionalKey(Schema.Array(CentralMcpServer)),
   /** Replaces each project's override set; null removes it. Omitted providerInstances retains its stored value. */
   projectSettingsOverrides: Schema.optionalKey(
     Schema.Record(

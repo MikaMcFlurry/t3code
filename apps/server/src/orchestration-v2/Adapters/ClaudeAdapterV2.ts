@@ -128,6 +128,7 @@ import {
   type RunId,
   type ThreadId,
   resolveIdleCompaction,
+  type CentralMcpServer,
 } from "@t3tools/contracts";
 
 import { FILE_HEADERS_ONLY, formatPatch, structuredPatch } from "diff";
@@ -210,6 +211,7 @@ import {
   normalizeMcpText,
 } from "@t3tools/provider-core/server/mcpToolPresentation";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
+import { centralMcpServersForSession } from "@t3tools/provider-core/server/centralMcpServerScope";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import {
@@ -2011,17 +2013,51 @@ export const CLAUDE_T3_MCP_TOOL_TIMEOUT_MS = 65 * 60 * 1_000;
 // allowedTools pre-approves calls; tools controls availability. Pre-approve T3 tools for headless modes,
 // limited to annotated read-only tools in read-only sandboxes.
 
+/** Enabled central MCP servers in Claude's query shape. T3's own server is added separately. */
+export function claudeCentralMcpServers(
+  servers: ReadonlyArray<CentralMcpServer> | undefined,
+  sessionEnvironment: Readonly<Record<string, string>> = {},
+): NonNullable<ClaudeQueryOptions["mcpServers"]> {
+  return Object.fromEntries(
+    (servers ?? [])
+      .filter((server) => server.enabled)
+      .map((server) => [
+        server.name,
+        server.transport.type === "stdio"
+          ? {
+              type: "stdio" as const,
+              command: server.transport.command,
+              args: [...server.transport.args],
+              env: { ...sessionEnvironment, ...server.transport.env },
+            }
+          : {
+              type: "http" as const,
+              url: server.transport.url,
+              headers: { ...server.transport.headers },
+            },
+      ]),
+  );
+}
+
 export function claudeMcpQueryOverrides(input: {
   readonly mcpSession: McpProviderSession.McpProviderSessionConfig | undefined;
   readonly readOnlySandbox: boolean;
   readonly allowedTools?: ReadonlyArray<string>;
+  readonly centralMcpServers?: ReadonlyArray<CentralMcpServer>;
 }): {
   readonly allowedTools?: ReadonlyArray<string>;
   readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
 } {
   const session = input.mcpSession;
+  const central = claudeCentralMcpServers(
+    centralMcpServersForSession(input.centralMcpServers, session),
+    McpProviderSession.sharedMcpSessionEnvironment("claudeAgent", session),
+  );
   if (session === undefined) {
-    return input.allowedTools === undefined ? {} : { allowedTools: input.allowedTools };
+    return {
+      ...(input.allowedTools === undefined ? {} : { allowedTools: input.allowedTools }),
+      ...(Object.keys(central).length === 0 ? {} : { mcpServers: central }),
+    };
   }
   const mcpAllowedTools = input.readOnlySandbox
     ? CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS
@@ -2029,6 +2065,7 @@ export function claudeMcpQueryOverrides(input: {
   return {
     allowedTools: Array.from(new Set([...(input.allowedTools ?? []), ...mcpAllowedTools])),
     mcpServers: {
+      ...central,
       "t3-code": {
         type: "http",
         url: session.endpoint,
@@ -10797,8 +10834,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         ) {
           const queryPolicy = yield* queryPolicyForTurn(turnInput);
           const mcpSession = yield* mcpSessions.read(turnInput.threadId);
+          const centralMcpServers = Option.isSome(serverSettings)
+            ? yield* serverSettings.value.getSettings.pipe(
+                Effect.map((settings) => settings.centralMcpServers),
+                Effect.orElseSucceed(() => []),
+              )
+            : [];
           const mcpOverrides = claudeMcpQueryOverrides({
             mcpSession,
+            centralMcpServers,
             readOnlySandbox:
               sandboxPolicyKindForClaudeRuntimePolicy(turnInput.runtimePolicy) === "readOnly",
             ...(queryPolicy.allowedTools === undefined
