@@ -20,3 +20,6 @@ mika/mobile-camera
 mika/limit-switch-back
 # delegate_task isolation "worktree" for linked environments (upstream discussion #31920).
 mika/remote-delegate-isolation
+# A send that would end a session's background work waits or hands off instead of bouncing
+# (upstream issue #32296).
+mika/queue-busy-switch
