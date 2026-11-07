@@ -171,6 +171,8 @@ function RootRouteBranch() {
       <>
         <CustomSnoozeDialogHost />
         <GuestShareDialogHost />
+        {/* A push asking for a person opens the live view even before onboarding is done. */}
+        {primaryEnvironmentAuthenticated ? <DesktopLiveViewDialog /> : null}
         <CommandPalette>
           <AppSidebarLayout>
             <Outlet />
