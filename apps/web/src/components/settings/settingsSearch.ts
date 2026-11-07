@@ -290,6 +290,14 @@ export const SETTINGS_SEARCH_ITEMS = [
     environmentOnly: true,
   },
   {
+    id: "fallback-available-accounts",
+    title: "Switch to an account with usage left",
+    to: "/settings/threads",
+    scope: "environment-defaults",
+    searchTerms: ["automatic account provider out of usage limit new threads"],
+    environmentOnly: true,
+  },
+  {
     id: "default-permissions",
     title: "Permissions",
     to: "/settings/threads",
@@ -971,7 +979,9 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "agent-desktop-approval",
     title: "Agent desktop approval",
     to: "/settings/browser",
-    searchTerms: ["computer use approve ask every time full access standing never ask desktop control"],
+    searchTerms: [
+      "computer use approve ask every time full access standing never ask desktop control",
+    ],
   },
   {
     id: "device-sources",

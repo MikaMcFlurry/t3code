@@ -1444,6 +1444,9 @@ export const ServerSettings = Schema.Struct({
   environmentSchedules: ForwardCompatibleArray(EnvironmentSchedule).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
+  fallbackToAvailableAccounts: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   defaultRuntimeMode: RuntimeMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE)),
   ),
@@ -1865,6 +1868,7 @@ export const ServerSettingsPatch = Schema.Struct({
   usageResetStaggering: Schema.optionalKey(Schema.Boolean),
   usageResetForecast: Schema.optionalKey(Schema.Array(UsageResetForecastEntry)),
   environmentSchedules: Schema.optionalKey(Schema.Array(EnvironmentSchedule)),
+  fallbackToAvailableAccounts: Schema.optionalKey(Schema.Boolean),
   /** Replaces each project's override set; null removes it. Omitted providerInstances retains its stored value. */
   projectSettingsOverrides: Schema.optionalKey(
     Schema.Record(

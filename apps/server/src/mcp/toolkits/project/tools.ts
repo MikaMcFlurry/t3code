@@ -159,6 +159,8 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     link: Schema.optional(Schema.String),
     projectId: ProjectId,
     modelSelection: ModelSelection,
+    /** Why the thread started on another account than `modelSelection` asked for. */
+    accountSwitch: Schema.optional(Schema.String),
     runId: Schema.NullOr(RunId),
     status: Schema.NullOr(OrchestrationV2RunStatus),
   }),
