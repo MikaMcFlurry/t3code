@@ -112,10 +112,17 @@ const legacyParents: Partial<Record<AuthEnvironmentScope, AuthEnvironmentScope>>
   [AuthTerminalReadScope]: AuthTerminalOperateScope,
 };
 
+// For denials only: an old client just learns that a permission is missing. Kept apart from
+// `legacyParents`, since no older scope may ever imply whole-screen access.
+const legacyDenialScopes: Partial<Record<AuthEnvironmentScope, AuthEnvironmentScope>> = {
+  ...legacyParents,
+  [AuthDesktopOperateScope]: AuthOrchestrationOperateScope,
+};
+
 /** Keep permission denials decodable by clients with the original scope enum. */
 export function authScopeRequiredResponse(requiredPermission: AuthEnvironmentScope) {
   return {
-    requiredScope: legacyParents[requiredPermission] ?? requiredPermission,
+    requiredScope: legacyDenialScopes[requiredPermission] ?? requiredPermission,
     requiredPermission,
   };
 }
