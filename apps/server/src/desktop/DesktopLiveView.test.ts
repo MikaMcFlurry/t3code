@@ -242,6 +242,45 @@ const session = {
   threadId: "thread",
 };
 
+describe("DesktopLiveViewHub crash guard", () => {
+  it("stops starting screen streams after one ended before its first frame", () => {
+    let tripped = false;
+    const spawner = fakeSpawner();
+    const hub = new DesktopLiveViewHub(spawner.spawn, {
+      crashGuard: { isTripped: () => tripped, trip: () => (tripped = true) },
+    });
+    hubs.push(hub);
+    const first = viewer("first");
+    hub.attach(first.entry);
+    streaming(spawner.helpers[0]!);
+    // The compositor died: the helper ends with no frame after "ready".
+    spawner.helpers[0]!.exit();
+    expect(tripped).toBe(true);
+    expect(first.last("desktop")?.state).toBe("unavailable");
+    expect(first.last("desktop")?.detail).toContain("before its first frame");
+    return hub.input("first", { type: "reload" }).then(() => {
+      expect(spawner.helpers).toHaveLength(1);
+    });
+  });
+
+  it("does not trip when frames arrived or the stream never started", () => {
+    let tripped = false;
+    const spawner = fakeSpawner();
+    const hub = new DesktopLiveViewHub(spawner.spawn, {
+      crashGuard: { isTripped: () => tripped, trip: () => (tripped = true) },
+    });
+    hubs.push(hub);
+    hub.attach(viewer("watcher").entry);
+    spawner.helpers[0]!.status({ type: "error", code: "missing-element", element: "pipewiresrc" });
+    expect(tripped).toBe(false);
+    void hub.input("watcher", { type: "reload" });
+    streaming(spawner.helpers[1]!);
+    spawner.helpers[1]!.frame(new Uint8Array([1]));
+    spawner.helpers[1]!.exit();
+    expect(tripped).toBe(false);
+  });
+});
+
 describe("agent desktop calls during a live view takeover", () => {
   it("are refused while a person controls the desktop, observation included, and run after", async () => {
     const calls: Array<string> = [];

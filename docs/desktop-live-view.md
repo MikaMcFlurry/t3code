@@ -14,13 +14,14 @@ call, and desktop approvals only show in the web app.
 
 ## What it reuses
 
-| Need | Existing piece |
-| --- | --- |
-| Live frames to every client, acked so slow links skip frames | `/api/preview-stream` (`ServerBrowserStream.ts`) |
-| Who drives, and pausing the agent | `SessionControl` (`preview/SessionControl.ts`) |
-| Canvas viewer with mouse, touch, keyboard, IME and paste | `ServerBrowserSurface` (web), `PreviewStreamWebView` + `preview-stream.browser.ts` (mobile) |
-| Media auth for `<canvas>`/WebSocket over T3 Connect | `wsTicket` (`resolveDeviceHubAccess`, `authenticateMediaRequest`) |
-| Desktop backends, approvals, host lease | `ComputerUseLinux*` (fork) |
+- Live frames to every client, acked so slow links skip frames: `/api/preview-stream`
+  (`ServerBrowserStream.ts`).
+- Who drives, and pausing the agent: `SessionControl` (`preview/SessionControl.ts`).
+- Canvas viewer with mouse, touch, keyboard, IME and paste: `ServerBrowserSurface` (web),
+  `PreviewStreamWebView` with `preview-stream.browser.ts` (mobile).
+- Media auth for canvas and WebSocket over T3 Connect: `wsTicket` (`resolveDeviceHubAccess`,
+  `authenticateMediaRequest`).
+- Desktop backends, approvals, host lease: `ComputerUseLinux*` (fork).
 
 The live view adds a capture source and one route; it does not add a new viewer.
 
@@ -46,8 +47,9 @@ GNOME (Mutter) ──xdg-desktop-portal RemoteDesktop session──▶ portal he
   `SelectDevices` (the spec forbids it on `SelectSources` for remote desktop sessions), so the
   person at the machine answers one dialog once. The single-use restore token is rewritten after
   every start into the server's state directory (`0600`, never logged or sent to a client).
-- **Frames.** `pipewiresrc` → `videorate` (max 10 fps) → scale to at most 1920×1080 → `jpegenc`
-  (q 60) → `appsink`. Mutter only sends frames on damage, so an idle screen costs nothing.
+- **Frames.** `pipewiresrc` → plain-memory caps → `videorate` (max 10 fps) → scale to at most
+  1920×1080 → convert → `jpegenc` (q 60) → `appsink`. Scaling before converting handles a quarter
+  of the pixels on a 4K screen. Mutter only sends frames on damage, so an idle screen costs nothing.
 - **Input.** Viewers send the preview stream's `mouse`, `wheel`, `key` and `text` messages in the
   stream's logical coordinate space (the `viewport` message). The hub clamps them and the helper
   calls `NotifyPointerMotionAbsolute`, `NotifyPointerButton`, `NotifyPointerAxisDiscrete` and
@@ -117,13 +119,43 @@ Frames may be smaller than the viewport; clients map from the drawn frame to the
   Desktop approvals and this request should also reach the phone, which today only sees runtime
   requests (`AgentAwarenessRelay`).
 
+## GNOME Shell crash on GPUs without DRM format modifiers
+
+The live test hit a GNOME bug that decides the Linux plan. On Ubuntu 24.04 with GNOME Shell 46.0,
+mutter 46.2-1ubuntu0.24.04.18 and an AMD Radeon R9 M395X (GCN3, `amdgpu`), **every** portal screen
+stream made GNOME Shell crash with SIGSEGV as the stream started, right after mutter logged
+"Couldn't retrieve the supported modifiers" (`meta_screen_cast_query_modifiers` finds no modifiers
+for the format and falls back to the implicit one). A Wayland compositor crash ends the graphical
+session; the T3 server, a user service, kept running. It happened three times: at the first start
+after consent, in a standalone helper run, and after forcing plain-memory caps on the consumer
+(which does remove every DMA-BUF and modifier offer, checked against a test PipeWire node, but the
+crash is on mutter's side). The journals of both test machines show no other shell crash since
+2026-11-01; T3's agent desktop toolkit never opens a screen stream there (`CU_DISABLE_ABS_POINTER`).
+OBS or a browser sharing the screen would most likely hit the same crash on that hardware.
+
+Consequences:
+
+- **Crash guard.** A stream that ends after `ready` without a single frame is how this crash looks
+  from the server. The hub then writes `desktop-live-view/screencast-crashed` into the server state
+  directory and never starts a screen stream on that machine again on its own; `reload` does not
+  bypass it. Deleting the file re-enables it. At most one crash per machine.
+- **Fallback capture, next step.** For such hosts: frames from `org.gnome.Shell.Screenshot`
+  (what `gnome-screenshot` uses, already proven on the test machines) at 1–3 fps, input through a
+  RemoteDesktop session *without* a screen stream (relative pointer motion after homing to a corner,
+  keysyms as now). Enough for a password or a captcha; it needs its own one-time consent.
+- **Upstream GNOME.** The crash deserves a mutter report with the trace; T3 should not paper over it.
+- **Test source.** `T3CODE_DESKTOP_LIVE_VIEW_TEST_SOURCE=1` makes the helper stream a moving 4K test
+  pattern instead (a click toggles the pattern), so the whole T3 side can be checked end to end on a
+  machine whose compositor must not be touched.
+
 ## Several viewers and bandwidth
 
 - One capture per machine, any number of viewers. Each viewer has at most one frame in flight and
   keeps only the newest waiting frame, so a slow phone over T3 Connect skips frames instead of
   building a backlog, and control and state messages never wait behind images.
 - A late viewer starts from the last frame. Idle screens send nothing.
-- Measured numbers are in the evidence section below. If JPEG proves too heavy over T3 Connect,
+- Measured numbers are in the evidence section below (about 0.3 MB/s at 10 fps for a simple
+  screen on the LAN). If JPEG proves too heavy over T3 Connect,
   the device panel's H.264-over-WebCodecs path is the model; on stock Ubuntu only `vp8enc` is
   available without extra packages, so VP8 via WebCodecs would be the first candidate.
 
@@ -157,13 +189,37 @@ Both stay behind the same route, hub, protocol, control and viewers; only the he
   the helper proposed in #18803; the live view would be one of its capabilities. Secure input
   fields still accept posted events; the login window and FileVault unlock do not.
 
-## Evidence
+## Evidence (2026-11-07)
 
-Filled in from the live test on the fork (see the PR/discussion for screenshots):
+Verified:
+
+- Unit tests (`apps/server/src/desktop/DesktopLiveView.test.ts`, 11 tests, plus the existing bridge
+  tests): keysyms, fan-out, consent and refusal states, input only from the controller, hand-back on
+  disconnect, agent refused during a takeover and drained before the person's first input, crash
+  guard.
+- Typecheck of server, contracts, client-runtime, web and mobile.
+- On the real GNOME desktop: the consent dialog appears once on the machine, the restore token is
+  written (`0600`) and the next start restores silently; the helper stops 20 s after the last viewer.
+  Frames: **not** shown, because of the crash above.
+- End to end with the test source, on the test machine over the LAN (headless Chromium on Windows
+  through an SSH tunnel to the server): the web dialog (opened by its deep link) streams the
+  3840×2160 coordinate space; Take control → `you`, Release → `agent`; while the web app at phone
+  size holds control the desktop viewer shows "another viewer"; the mobile app's own WebView script
+  (`preview-stream.browser.ts`, bundled as for the app) streams, takes control and sends taps and
+  text. Click to changed frame: web median 211 ms (p90 242, n=12), mobile WebView median 202 ms
+  (p90 251, n=10), including up to 100 ms of the 10 fps test source. Frame rate ~9.9 fps at
+  ~325 KB/s with the simple pattern (1920×1080 JPEG q60; a busy screen costs more per frame).
+
+Not verified yet:
+
+- Frames and input on a real desktop (needs the fallback capture on the test hardware, or other
+  hardware).
+- An agent turn paused live by a takeover (covered by unit tests only).
+- The native iOS/Android apps (their WebView code ran in Chromium, not in WKWebView or a device).
+- T3 Connect relay bandwidth (tested on the LAN).
+
+Environment:
 
 - Portal versions on the test machines (Ubuntu 24.04, GNOME Shell 46.0): xdg-desktop-portal
   1.18.4, xdg-desktop-portal-gnome 46.2, ScreenCast v5, RemoteDesktop v2, PipeWire 1.0.5,
   GStreamer 1.24.2 with `pipewiresrc` and `jpegenc`; no H.264 encoder installed.
-- Unit tests: `apps/server/src/desktop/DesktopLiveView.test.ts` (keysyms, fan-out, consent and
-  refusal states, input only from the controller, hand-back on disconnect, agent refused during
-  takeover and drained before the person's first input).

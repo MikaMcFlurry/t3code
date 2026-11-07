@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off -- the portal helper is a child process with a binary pipe protocol, driven from plain callbacks.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -164,13 +165,18 @@ export class DesktopLiveViewHub {
   private consentTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly stopListening: () => void;
   private readonly onHelperError: (status: Record<string, unknown>) => void;
+  private readonly crashGuard: DesktopLiveViewCrashGuard | null;
 
   constructor(
     spawnHelper: SpawnDesktopLiveViewHelper,
-    options: { readonly onHelperError?: (status: Record<string, unknown>) => void } = {},
+    options: {
+      readonly onHelperError?: (status: Record<string, unknown>) => void;
+      readonly crashGuard?: DesktopLiveViewCrashGuard;
+    } = {},
   ) {
     this.spawnHelper = spawnHelper;
     this.onHelperError = options.onHelperError ?? (() => undefined);
+    this.crashGuard = options.crashGuard ?? null;
     this.stopListening = desktopLiveControl.onChange(() => this.broadcastControl());
   }
 
@@ -335,23 +341,44 @@ export class DesktopLiveViewHub {
 
   private startHelper() {
     this.lastFrame = null;
+    if (this.crashGuard?.isTripped()) {
+      this.setState("unavailable", CRASH_GUARD_DETAIL);
+      return;
+    }
     this.setState("starting");
     let helper: DesktopLiveViewHelper | null = null;
+    // A stream that ends after "ready" without one frame is how a compositor crash looks from here.
+    let ready = false;
+    let framed = false;
+    const tripIfCrashed = () => {
+      if (!ready || framed || this.crashGuard === null) return false;
+      this.crashGuard.trip();
+      return true;
+    };
     helper = this.spawnHelper({
       onFrame: (jpeg) => {
         if (this.helper !== helper) return;
+        framed = true;
         this.lastFrame = jpeg;
         for (const viewer of this.viewers.values()) viewer.push({ _tag: "frame", data: jpeg });
       },
       onStatus: (status) => {
         if (this.helper !== helper) return;
+        if (status.type === "ready") ready = true;
+        if ((status.type === "error" || status.type === "closed") && tripIfCrashed()) {
+          this.onHelperError(status);
+          this.stopHelper();
+          this.setState("unavailable", CRASH_GUARD_DETAIL);
+          return;
+        }
         this.onHelperStatus(status);
       },
       onExit: () => {
         if (this.helper !== helper) return;
         this.helper = null;
         this.clearConsentTimer();
-        if (this.state === "starting" || this.state === "consent" || this.state === "streaming")
+        if (tripIfCrashed()) this.setState("unavailable", CRASH_GUARD_DETAIL);
+        else if (this.state === "starting" || this.state === "consent" || this.state === "streaming")
           this.setState("unavailable", "The desktop capture stopped.");
       },
     });
@@ -428,6 +455,28 @@ export class DesktopLiveViewHub {
     this.idleTimer = null;
   }
 }
+
+/** Remembers that a screen stream took the desktop down, so it never starts again on its own. */
+export interface DesktopLiveViewCrashGuard {
+  readonly isTripped: () => boolean;
+  readonly trip: () => void;
+}
+
+const CRASH_GUARD_DETAIL =
+  "The last screen stream on this machine ended before its first frame, which is how a desktop crash looks (GNOME Shell 46 on GPUs without DRM format modifiers). Live view stays off here; see docs/desktop-live-view.md to reset it.";
+
+/** A marker file in the server state directory; deleting it re-enables the screen stream. */
+export const fileCrashGuard = (path: string): DesktopLiveViewCrashGuard => ({
+  isTripped: () => NodeFS.existsSync(path),
+  trip: () => {
+    try {
+      NodeFS.mkdirSync(NodePath.dirname(path), { recursive: true, mode: 0o700 });
+      NodeFS.writeFileSync(path, "A screen stream ended before its first frame.\n", {
+        mode: 0o600,
+      });
+    } catch {}
+  },
+});
 
 const SETUP_HINT =
   "Install it with: sudo apt install python3-gi gir1.2-gstreamer-1.0 gstreamer1.0-pipewire gstreamer1.0-plugins-good";
@@ -561,14 +610,17 @@ export const layer = Layer.effect(
     const context = yield* Effect.context<never>();
     const runSyncExit = Effect.runSyncExitWith(context);
     const runFork = Effect.runForkWith(context);
+    const stateDir = NodePath.join(config.stateDir, "desktop-live-view");
+    // For checking clients and transport on a host whose compositor must not be touched.
+    const testSource = environment.T3CODE_DESKTOP_LIVE_VIEW_TEST_SOURCE === "1";
     const hub = new DesktopLiveViewHub(
       spawnPortalHelper({
-        tokenPath: NodePath.join(config.stateDir, "desktop-live-view", "portal-restore-token"),
+        tokenPath: NodePath.join(stateDir, "portal-restore-token"),
         environment,
-        // For checking clients and transport on a host whose compositor must not be touched.
-        testSource: environment.T3CODE_DESKTOP_LIVE_VIEW_TEST_SOURCE === "1",
+        testSource,
       }),
       {
+        ...(testSource ? {} : { crashGuard: fileCrashGuard(NodePath.join(stateDir, "screencast-crashed")) }),
         // The helper reports codes and GStreamer messages only, never frames or input.
         onHelperError: (status) =>
           void runFork(
