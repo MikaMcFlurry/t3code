@@ -3543,6 +3543,178 @@ describe("orchestration v2 provider switching", () => {
     ),
   );
 
+  it.live("lets a wake for the busy session go ahead of a waiting account switch", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("wake-before-waiting-switch");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const firstBusy = yield* Ref.make(true);
+        const notificationStarted = yield* Deferred.make<void>();
+        const releaseNotification = yield* Deferred.make<void>();
+        const secondSelection: ModelSelection = {
+          ...CLAUDE_MODEL_SELECTION,
+          instanceId: ProviderInstanceId.make("claude-second-account"),
+        };
+        const adapters = [
+          makeTestAdapter({
+            instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            responseByRunOrdinal: {
+              1: "First account complete",
+              3: "Notification complete",
+              4: "Wake complete",
+            },
+            capturedTurns,
+            backgroundWork: firstBusy,
+            holdRunOrdinal: 3,
+            holdFirstTurn: notificationStarted,
+            releaseFirstTurn: releaseNotification,
+          }),
+          makeTestAdapter({
+            instanceId: secondSelection.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: secondSelection,
+            responseByRunOrdinal: { 2: "Waiting send complete", 5: "Waiting send complete" },
+            capturedTurns,
+          }),
+        ];
+        // Both accounts continue one native history, so the switch resumes it.
+        const layerRegistry = Layer.succeed(
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+            get: (instanceId) => {
+              const adapter = adapters.find((candidate) => candidate.instanceId === instanceId);
+              return adapter === undefined
+                ? Effect.fail(
+                    new ProviderAdapterRegistry.ProviderAdapterRegistryLookupError({ instanceId }),
+                  )
+                : Effect.succeed(adapter);
+            },
+            list: () => Effect.succeed(adapters.map((adapter) => adapter.instanceId)),
+            getMetadata: () =>
+              Effect.succeed({
+                driver: CLAUDE_DRIVER,
+                continuationKey: "claude:shared-native-account-history",
+                enabled: true,
+                capabilities: ClaudeProviderCapabilitiesV2,
+              }),
+          }),
+        );
+        const threadId = ThreadId.make("thread:wake-before-waiting-switch");
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const sendFromAgent = (key: string, text: string) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "agent",
+              creationSource: "provider",
+              commandId: CommandId.make(`command:wake-before-waiting-switch:${key}`),
+              threadId,
+              messageId: MessageId.make(`message:wake-before-waiting-switch:${key}`),
+              text,
+              attachments: [],
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              dispatchMode: { type: "queue_after_active" },
+            });
+          const sendFromUser = (ordinal: number, modelSelection: ModelSelection) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:wake-before-waiting-switch:${ordinal}`),
+              threadId,
+              messageId: MessageId.make(`message:wake-before-waiting-switch:${ordinal}`),
+              text: `Prompt ${ordinal}`,
+              attachments: [],
+              modelSelection,
+              dispatchMode: { type: "start_immediately" },
+            });
+          const waitUntil = (done: (projection: OrchestrationV2ThreadProjection) => boolean) =>
+            orchestrator.streamStoredEvents.pipe(
+              Stream.mapEffect(() => orchestrator.getThreadProjection(threadId)),
+              Stream.filter(done),
+              Stream.runHead,
+            );
+          const turnText = (text: string) => (projection: OrchestrationV2ThreadProjection) =>
+            projection.runs.some(
+              (run) =>
+                run.status === "completed" &&
+                projection.messages.some(
+                  (message) => message.id === run.userMessageId && message.text === text,
+                ),
+            );
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:wake-before-waiting-switch:create"),
+            threadId,
+            projectId: ProjectId.make("project:wake-before-waiting-switch"),
+            title: "Wake before waiting switch",
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+          });
+          yield* sendFromUser(1, CLAUDE_MODEL_SELECTION);
+          yield* worker.drain();
+          yield* waitForIdle(threadId);
+
+          // The switch waits; a notification then runs on the busy session.
+          yield* sendFromUser(2, secondSelection);
+          yield* sendFromAgent("notification", "Notification");
+          yield* Deferred.await(notificationStarted);
+          // A wake arrives during that run, so it queues behind the waiting switch.
+          yield* sendFromAgent("wake", "Background work finished");
+          yield* Deferred.succeed(releaseNotification, undefined);
+          // The wake still runs: it keeps the busy session, and it may be what ends the work.
+          yield* waitUntil(turnText("Notification"));
+          yield* waitUntil(
+            (projection) => projection.runs.filter((run) => run.status === "queued").length === 1,
+          );
+          yield* worker.drain();
+          yield* waitUntil(turnText("Background work finished"));
+          yield* Ref.set(firstBusy, false);
+          yield* waitUntil((projection) => projection.runs.every((run) => run.status !== "queued"));
+          yield* worker.drain();
+          const done = yield* waitForIdle(threadId);
+          assert.isTrue(done.runs.every((run) => run.status === "completed"));
+          assert.deepEqual(
+            (yield* Ref.get(capturedTurns)).map((turn) =>
+              ["Prompt 1", "Notification", "Background work finished", "Prompt 2"].findIndex(
+                (text) => turn.text.includes(text),
+              ),
+            ),
+            [0, 1, 2, 3],
+          );
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerWithRegistry(
+              {
+                name: "wake-before-waiting-switch",
+                runtimePolicyOverride: {
+                  cwd,
+                  approvalPolicy: "never",
+                  sandboxPolicy: {
+                    type: "readOnly",
+                    access: { type: "fullAccess" },
+                    networkAccess: false,
+                  },
+                },
+              },
+              layerRegistry,
+            ),
+          ),
+        );
+      }),
+    ),
+  );
+
   it.live.each(["immediately", "behind a running turn"] as const)(
     "starts a fresh provider session %s and never hands earlier runs to a later provider",
     (variant) =>
