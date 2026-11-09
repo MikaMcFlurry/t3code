@@ -1060,7 +1060,7 @@ it.effect.each([true, false] as const)(
                 ),
             }),
             Layer.mock(ThreadManagementService.ThreadManagementService)({
-              getThreadShell: () => Effect.succeed({ projectId, deletedAt: null } as never),
+              getThreadShell: () => Effect.succeed(threadShell(projectId)),
               getThreadSnapshotWindow: () =>
                 Effect.succeed({
                   projection: {
