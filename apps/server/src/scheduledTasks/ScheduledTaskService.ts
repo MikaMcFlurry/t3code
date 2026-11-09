@@ -50,12 +50,12 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as Metrics from "../observability/Metrics.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadMessageIntake from "../orchestration-v2/ThreadMessageIntake.ts";
-import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
-import * as ServerSettings from "../serverSettings.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as DueHint from "../scheduling/DueHint.ts";
@@ -471,10 +471,25 @@ export const layer = Layer.effect(
     const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const serviceScope = yield* Effect.scope;
-    // Runs start on an account with usage left, as a user's send does. Without these (tests),
-    // runs keep the stored account, as with the setting off.
+    const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
+    const secretRequests = yield* SecretRequests.SecretRequests;
+    const scheduler = yield* Scheduler.Scheduler;
+    const readWebhookOrigin = yield* ScheduledTaskWebhookOrigin;
+    const managedPolicy = yield* ManagedPolicy.ManagedPolicy;
+    const webhookPolicyOrganization = ManagedPolicy.deniedBy(managedPolicy, "webhookTasks");
+    // Existing webhook tasks stay stored but report why they do not run.
+    const webhookPolicyBlock =
+      webhookPolicyOrganization === undefined
+        ? undefined
+        : managedPolicyDeniedMessage(webhookPolicyOrganization, "webhook tasks");
+    const withPolicy = (task: ScheduledTask): ScheduledTask =>
+      webhookPolicyBlock !== undefined && task.schedule.type === "webhook"
+        ? { ...task, blockedByPolicy: webhookPolicyBlock }
+        : task;
     const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
     const providerRegistry = yield* Effect.serviceOption(ProviderRegistry.ProviderRegistry);
+    // Runs start on an account with usage left, as a user's send does. Without these (tests),
+    // runs keep the stored account, as with the setting off.
     const withAccountChoice = <A>(
       fallback: A,
       choose: Effect.Effect<
@@ -495,21 +510,6 @@ export const layer = Layer.effect(
               threadManagement,
             ),
           );
-    const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
-    const secretRequests = yield* SecretRequests.SecretRequests;
-    const scheduler = yield* Scheduler.Scheduler;
-    const readWebhookOrigin = yield* ScheduledTaskWebhookOrigin;
-    const managedPolicy = yield* ManagedPolicy.ManagedPolicy;
-    const webhookPolicyOrganization = ManagedPolicy.deniedBy(managedPolicy, "webhookTasks");
-    // Existing webhook tasks stay stored but report why they do not run.
-    const webhookPolicyBlock =
-      webhookPolicyOrganization === undefined
-        ? undefined
-        : managedPolicyDeniedMessage(webhookPolicyOrganization, "webhook tasks");
-    const withPolicy = (task: ScheduledTask): ScheduledTask =>
-      webhookPolicyBlock !== undefined && task.schedule.type === "webhook"
-        ? { ...task, blockedByPolicy: webhookPolicyBlock }
-        : task;
     const webhookPermits = yield* Ref.make<ReadonlyMap<ScheduledTaskId, Semaphore.Semaphore>>(
       new Map(),
     );
