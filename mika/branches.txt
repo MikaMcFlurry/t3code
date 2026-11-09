@@ -12,7 +12,8 @@ mika/central-skills
 # with the desktop live view on top (opt-in): watch and take over the screen from any T3 client.
 # Upstream idea #32487 (https://github.com/pingdotgg/t3code/discussions/32487).
 mika/desktop-live-view
-mika/desktop-dictation
+# mika/desktop-dictation: replaced by upstream #30624/#30625 (composer dictation on web and desktop,
+#   Settings -> Voice); not merged.
 mika/reset-planner
 mika/environment-load
 # Upstream PR #28390 (BluePhi09), take a photo from the attachment menu; waits for approval in #7931.
