@@ -24,10 +24,24 @@ export interface RoutineRoutingDirective {
   readonly effort?: string;
 }
 
-export interface RoutineModelRoute {
+export interface RoutineModelStart {
+  readonly startable: true;
   readonly selection: ModelSelection;
   readonly reason: string;
 }
+
+/**
+ * The run must not start: its stored model is outside the allowed list and no allowed model
+ * can take it. `no-allowed-model`: the allowed lists match no configured model at all.
+ * `no-allowed-model-available`: allowed models exist, but none is usable right now.
+ */
+export interface RoutineModelNotStartable {
+  readonly startable: false;
+  readonly code: "no-allowed-model" | "no-allowed-model-available";
+  readonly reason: string;
+}
+
+export type RoutineModelRoute = RoutineModelStart | RoutineModelNotStartable;
 
 const EFFORT_OPTION_IDS: ReadonlySet<string> = new Set(["reasoningEffort", "effort", "thinking"]);
 
@@ -84,9 +98,9 @@ function withEffort(
 }
 
 /**
- * Model for a scheduled or webhook run. Precedence: an explicit `model`, then `routing: "auto"`
- * (task profile from the prompt, most headroom among allowed models), then the global automatic
- * account setting applied to the stored selection, then the stored selection unchanged.
+ * Model for a scheduled or webhook run: an explicit `model`, then `routing: "auto"`, then the
+ * automatic account setting, then the stored selection. A stored selection outside an allowed
+ * list never runs; without an allowed replacement the run is not startable.
  */
 export function resolveRoutineModelSelection(input: {
   readonly stored: ModelSelection;
@@ -98,10 +112,8 @@ export function resolveRoutineModelSelection(input: {
   readonly now: number;
 }): RoutineModelRoute {
   const { directive, settings } = input;
-  const allowed = filterAllowedProviders(input.providers, [
-    settings.autoRoutingAllowed,
-    directive?.allowed ?? [],
-  ]);
+  const lists = [settings.autoRoutingAllowed, directive?.allowed ?? []];
+  const allowed = filterAllowedProviders(input.providers, lists);
   const context = { providers: allowed, settings, projectId: input.projectId, now: input.now };
   const effort = (selection: ModelSelection) => withEffort(selection, allowed, directive?.effort);
 
@@ -112,6 +124,7 @@ export function resolveRoutineModelSelection(input: {
     const provider = allowed.find((candidate) => candidate.instanceId === instanceId);
     if (provider?.models.some((candidate) => candidate.slug === model)) {
       return {
+        startable: true,
         selection: effort(createModelSelection(provider.instanceId, model, null)),
         reason: `Requested ${directive.model}.`,
       };
@@ -123,7 +136,7 @@ export function resolveRoutineModelSelection(input: {
 
   if (directive?.routing === "auto") {
     const route = byProfile();
-    if (route) return { selection: effort(route.selection), reason: route.reason };
+    if (route) return { startable: true, selection: effort(route.selection), reason: route.reason };
   }
 
   if (directive?.routing !== "fixed" && settings.autoModelSelection !== "off") {
@@ -132,7 +145,7 @@ export function resolveRoutineModelSelection(input: {
       desired: input.stored,
       mode: settings.autoModelSelection,
     });
-    if (route) return { selection: effort(route.selection), reason: route.reason };
+    if (route) return { startable: true, selection: effort(route.selection), reason: route.reason };
   }
 
   const storedAllowed = allowed.some(
@@ -143,12 +156,28 @@ export function resolveRoutineModelSelection(input: {
   if (!storedAllowed) {
     // The stored model is outside the allowed list; never run it, pick an allowed one instead.
     const route = byProfile();
-    if (route) return { selection: effort(route.selection), reason: route.reason };
+    if (route) return { startable: true, selection: effort(route.selection), reason: route.reason };
+    if (lists.some((list) => list.length > 0)) {
+      const stored = `${input.stored.instanceId}/${input.stored.model}`;
+      return allowed.length === 0
+        ? {
+            startable: false,
+            code: "no-allowed-model",
+            reason: `Not started: the stored model ${stored} is not allowed, and the allowed models match no configured account and model.`,
+          }
+        : {
+            startable: false,
+            code: "no-allowed-model-available",
+            reason: `Not started: the stored model ${stored} is not allowed, and no allowed model (${allowed.map((provider) => provider.instanceId).join(", ")}) is available right now.`,
+          };
+    }
   }
+  // Without an allowed list every model is allowed, so the stored one may run.
   return {
+    startable: true,
     selection: effort(input.stored),
     reason: storedAllowed
       ? "Stored model."
-      : "No allowed model is available; using the stored model.",
+      : "No other model is available; using the stored model.",
   };
 }
