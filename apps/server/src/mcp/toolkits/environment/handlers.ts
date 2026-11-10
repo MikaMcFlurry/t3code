@@ -6,7 +6,11 @@ import * as Settings from "../../../serverSettings.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { readCaller, unavailable } from "../../threadAccess.ts";
-import { environmentAvailability } from "@t3tools/shared/environmentSchedule";
+import {
+  environmentAvailability,
+  isValidTimeZone,
+  serverTimeZone,
+} from "@t3tools/shared/environmentSchedule";
 import * as DateTime from "effect/DateTime";
 import * as HostResources from "../../../resourceTelemetry/HostResources.ts";
 import * as PeerForwarding from "../../../peer/PeerForwarding.ts";
@@ -156,9 +160,18 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
       yield* check;
       const { settings } = yield* access;
       const current = yield* settings.getSettings.pipe(Effect.mapError(unavailable));
+      const timeZone = input.timeZone?.trim() || serverTimeZone();
+      if (!isValidTimeZone(timeZone)) {
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: `Unknown time zone "${timeZone}"; use an IANA zone such as "Europe/Berlin".`,
+        });
+      }
+      // The zone is stored, so the windows keep their meaning if this server's zone changes.
       const schedule = {
         environmentId: input.machineEnvironmentId,
         alwaysOn: input.alwaysOn,
+        timeZone,
         offline: input.alwaysOn ? [] : [...(input.offline ?? [])],
       };
       const environmentSchedules = [
