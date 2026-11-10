@@ -204,6 +204,19 @@ const isMessageQuestionAnswer = Schema.is(
   Schema.Union([TrimmedNonEmptyString, Schema.NonEmptyArray(TrimmedNonEmptyString)]),
 );
 
+const PENDING_BACKGROUND_WORK_NOUNS = {
+  background_task: "background task",
+  subagent: "subagent",
+  wake_turn: "wake turn",
+} as const satisfies Record<ProviderAdapter.ProviderAdapterV2PendingBackgroundWork["kind"], string>;
+
+function describePendingBackgroundWork(
+  work: ProviderAdapter.ProviderAdapterV2PendingBackgroundWork,
+): string {
+  const noun = PENDING_BACKGROUND_WORK_NOUNS[work.kind];
+  return work.label === null ? noun : `${noun} "${work.label}"`;
+}
+
 export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDispatchError>()(
   "OrchestratorDispatchError",
   {
@@ -1559,6 +1572,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     return false;
   });
 
+  // Names what the busy sessions still run, for a refusal's detail. Null when no adapter says.
+  const describeSessionsBackgroundWork = Effect.fn("Orchestrator.describeSessionsBackgroundWork")(
+    function* (sessionIds: Iterable<ProviderSessionId>) {
+      const labels: Array<string> = [];
+      for (const sessionId of sessionIds) {
+        const session = yield* providerSessions
+          .get(sessionId)
+          .pipe(Effect.orElseSucceed(() => Option.none()));
+        if (Option.isNone(session) || session.value.describePendingBackgroundWork === undefined) {
+          continue;
+        }
+        const found = yield* session.value.describePendingBackgroundWork.pipe(
+          Effect.orElseSucceed(() => []),
+        );
+        for (const work of found) labels.push(describePendingBackgroundWork(work));
+      }
+      return labels.length === 0 ? null : `Still running: ${[...new Set(labels)].join(", ")}.`;
+    },
+  );
+
   // An account switch resumes the replaced session's native thread, so it waits while that
   // session still runs background work. A hand-off or a fresh session leaves the work running.
   const switchWaitsForBackgroundWork = Effect.fn("Orchestrator.switchWaitsForBackgroundWork")(
@@ -2545,7 +2578,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ) {
         yield* Effect.logInfo(
           "Queue waits: the replaced provider session still runs background work",
-          { threadId, runId: queuedRun.id, providerSessionIds: Array.from(busySessionIds) },
+          {
+            threadId,
+            runId: queuedRun.id,
+            providerSessionIds: Array.from(busySessionIds),
+            running: yield* describeSessionsBackgroundWork(busySessionIds),
+          },
         );
         backgroundWorkWaits.add(threadId);
         // A later automatic send that keeps the busy session, such as a wake delivering its
@@ -7691,11 +7729,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       !freshContext &&
       providerSwitchPlan?.transition.type === "restart_and_resume"
     ) {
+      const running = yield* describeSessionsBackgroundWork(busySessionIds);
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
         commandType: command.type,
-        cause:
-          "The previous account is still running background agents or commands, and switching would end them. Wait for them to finish, or press Stop, then send the message again.",
+        cause: `The previous account is still running background agents or commands, and switching would end them. Wait for them to finish, or press Stop, then send the message again.${running === null ? "" : ` ${running}`}`,
       });
     }
     const sessionsToDetach = releasableSessions.filter(

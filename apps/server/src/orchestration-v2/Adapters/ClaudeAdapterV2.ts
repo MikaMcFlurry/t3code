@@ -11945,17 +11945,19 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             }),
           );
 
-        const liveProcessRunsBackgroundWork = Effect.fnUntraced(function* (
+        // The first piece of background work this live process runs, or null.
+        const findLiveProcessBackgroundWork = Effect.fnUntraced(function* (
           live: ClaudeLiveQueryContext,
           options?: { readonly forGoalCheck?: boolean },
         ) {
-          if (
-            rosterForNativeThread(
-              yield* Ref.get(pendingBackgroundTasksByNativeThread),
-              live.nativeThreadId,
-            ).size > 0
-          ) {
-            return true;
+          for (const task of rosterForNativeThread(
+            yield* Ref.get(pendingBackgroundTasksByNativeThread),
+            live.nativeThreadId,
+          ).values()) {
+            return {
+              kind: task.kind === "subagent" ? "subagent" : "background_task",
+              label: task.description ?? task.command ?? task.taskId,
+            } satisfies ProviderAdapter.ProviderAdapterV2PendingBackgroundWork;
           }
           const buffered = (yield* Ref.get(wakeBuffers)).get(live.nativeThreadId)?.messages ?? [];
           for (const [taskId, subagent] of yield* Ref.get(sessionSubagentsByTaskId)) {
@@ -11972,10 +11974,44 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   message.task_id === taskId,
               )
             ) {
-              return true;
+              return {
+                kind: "subagent",
+                label: subagent.task.title ?? taskId,
+              } satisfies ProviderAdapter.ProviderAdapterV2PendingBackgroundWork;
             }
           }
-          return false;
+          return null;
+        });
+
+        const liveProcessRunsBackgroundWork = (
+          live: ClaudeLiveQueryContext,
+          options?: { readonly forGoalCheck?: boolean },
+        ) =>
+          findLiveProcessBackgroundWork(live, options).pipe(Effect.map((found) => found !== null));
+
+        // Work a detach would end: what the live process runs, plus a wake turn it is still
+        // producing (root frames after the last buffered result). Buffered output that ends in a
+        // result, and state left over from an exited or stopping process, end with nothing.
+        const pendingBackgroundWork = Effect.gen(function* () {
+          const live = yield* Ref.get(queryContext);
+          if (live === null || live.stopping) return [];
+          const found: Array<ProviderAdapter.ProviderAdapterV2PendingBackgroundWork> = [];
+          const work = yield* findLiveProcessBackgroundWork(live);
+          if (work !== null) found.push(work);
+          // A wakeup can be up to an hour out, past the idle timeout, and dies with the process.
+          if (scheduledWakeupsByNativeThread.has(live.nativeThreadId)) {
+            found.push({
+              kind: "background_task",
+              label: CLAUDE_SCHEDULED_WAKEUP_TASK.description ?? null,
+            });
+          }
+          const buffer = (yield* Ref.get(wakeBuffers)).get(live.nativeThreadId);
+          const messages = buffer?.messages ?? [];
+          const lastResult = messages.findLastIndex((message) => message.type === "result");
+          if (messages.slice(lastResult + 1).some(isClaudeRootTurnFrame)) {
+            found.push({ kind: "wake_turn", label: buffer?.detail ?? null });
+          }
+          return found;
         });
 
         const applySelectionLive = Effect.fnUntraced(function* (
@@ -13093,36 +13129,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           getModelContextWindow: (selection) => claudeContextWindow(selection) ?? undefined,
           events: Stream.fromEffectRepeat(Queue.take(events)),
           backgroundTasksEndWithProcess: true,
-          hasPendingBackgroundWork: Effect.gen(function* () {
-            // A wakeup can be up to an hour out, past the idle timeout, and dies with the process.
-            if (scheduledWakeupsByNativeThread.size > 0) {
-              return true;
-            }
-            for (const roster of (yield* Ref.get(pendingBackgroundTasksByNativeThread)).values()) {
-              if (roster.size > 0) {
-                return true;
-              }
-            }
-            for (const subagent of (yield* Ref.get(sessionSubagentsByTaskId)).values()) {
-              if (subagent.task.status === "running") {
-                return true;
-              }
-            }
-            const buffers = yield* Ref.get(wakeBuffers);
-            for (const entry of buffers.values()) {
-              if (
-                entry.messages.some(
-                  (message) =>
-                    message.type === "user" ||
-                    message.type === "assistant" ||
-                    message.type === "result",
-                )
-              ) {
-                return true;
-              }
-            }
-            return false;
-          }),
+          hasPendingBackgroundWork: pendingBackgroundWork.pipe(
+            Effect.map((found) => found.length > 0),
+          ),
+          describePendingBackgroundWork: pendingBackgroundWork,
           // Untraced: the run's event stream calls this once per provider event.
           hasPendingBackgroundWorkForThread: Effect.fnUntraced(function* (providerThread, options) {
             const nativeThreadId = providerThread.nativeThreadRef?.nativeId;
