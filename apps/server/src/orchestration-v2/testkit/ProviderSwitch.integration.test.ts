@@ -15,6 +15,7 @@ import {
   type OrchestrationV2ThreadProjection,
   ProjectId,
   ProviderInstanceId,
+  type ProviderReplayEntry,
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
@@ -56,6 +57,7 @@ import {
   CodexProviderCapabilitiesV2,
   canReuseCodexContextUsage,
 } from "../Adapters/CodexAdapterV2.ts";
+import { openCode2ReplayAdapter } from "../Adapters/OpenCode2AdapterV2.testkit.ts";
 import { AcpProviderCapabilitiesV2 } from "@t3tools/provider-acp/server/adapter";
 import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
@@ -3363,6 +3365,277 @@ describe("orchestration v2 provider switching", () => {
               ProviderReplayHarness.layerWithRegistry(
                 {
                   name: "stale-wake-account-switch",
+                  runtimePolicyOverride: {
+                    cwd,
+                    approvalPolicy: "never",
+                    sandboxPolicy: {
+                      type: "readOnly",
+                      access: { type: "fullAccess" },
+                      networkAccess: false,
+                    },
+                  },
+                },
+                layerRegistry,
+              ),
+            ),
+          );
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+              NodeCrypto.layer,
+            ),
+          ),
+        ),
+      ),
+  );
+
+  // regression: #32296 OpenCode kept an idle, failed thread busy on a finished child's report
+  it.live.each(["finished", "running"] as const)(
+    "switches a failed OpenCode thread to Claude and releases it only if its child has %s",
+    (child) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* checkpointWorkspace(`opencode-report-claude-switch-${child}`);
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const SESSION = "ses_f148ca2deffeJcwCnRQtb0YFNX";
+          const CHILD = "ses_f1485c529ffea4URrYruwEg0Ja";
+          const openCodeSelection: ModelSelection = {
+            instanceId: ProviderInstanceId.make("opencode"),
+            model: "opencode/big-pickle",
+          };
+          const out = (type: string, input?: unknown): ProviderReplayEntry => ({
+            type: "expect_outbound",
+            frame: input === undefined ? { type } : { type, input },
+          });
+          const reply = (operation: string, data: unknown): ProviderReplayEntry => ({
+            type: "emit_inbound",
+            frame: { type: "sdk.response", operation, data },
+          });
+          const event = (type: string, data: Record<string, unknown>): ProviderReplayEntry => ({
+            type: "emit_inbound",
+            frame: {
+              type: "sdk.event",
+              event: {
+                id: `evt_${type.replaceAll(".", "")}`,
+                created: 1,
+                type,
+                data,
+                durable: { aggregateID: SESSION, seq: 1, version: 1 },
+              },
+            },
+          });
+          const model = { id: "big-pickle", providerID: "opencode", variant: "default" };
+          const tool = { sessionID: SESSION, assistantMessageID: "msg_assistant", id: "call-bg" };
+          const openCodeAdapter = yield* openCode2ReplayAdapter([
+            out("event.subscribe"),
+            out("model.list", "<any>"),
+            reply("model.list", {
+              location: { directory: cwd },
+              data: [
+                {
+                  id: "big-pickle",
+                  modelID: "big-pickle",
+                  providerID: "opencode",
+                  family: "big-pickle",
+                  name: "Big Pickle",
+                  capabilities: { tools: true, input: ["text"], output: ["text"] },
+                  variants: [],
+                  time: { released: 1760659200000 },
+                  cost: [{ input: 0, output: 0, cache: { read: 0, write: 0 } }],
+                  status: "active",
+                  enabled: true,
+                  limit: { context: 200000, input: 160000, output: 32000 },
+                },
+              ],
+            }),
+            out("session.create", {
+              location: { directory: cwd },
+              model: "<any>",
+              permissions: "<any>",
+              title: "<any>",
+            }),
+            reply("session.create", {
+              data: {
+                id: SESSION,
+                title: "OpenCode report",
+                projectID: "global",
+                model,
+                cost: 0,
+                tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                time: { created: 1790656601394, updated: 1790656601394 },
+                location: { directory: cwd },
+                permissions: [{ action: "*", resource: "*", effect: "allow" }],
+              },
+            }),
+            out("session.instructions.entry.put", {
+              sessionID: SESSION,
+              key: "t3-code",
+              value: "<any>",
+            }),
+            reply("session.instructions.entry.put", null),
+            out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+            reply("session.prompt", {
+              data: {
+                id: "msg_user_first",
+                sessionID: SESSION,
+                time: { created: 1790656601410 },
+                type: "user",
+                payload: { text: "<prompt>" },
+                delivery: "steer",
+              },
+            }),
+            event("session.execution.started", { sessionID: SESSION }),
+            event("session.tool.input.started", { ...tool, name: "subagent" }),
+            event("session.tool.called", {
+              ...tool,
+              name: "subagent",
+              input: { description: "Sleep", prompt: "sleep", background: true },
+              executed: false,
+            }),
+            event("session.created", {
+              sessionID: CHILD,
+              slug: "proud-canyon",
+              version: "2.0.18",
+              projectID: "global",
+              parentID: SESSION,
+              location: { directory: cwd },
+              subpath: "",
+              title: "Sleep",
+              agent: "general",
+              model,
+            }),
+            event("session.tool.progress", {
+              ...tool,
+              metadata: { sessionID: CHILD, status: "running" },
+            }),
+            event("session.tool.success", {
+              ...tool,
+              content: [{ type: "text", text: "The subagent is working in the background." }],
+              metadata: { sessionID: CHILD, status: "running" },
+              executed: true,
+            }),
+            event("session.execution.started", { sessionID: CHILD }),
+            ...(child === "running"
+              ? []
+              : [
+                  event("session.execution.succeeded", { sessionID: CHILD }),
+                  // The child's report reaches the parent's inbox, but the parent runs out
+                  // of credits before OpenCode delivers it.
+                  event("session.inbox.enqueued", {
+                    inboxID: "msg_report",
+                    sessionID: SESSION,
+                    item: {
+                      type: "synthetic",
+                      payload: {
+                        text: `<subagent sessionID="${CHILD}" state="completed" description="Sleep">\nCHILD_OK\n</subagent>`,
+                        description: "Sleep",
+                        metadata: {
+                          source: "subagent",
+                          childID: CHILD,
+                          agent: "General",
+                          state: "completed",
+                        },
+                      },
+                      delivery: "steer",
+                    },
+                  }),
+                ]),
+            event("session.execution.failed", {
+              sessionID: SESSION,
+              error: {
+                type: "provider.quota",
+                message: "This request requires more credits.",
+                status: 402,
+              },
+            }),
+          ]);
+          const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+            openCodeAdapter,
+            makeTestAdapter({
+              instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+              driver: CLAUDE_DRIVER,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              responseByRunOrdinal: { 2: "Claude picked it up" },
+              capturedTurns,
+            }),
+          ]);
+          const switchThreadId = ThreadId.make("thread:opencode-report-claude-switch");
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const send = (ordinal: number, modelSelection: ModelSelection) =>
+              orchestrator.dispatch({
+                type: "message.dispatch",
+                createdBy: "user",
+                creationSource: "web",
+                commandId: CommandId.make(`command:opencode-report-claude-switch:${ordinal}`),
+                threadId: switchThreadId,
+                messageId: MessageId.make(`message:opencode-report-claude-switch:${ordinal}`),
+                text: `Prompt ${ordinal}`,
+                attachments: [],
+                modelSelection,
+                dispatchMode: { type: "start_immediately" },
+              });
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make("command:opencode-report-claude-switch:create"),
+              threadId: switchThreadId,
+              projectId: ProjectId.make("project:opencode-report-claude-switch"),
+              title: "OpenCode report Claude switch",
+              modelSelection: openCodeSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: cwd,
+            });
+            yield* send(1, openCodeSelection);
+            yield* worker.drain();
+            const failed = yield* waitForIdle(switchThreadId);
+            assert.deepEqual(
+              failed.runs.map((run) => run.status),
+              ["failed"],
+            );
+
+            yield* send(2, CLAUDE_MODEL_SELECTION);
+            yield* worker.drain();
+            const afterSend = yield* orchestrator.getThreadProjection(switchThreadId);
+            assert.notStrictEqual(
+              afterSend.runs[1]?.status,
+              "queued",
+              "the switch waits on a finished child's undelivered report as if it were running work",
+            );
+            const done = yield* waitForIdle(switchThreadId);
+            assert.deepEqual(
+              done.runs.map((run) => [run.providerInstanceId, run.status]),
+              [
+                [openCodeSelection.instanceId, "failed"],
+                [CLAUDE_MODEL_SELECTION.instanceId, "completed"],
+              ],
+            );
+            assert.deepEqual(
+              (yield* Ref.get(capturedTurns)).map((turn) => turn.driver),
+              [CLAUDE_DRIVER],
+            );
+            // A session that runs nothing is released; one whose child still runs stays up,
+            // because a detach would end that child.
+            assert.deepEqual(
+              done.providerSessions.map((session) => session.providerInstanceId),
+              child === "running"
+                ? [openCodeSelection.instanceId, CLAUDE_MODEL_SELECTION.instanceId]
+                : [CLAUDE_MODEL_SELECTION.instanceId],
+              "the replaced OpenCode session stays up on a finished child's undelivered report",
+            );
+          }).pipe(
+            Effect.provide(
+              ProviderReplayHarness.layerWithRegistry(
+                {
+                  name: "opencode-report-claude-switch",
                   runtimePolicyOverride: {
                     cwd,
                     approvalPolicy: "never",
