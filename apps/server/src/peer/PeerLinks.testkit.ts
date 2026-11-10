@@ -57,6 +57,7 @@ export const descriptorOf = (
     repositoryIdentity: true,
     mcpModeLimitHeader: true,
     linkFence: true,
+    pinnedWorktreeLaunch: true,
     ...capabilities,
   },
 });

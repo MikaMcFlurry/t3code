@@ -196,6 +196,10 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   linkClientPairing: Schema.optionalKey(Schema.Boolean),
   /** The same route also mints a pairing code for a link from another environment. */
   linkPairingForLink: Schema.optionalKey(Schema.Boolean),
+  /** `t3_thread_launch` takes `pinBase` and pins a worktree base to one commit before it
+      accepts the launch. Another environment delegates a worktree task here only when it is
+      set; older servers ignore `pinBase`. */
+  pinnedWorktreeLaunch: Schema.optionalKey(Schema.Boolean),
   /** Mints pairing codes that approve one agent sign-in at a set level (`AUTO-…`). */
   mcpApprovalCodes: Schema.optionalKey(Schema.Boolean),
   peerLinkPairingCodes: Schema.optionalKey(Schema.Boolean),

@@ -518,6 +518,11 @@ export const OrchestrationV2AppThread = Schema.Struct({
   linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
   workflowRun: Schema.optional(OrchestrationV2WorkflowOrigin),
+  /**
+   * The commit a launch pinned its worktree base to, recorded with the thread so a replay of
+   * that launch starts from it even before its first message was accepted.
+   */
+  worktreeBaseCommit: Schema.optional(TrimmedNonEmptyString),
   lineage: OrchestrationV2AppThreadLineage,
   forkedFrom: Schema.NullOr(
     Schema.Union([
@@ -3327,6 +3332,8 @@ export const OrchestrationV2Command = Schema.Union([
     delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
     /** Only the server sets this, for a thread that is a workflow run's agent step. */
     workflowRun: Schema.optional(OrchestrationV2WorkflowOrigin),
+    /** Set by a launch whose worktree base was pinned to this commit before it was accepted. */
+    worktreeBaseCommit: Schema.optional(TrimmedNonEmptyString),
     importedNativeThread: Schema.optional(
       Schema.Struct({
         ref: Schema.Struct({
