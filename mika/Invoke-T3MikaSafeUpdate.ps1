@@ -20,11 +20,13 @@
   Registers the scheduled task: nightly from 03:30, retrying every 30 minutes until 07:30.
 .PARAMETER Force
   Updates even when nothing changed upstream (still waits for idle).
+.PARAMETER WindowStart
+  HH:mm that overrides update-fenster.txt for this run, e.g. a one-off daytime window.
 .PARAMETER IgnoreThread
   Thread ids whose runs don't block the update, e.g. the agent thread that asked for it. The
   restart still interrupts that thread's turn.
 #>
-param([switch]$Register, [switch]$Force, [string[]]$IgnoreThread = @())
+param([switch]$Register, [switch]$Force, [string[]]$IgnoreThread = @(), [string]$WindowStart = '')
 . "$PSScriptRoot\T3Mika.Common.ps1"
 
 $logDir = Join-Path $T3Mika.Root 'logs'
@@ -100,14 +102,16 @@ try {
   $turns = & $idle
   if ($turns -ne '0') {
     $windowFile = Join-Path $T3Mika.Root 'update-fenster.txt'
-    $window = if (Test-Path $windowFile) { (Get-Content $windowFile -Raw).Trim() } else { '06:00' }
+    $window = if ($WindowStart) { $WindowStart } elseif (Test-Path $windowFile) {
+      (Get-Content $windowFile -Raw).Trim()
+    } else { '06:00' }
     $now = Get-Date
     $forceAt = $null
     if ($window -match '^\d{1,2}:\d{2}$') {
       $forceAt = [datetime]::ParseExact($window.PadLeft(5, '0'), 'HH:mm', $null)
     }
-    # The task repeats until 07:30; a forced restart later than that would hit the working day.
-    $inWindow = $null -ne $forceAt -and $now -ge $forceAt -and $now -lt $forceAt.Date.AddHours(8)
+    # The window lasts two hours, so a run that starts late never restarts the app mid-morning.
+    $inWindow = $null -ne $forceAt -and $now -ge $forceAt -and $now -lt $forceAt.AddHours(2)
     $settingsFile = Join-Path $T3Mika.Home 'userdata\settings.json'
     $continues = $true
     if (Test-Path $settingsFile) {
