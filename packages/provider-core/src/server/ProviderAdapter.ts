@@ -627,6 +627,12 @@ export type ProviderAdapterV2SubagentOutcome = {
   readonly result: OrchestrationV2Subagent["result"];
 };
 
+/** One piece of work that `hasPendingBackgroundWork` found, for a refusal's detail. */
+export type ProviderAdapterV2PendingBackgroundWork = {
+  readonly kind: "background_task" | "subagent" | "wake_turn";
+  readonly label: string | null;
+};
+
 export interface ProviderAdapterV2SessionRuntime {
   readonly instanceId: ProviderInstanceId;
   readonly driver: ProviderDriverKind;
@@ -638,6 +644,10 @@ export interface ProviderAdapterV2SessionRuntime {
   /** Manager runtimes broadcast independent subscriptions; adapters may expose only a single-consumer stream. */
   readonly subscribeEvents?: Effect.Effect<ProviderAdapterV2EventSubscription>;
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
+  /** What `hasPendingBackgroundWork` counts as running; empty when it would report false. */
+  readonly describePendingBackgroundWork?: Effect.Effect<
+    ReadonlyArray<ProviderAdapterV2PendingBackgroundWork>
+  >;
   /** Root-subscription probe; replacement checks opt in to subagents owned by the live process. */
   readonly hasPendingBackgroundWorkForThread?: (
     providerThread: OrchestrationV2ProviderThread,
