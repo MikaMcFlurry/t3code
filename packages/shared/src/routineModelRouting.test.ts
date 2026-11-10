@@ -84,21 +84,28 @@ const settings = (patch: Partial<ServerSettings> = {}): ServerSettings => ({
   ),
   ...patch,
 });
-const resolve = (input: {
+const route = (input: {
   readonly prompt?: string;
   readonly body?: unknown;
   readonly settings?: ServerSettings;
+  readonly providers?: ReadonlyArray<ServerProvider>;
 }) =>
   resolveRoutineModelSelection({
     stored,
     prompt: input.prompt ?? "Check the contact forms",
     directive:
       input.body === undefined ? null : parseRoutineRoutingDirective(JSON.stringify(input.body)),
-    providers,
+    providers: input.providers ?? providers,
     settings: input.settings ?? settings(),
     projectId: null,
     now,
   });
+/** A route that starts; fails the test otherwise. */
+const resolve = (input: Parameters<typeof route>[0]) => {
+  const result = route(input);
+  if (!result.startable) throw new Error(`Expected a startable route: ${result.reason}`);
+  return result;
+};
 
 describe("routineModelRouting", () => {
   it("reads only a well-formed t3 object from the webhook body", () => {
@@ -161,5 +168,53 @@ describe("routineModelRouting", () => {
         settings: settings({ autoModelSelection: "balance-accounts" }),
       }).selection.instanceId,
     ).toBe("claude-1");
+  });
+
+  it("does not start a run whose allowed lists match no model", () => {
+    // The webhook narrows to codex, the setting allows only claude-2: nothing is left.
+    const result = route({
+      body: { t3: { allowed: ["driver:codex"] } },
+      settings: settings({ autoRoutingAllowed: ["claude-2"] }),
+    });
+    expect(result).toMatchObject({ startable: false, code: "no-allowed-model" });
+    expect(result).not.toHaveProperty("selection");
+    expect(result.reason).toContain("claude-1/claude-opus-5-5");
+  });
+
+  it("does not start a run when every allowed model is unavailable", () => {
+    const unavailable = providers.map((entry) =>
+      entry.instanceId === "claude-2" ? { ...entry, status: "error" as const } : entry,
+    );
+    for (const body of [undefined, { t3: { routing: "auto" } }]) {
+      const result = route({
+        body,
+        providers: unavailable,
+        settings: settings({ autoRoutingAllowed: ["claude-2"] }),
+      });
+      expect(result).toMatchObject({ startable: false, code: "no-allowed-model-available" });
+      expect(result.reason).toContain("claude-2");
+    }
+    // An explicitly requested model outside the list does not get around it either.
+    expect(
+      route({
+        body: { t3: { model: "claude-1/claude-opus-5-5" } },
+        providers: unavailable,
+        settings: settings({ autoRoutingAllowed: ["claude-2"] }),
+      }),
+    ).toMatchObject({ startable: false, code: "no-allowed-model-available" });
+  });
+
+  it("runs an allowed stored model even when routing finds nothing better", () => {
+    expect(resolve({ settings: settings({ autoRoutingAllowed: ["claude-1"] }) }).selection).toEqual(
+      stored,
+    );
+  });
+
+  it("treats no allowed list as allowing every model, the stored one included", () => {
+    // Nothing usable to route to, but no list excludes the stored model.
+    const none = providers.map((entry) => ({ ...entry, status: "error" as const }));
+    expect(resolve({ providers: none, body: { t3: { routing: "auto" } } }).selection).toEqual(
+      stored,
+    );
   });
 });
