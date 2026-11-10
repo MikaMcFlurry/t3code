@@ -50,25 +50,43 @@ if ($failed.Count -gt 0) {
   throw "Update gestoppt. Konflikte in: $($failed -join ', '). mika/main und dein Build sind unverändert."
 }
 
-# Remember the working mika/main so a failed merge can put it back unchanged.
-$previousMain = git rev-parse mika/main
-git switch -q -C mika/main main
-foreach ($branch in $branches) {
-  git merge -q --no-ff $branch -m "merge: $branch"
-  $merged = $LASTEXITCODE -eq 0
-  # rerere replays conflict resolutions recorded on earlier updates; commit when none remain.
-  if (-not $merged -and -not (git diff --name-only --diff-filter=U)) {
-    git add -A
-    git commit -q --no-edit
-    $merged = $LASTEXITCODE -eq 0
-  }
-  if (-not $merged) {
-    git merge --abort
-    # Back to the old mika/main: it tracks these scripts, so the next run starts from a clean tree.
-    git switch -q -C mika/main $previousMain
-    throw "Die Branches vertragen sich untereinander nicht ($branch). Build unverändert."
-  }
+# Merge in a worktree of its own with current dependencies: the commit hooks lint against
+# node_modules, and the app's node_modules are only refreshed while the app is closed.
+$mergeDir = Join-Path (Split-Path $T3Mika.Repo) 'wt\t3mika-merge'
+if (-not (Test-Path (Join-Path $mergeDir '.git'))) {
+  git worktree prune
+  git worktree add -q --detach $mergeDir main
 }
+Push-Location $mergeDir
+try {
+  git merge --abort 2>$null
+  git checkout -q --force --detach main
+  git clean -qfd
+  vp i *> $null
+  foreach ($branch in $branches) {
+    $lock = git rev-parse 'HEAD:pnpm-lock.yaml'
+    git merge -q --no-ff $branch -m "merge: $branch"
+    $merged = $LASTEXITCODE -eq 0
+    # rerere replays conflict resolutions recorded on earlier updates; commit when none remain.
+    if (-not $merged -and -not (git diff --name-only --diff-filter=U)) {
+      # A branch that changes dependencies needs them installed before the hooked commit.
+      if ($lock -ne (git rev-parse ':pnpm-lock.yaml')) { vp i *> $null }
+      git add -A
+      git commit -q --no-edit
+      $merged = $LASTEXITCODE -eq 0
+    }
+    if (-not $merged) {
+      git merge --abort
+      throw "Die Branches vertragen sich untereinander nicht ($branch). Build unverändert."
+    }
+    if ($lock -ne (git rev-parse 'HEAD:pnpm-lock.yaml')) { vp i *> $null }
+  }
+  $result = git rev-parse HEAD
+} finally {
+  Pop-Location
+}
+git switch -q mika/main
+git reset -q --hard $result
 if (-not $NoPush) { git push -q --force-with-lease origin mika/main }
 
 if ($NoBuild) { return }
