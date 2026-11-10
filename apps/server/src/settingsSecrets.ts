@@ -247,8 +247,31 @@ function mapSecretFieldGroups(
       ) as SimlockDeviceHostConfig,
   );
 
+  // Every header and environment value of a central MCP server may carry a token, so each one is
+  // a secret slot keyed by server name and entry name.
+  const centralMcpServers = settings.centralMcpServers.map((server) => {
+    const transport = server.transport;
+    const entries = transport.type === "stdio" ? transport.env : transport.headers;
+    const keys = Object.keys(entries);
+    if (keys.length === 0) return server;
+    const kind = transport.type === "stdio" ? "env" : "header";
+    const mapped = mapFields(
+      entries,
+      keys,
+      (key) => `central-mcp-${encode(server.name)}-${kind}-${encode(key)}`,
+    ) as Record<string, string>;
+    return {
+      ...server,
+      transport:
+        transport.type === "stdio"
+          ? { ...transport, env: mapped }
+          : { ...transport, headers: mapped },
+    };
+  });
+
   return {
     ...settings,
+    centralMcpServers,
     cloudSpeechCredentials: mapFields(
       settings.cloudSpeechCredentials,
       voiceSecretFields,
