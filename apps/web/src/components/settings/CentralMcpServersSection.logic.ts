@@ -33,3 +33,56 @@ export function describeCentralMcpServer(server: CentralMcpServer): string {
     ? server.transport.url
     : [server.transport.command, ...server.transport.args].join(" ");
 }
+
+/** Stdio servers take environment variables; http servers take headers. Both may hold tokens. */
+export function centralMcpServerSecretKind(server: CentralMcpServer): "env" | "header" {
+  return server.transport.type === "stdio" ? "env" : "header";
+}
+
+/**
+ * The entry names a server holds, and whether each has a saved value. The server sends every
+ * saved value back as a mask; sending the mask back unchanged keeps the stored secret.
+ */
+export function centralMcpServerSecretEntries(
+  server: CentralMcpServer,
+): ReadonlyArray<{ readonly key: string; readonly saved: boolean }> {
+  const entries =
+    server.transport.type === "stdio" ? server.transport.env : server.transport.headers;
+  return Object.entries(entries).map(([key, value]) => ({ key, saved: value.length > 0 }));
+}
+
+/** Sets one header or environment value, replacing a saved one; `null` removes the entry. */
+export function withCentralMcpServerSecret(
+  server: CentralMcpServer,
+  key: string,
+  value: string | null,
+): CentralMcpServer {
+  const transport = server.transport;
+  const entries = { ...(transport.type === "stdio" ? transport.env : transport.headers) };
+  if (value === null) delete entries[key];
+  else entries[key] = value;
+  return {
+    ...server,
+    transport:
+      transport.type === "stdio"
+        ? { ...transport, env: entries }
+        : { ...transport, headers: entries },
+  };
+}
+
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
+/** Why a new entry name cannot be used, or null when it can. */
+export function centralMcpServerSecretKeyProblem(
+  server: CentralMcpServer,
+  key: string,
+): string | null {
+  const kind = centralMcpServerSecretKind(server);
+  if (!(kind === "env" ? ENV_NAME : HEADER_NAME).test(key)) {
+    return kind === "env"
+      ? "Use letters, digits and '_' for the variable name, not starting with a digit."
+      : "Enter a valid header name, such as Authorization.";
+  }
+  return null;
+}
