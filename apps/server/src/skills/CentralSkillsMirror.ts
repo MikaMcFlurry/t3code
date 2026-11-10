@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeCrypto from "node:crypto";
+
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -6,6 +9,7 @@ import * as Schema from "effect/Schema";
 import { CentralSkillName } from "@t3tools/contracts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
 
 /**
  * Claude loads `<dir>/.claude/skills` from every `--add-dir`. T3 keeps mirrored copies of the
@@ -62,20 +66,51 @@ export const collectCentralSkillFolders = Effect.fnUntraced(function* (
 const readOptionalFile = (fileSystem: FileSystem.FileSystem, filePath: string) =>
   fileSystem.readFileString(filePath).pipe(Effect.orElseSucceed(() => undefined));
 
+/** Walking stops after this many entries; a larger folder still gets a revision, just a coarser one. */
+const MAX_REVISION_ENTRIES = 4096;
+const MAX_REVISION_DEPTH = 16;
+
+/**
+ * Identifies one state of a skill folder: every file's relative path, size and modification time,
+ * so an edit to a script, reference or asset counts as much as one to SKILL.md. Undefined when the
+ * folder has no SKILL.md.
+ */
 const skillRevision = Effect.fnUntraced(function* (
   fileSystem: FileSystem.FileSystem,
   path: Path.Path,
   directory: string,
 ) {
-  const metadata = yield* readOptionalFile(
-    fileSystem,
-    path.join(directory, CENTRAL_SKILL_METADATA_FILE),
-  );
-  const modified = yield* fileSystem.stat(path.join(directory, "SKILL.md")).pipe(
-    Effect.map((info) => Option.getOrUndefined(info.mtime)?.getTime() ?? 0),
-    Effect.orElseSucceed(() => undefined),
-  );
-  return modified === undefined ? undefined : `${modified}:${metadata?.trim() ?? ""}`;
+  const skillFile = yield* fileSystem
+    .stat(path.join(directory, "SKILL.md"))
+    .pipe(Effect.orElseSucceed(() => undefined));
+  if (skillFile === undefined) return undefined;
+  const hash = NodeCrypto.createHash("sha256");
+  let entries = 0;
+  // Directories still to read, as paths relative to the skill folder; deterministic order.
+  const pending: Array<ReadonlyArray<string>> = [[]];
+  while (pending.length > 0 && entries < MAX_REVISION_ENTRIES) {
+    const relative = pending.pop() ?? [];
+    const names = yield* fileSystem
+      .readDirectory(path.join(directory, ...relative))
+      .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
+    const subdirectories: Array<ReadonlyArray<string>> = [];
+    for (const name of names.toSorted()) {
+      if (entries >= MAX_REVISION_ENTRIES) break;
+      if (relative.length === 0 && name === CENTRAL_SKILL_MIRROR_MARKER) continue;
+      const child = [...relative, name];
+      const info = yield* fileSystem
+        .stat(path.join(directory, ...child))
+        .pipe(Effect.orElseSucceed(() => undefined));
+      if (info === undefined) continue;
+      entries++;
+      const modified = Option.getOrUndefined(info.mtime)?.getTime() ?? 0;
+      hash.update(`${child.join("/")}\0${info.type}\0${info.size}\0${modified}\n`);
+      if (info.type === "Directory" && child.length < MAX_REVISION_DEPTH)
+        subdirectories.push(child);
+    }
+    pending.push(...subdirectories.toReversed());
+  }
+  return `tree:${hash.digest("hex")}`;
 });
 
 export interface CentralSkillsMirrorResult {
@@ -84,18 +119,76 @@ export interface CentralSkillsMirrorResult {
   readonly shadowed: ReadonlyArray<string>;
 }
 
+const STAGING_PREFIX = ".t3-staging-";
+const BACKUP_PREFIX = ".t3-backup-";
+
+/** One sync per target folder at a time within this server; see `mirrorCentralSkills`. */
+const targetLocks = Effect.runSync(KeyedLock.make<string>());
+
+const targetLockKey = (path: Path.Path, targetSkillsDir: string, windows: boolean) => {
+  const resolved = path.resolve(targetSkillsDir);
+  return windows ? resolved.toLowerCase() : resolved;
+};
+
 /**
- * Mirrors the enabled central skills into a provider home's skills folder for
- * providers that cannot load an extra skills root per session (Codex). Only
- * folders carrying the mirror marker are replaced or deleted. Concurrent
- * syncs of one home are safe: each copy is staged and renamed into place.
+ * Replaces `destination` with `staging`. The old copy is renamed aside first and renamed back
+ * when the new one cannot be moved in, so a failed swap leaves the previous version in place.
  */
-export const mirrorCentralSkills = Effect.fn("CentralSkills.mirror")(function* (input: {
-  readonly skillsDir: string;
-  readonly targetSkillsDir: string;
-}) {
-  const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
+const swapIntoPlace = Effect.fnUntraced(function* (
+  fileSystem: FileSystem.FileSystem,
+  staging: string,
+  destination: string,
+  backup: string,
+) {
+  const hadPrevious = yield* fileSystem.exists(destination);
+  if (hadPrevious) {
+    yield* fileSystem.remove(backup, { recursive: true }).pipe(Effect.ignore);
+    yield* fileSystem.rename(destination, backup);
+  }
+  yield* fileSystem
+    .rename(staging, destination)
+    .pipe(
+      Effect.onError(() =>
+        hadPrevious ? fileSystem.rename(backup, destination).pipe(Effect.ignore) : Effect.void,
+      ),
+    );
+  if (hadPrevious) yield* fileSystem.remove(backup, { recursive: true }).pipe(Effect.ignore);
+});
+
+/**
+ * Finishes what an interrupted sync left behind: a backup whose skill folder is missing goes
+ * back into place, any other backup or staging folder is deleted.
+ */
+const recoverInterruptedSwaps = Effect.fnUntraced(function* (
+  fileSystem: FileSystem.FileSystem,
+  path: Path.Path,
+  targetSkillsDir: string,
+  entries: ReadonlyArray<string>,
+) {
+  for (const entry of entries) {
+    const entryPath = path.join(targetSkillsDir, entry);
+    if (entry.startsWith(BACKUP_PREFIX)) {
+      const name = entry.slice(BACKUP_PREFIX.length);
+      const destination = path.join(targetSkillsDir, name);
+      const restorable =
+        isCentralSkillName(name) &&
+        !(yield* fileSystem.exists(destination).pipe(Effect.orElseSucceed(() => true)));
+      yield* (
+        restorable
+          ? fileSystem.rename(entryPath, destination)
+          : fileSystem.remove(entryPath, { recursive: true })
+      ).pipe(Effect.ignore);
+    } else if (entry.startsWith(STAGING_PREFIX)) {
+      yield* fileSystem.remove(entryPath, { recursive: true }).pipe(Effect.ignore);
+    }
+  }
+});
+
+const mirrorCentralSkillsLocked = Effect.fnUntraced(function* (
+  fileSystem: FileSystem.FileSystem,
+  path: Path.Path,
+  input: { readonly skillsDir: string; readonly targetSkillsDir: string },
+) {
   const folders = yield* collectCentralSkillFolders(fileSystem, path, input.skillsDir);
   const wanted = new Map<string, string>();
   for (const [name, directory] of folders) {
@@ -103,10 +196,15 @@ export const mirrorCentralSkills = Effect.fn("CentralSkills.mirror")(function* (
     if (revision !== undefined) wanted.set(name, revision);
   }
 
-  const existing = yield* fileSystem
+  const listTarget = fileSystem
     .readDirectory(input.targetSkillsDir)
     .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
-  if (wanted.size === 0 && existing.length === 0) return { mirrored: [], shadowed: [] };
+  const leftovers = yield* listTarget;
+  if (wanted.size === 0 && leftovers.length === 0) {
+    return { mirrored: [], shadowed: [] } satisfies CentralSkillsMirrorResult;
+  }
+  yield* recoverInterruptedSwaps(fileSystem, path, input.targetSkillsDir, leftovers);
+  const existing = yield* listTarget;
   yield* fileSystem.makeDirectory(input.targetSkillsDir, { recursive: true });
 
   for (const entry of existing) {
@@ -138,7 +236,7 @@ export const mirrorCentralSkills = Effect.fn("CentralSkills.mirror")(function* (
     yield* Effect.gen(function* () {
       const staging = yield* fileSystem.makeTempDirectory({
         directory: input.targetSkillsDir,
-        prefix: ".t3-staging-",
+        prefix: STAGING_PREFIX,
       });
       yield* Effect.gen(function* () {
         yield* fileSystem.copy(folders.get(name) ?? "", staging, { overwrite: true });
@@ -146,8 +244,12 @@ export const mirrorCentralSkills = Effect.fn("CentralSkills.mirror")(function* (
           path.join(staging, CENTRAL_SKILL_MIRROR_MARKER),
           revision,
         );
-        if (exists) yield* fileSystem.remove(destination, { recursive: true });
-        yield* fileSystem.rename(staging, destination);
+        yield* swapIntoPlace(
+          fileSystem,
+          staging,
+          destination,
+          path.join(input.targetSkillsDir, `${BACKUP_PREFIX}${name}`),
+        );
       }).pipe(
         Effect.onError(() => fileSystem.remove(staging, { recursive: true }).pipe(Effect.ignore)),
       );
@@ -158,6 +260,23 @@ export const mirrorCentralSkills = Effect.fn("CentralSkills.mirror")(function* (
     );
   }
   return { mirrored, shadowed } satisfies CentralSkillsMirrorResult;
+});
+
+/**
+ * Mirrors the enabled central skills into a provider home's skills folder (Codex cannot load an
+ * extra root per session). Only folders carrying the mirror marker are replaced or deleted. One
+ * sync per target folder runs at a time in this server; copies are staged and swapped in.
+ */
+export const mirrorCentralSkills = Effect.fn("CentralSkills.mirror")(function* (input: {
+  readonly skillsDir: string;
+  readonly targetSkillsDir: string;
+}) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  return yield* targetLocks.withLock(
+    targetLockKey(path, input.targetSkillsDir, yield* HostProcess.isWindows),
+    mirrorCentralSkillsLocked(fileSystem, path, input),
+  );
 });
 
 /**

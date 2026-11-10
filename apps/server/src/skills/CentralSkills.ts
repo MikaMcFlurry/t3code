@@ -157,12 +157,14 @@ const make = Effect.gen(function* () {
     return skills;
   });
 
+  // Listing only reads. Hand-dropped folders reach Claude when its driver syncs before each probe
+  // and session; a change made here syncs right away.
+  const syncForClaude = mirrorCentralSkillsForClaude(skillsDir).pipe(
+    Effect.provideService(FileSystem.FileSystem, fileSystem),
+    Effect.provideService(Path.Path, path),
+  );
+
   const list = Effect.gen(function* () {
-    // Folders dropped into the library by hand reach Claude on the next list.
-    yield* mirrorCentralSkillsForClaude(skillsDir).pipe(
-      Effect.provideService(FileSystem.FileSystem, fileSystem),
-      Effect.provideService(Path.Path, path),
-    );
     const enabled = yield* readEnabledSkills;
     const enabledNames = new Set(enabled.map((skill) => skill.name));
     const disabled = (yield* readDisabledSkills).filter((skill) => !enabledNames.has(skill.name));
@@ -326,6 +328,7 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
+    yield* syncForClaude;
     return yield* list;
   });
 
@@ -341,6 +344,7 @@ const make = Effect.gen(function* () {
         );
       }),
     );
+    yield* syncForClaude;
     return yield* list;
   });
 
@@ -362,6 +366,7 @@ const make = Effect.gen(function* () {
         );
       }),
     );
+    yield* syncForClaude;
     return yield* list;
   });
 
