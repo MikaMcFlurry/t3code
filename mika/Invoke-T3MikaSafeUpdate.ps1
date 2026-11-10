@@ -22,11 +22,13 @@
   Updates even when nothing changed upstream (still waits for idle).
 .PARAMETER WindowStart
   HH:mm that overrides update-fenster.txt for this run, e.g. a one-off daytime window.
+.PARAMETER SkipPrep
+  Builds the current mika/main as it is, without pulling a newer upstream first.
 .PARAMETER IgnoreThread
   Thread ids whose runs don't block the update, e.g. the agent thread that asked for it. The
   restart still interrupts that thread's turn.
 #>
-param([switch]$Register, [switch]$Force, [string[]]$IgnoreThread = @(), [string]$WindowStart = '')
+param([switch]$Register, [switch]$Force, [string[]]$IgnoreThread = @(), [string]$WindowStart = '', [switch]$SkipPrep)
 . "$PSScriptRoot\T3Mika.Common.ps1"
 
 $logDir = Join-Path $T3Mika.Root 'logs'
@@ -66,13 +68,13 @@ try {
   $main = git rev-parse main
   $current = git rev-parse mika/main
   $lastBuilt = if (Test-Path $stateFile) { (Get-Content $stateFile -Raw).Trim() } else { '' }
-  if (-not $Force -and $upstream -eq $main -and $current -eq $lastBuilt) { return }
+  if (-not $Force -and ($SkipPrep -or $upstream -eq $main) -and $current -eq $lastBuilt) { return }
 
   # A conflict needs a person or an agent; don't retry the same upstream every 30 minutes.
   $failedFile = Join-Path $T3Mika.Root 'update-failed-upstream.txt'
   $noteFile = Join-Path $T3Mika.Root 'UPDATE-KONFLIKT.txt'
   $failedUpstream = if (Test-Path $failedFile) { (Get-Content $failedFile -Raw).Trim() } else { '' }
-  if (-not $Force -and $upstream -eq $failedUpstream) { return }
+  if (-not $Force -and -not $SkipPrep -and $upstream -eq $failedUpstream) { return }
 
   $database = Join-Path $T3Mika.Home 'userdata\statev2.sqlite'
   $ignored = $IgnoreThread -join ','
@@ -82,7 +84,7 @@ try {
   # which git leaves alone. Only once per upstream, so a busy night doesn't make new merge
   # commits (and new builds on the iMacs) every 30 minutes.
   $before = $current
-  if ($Force -or $upstream -ne $main) {
+  if (-not $SkipPrep -and ($Force -or $upstream -ne $main)) {
     Write-Log "Vorbereitung (upstream $($upstream.Substring(0,10)), mika/main $($current.Substring(0,10)))"
     try {
       & (Join-Path $PSScriptRoot 'Update-T3Mika.ps1') -NoBuild *>> $log
