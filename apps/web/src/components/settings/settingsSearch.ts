@@ -502,6 +502,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: [msg("beta boring sidebar folder rows multiline branch pull request details")],
   },
   {
+    id: "model-picker-usage",
+    title: msg("Usage in the model picker"),
+    to: "/settings/labs",
+    searchTerms: [msg("beta limits 5 hour weekly quota reset countdown account headroom rings")],
+  },
+  {
     id: "tool-call-visibility",
     title: msg("Tool calls in chat"),
     to: "/settings/chat",

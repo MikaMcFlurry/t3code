@@ -12203,5 +12203,13 @@
   "27d76249d09eb69f": "Granskningsguiden är klar",
   "faa3bb26abb39c93": "Granskningsguiden misslyckades",
   "b7df38b7d8792d78": "Öppna guiden",
-  "9e91e9a77b664e4e": "Kunde inte starta en granskningsguide"
+  "9e91e9a77b664e4e": "Kunde inte starta en granskningsguide",
+  "ee8575e62c8f1b8e": "veckovis, alla modeller: {remaining} % kvar",
+  "a0023c491895c917": "veckovis, endast {label}: {remaining} % kvar",
+  "ceab8e2addb67499": "före takten",
+  "fd559a5b80169f19": "nästan förbrukad",
+  "6b72d86be511939b": "Senast kända användning: {usage}",
+  "17e97849f48296e3": "Visar varje kontos återstående 5-timmars- och veckogränser i modellväljaren, med en nedräkning till varje återställning.",
+  "aad8594acc996529": "Användning i modellväljaren",
+  "04e47f8c29b35dc5": "beta gränser 5 timmar vecka kvot återställning nedräkning konto marginal ringar"
 }

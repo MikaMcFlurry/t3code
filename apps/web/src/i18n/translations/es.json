@@ -12191,5 +12191,13 @@
   "27d76249d09eb69f": "Guía de revisión lista",
   "faa3bb26abb39c93": "Falló la guía de revisión",
   "b7df38b7d8792d78": "Abrir guía",
-  "9e91e9a77b664e4e": "No se pudo iniciar una guía de revisión"
+  "9e91e9a77b664e4e": "No se pudo iniciar una guía de revisión",
+  "ee8575e62c8f1b8e": "semanal, todos los modelos: queda un {remaining}%",
+  "a0023c491895c917": "semanal, solo {label}: queda un {remaining}%",
+  "ceab8e2addb67499": "por encima del ritmo",
+  "fd559a5b80169f19": "casi agotado",
+  "6b72d86be511939b": "Último uso conocido: {usage}",
+  "17e97849f48296e3": "Muestra los límites restantes de 5 horas y semanales de cada cuenta en el selector de modelos, con una cuenta atrás hasta cada restablecimiento.",
+  "aad8594acc996529": "Uso en el selector de modelos",
+  "04e47f8c29b35dc5": "beta límites 5 horas semanal cuota restablecer cuenta atrás cuenta margen anillos"
 }

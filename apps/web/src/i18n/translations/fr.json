@@ -12196,5 +12196,13 @@
   "27d76249d09eb69f": "Guide de revue prêt",
   "faa3bb26abb39c93": "Échec du guide de revue",
   "b7df38b7d8792d78": "Ouvrir le guide",
-  "9e91e9a77b664e4e": "Impossible de démarrer un guide de revue"
+  "9e91e9a77b664e4e": "Impossible de démarrer un guide de revue",
+  "ee8575e62c8f1b8e": "hebdomadaire, tous les modèles : {remaining} % restant",
+  "a0023c491895c917": "hebdomadaire, {label} uniquement : {remaining} % restant",
+  "ceab8e2addb67499": "plus rapide que prévu",
+  "fd559a5b80169f19": "presque épuisé",
+  "6b72d86be511939b": "Dernière utilisation connue : {usage}",
+  "17e97849f48296e3": "Affiche les limites restantes sur 5 heures et hebdomadaires de chaque compte dans le sélecteur de modèle, avec un compte à rebours jusqu’à chaque réinitialisation.",
+  "aad8594acc996529": "Utilisation dans le sélecteur de modèle",
+  "04e47f8c29b35dc5": "bêta limites 5 heures hebdomadaire quota réinitialisation compte à rebours compte marge anneaux"
 }
