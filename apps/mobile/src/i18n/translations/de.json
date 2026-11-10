@@ -5399,5 +5399,17 @@
   "ad208e3e32c85029": "Alle ausblenden",
   "3328503592789bed": "Zen",
   "856812e7e1fc445e": "Tool-Aufrufe im Chat",
-  "8d545d54c0a9e950": "Die Befehle, Bearbeitungen und Suchen ausblenden, die Agenten ausführen. „Erfolgreiche ausblenden“ behält Fehler. „Zen“ zeigt nur endgültige Antworten. Genehmigungen, Fragen und Fehler werden immer angezeigt."
+  "8d545d54c0a9e950": "Die Befehle, Bearbeitungen und Suchen ausblenden, die Agenten ausführen. „Erfolgreiche ausblenden“ behält Fehler. „Zen“ zeigt nur endgültige Antworten. Genehmigungen, Fragen und Fehler werden immer angezeigt.",
+  "3d55c97a8189568e": "{label}: {remaining} % übrig",
+  "ee8575e62c8f1b8e": "wöchentlich, alle Modelle: {remaining} % übrig",
+  "a0023c491895c917": "wöchentlich, nur {label}: {remaining} % übrig",
+  "ceab8e2addb67499": "schneller als vorgesehen",
+  "fd559a5b80169f19": "fast aufgebraucht",
+  "6b72d86be511939b": "Zuletzt bekannte Nutzung: {usage}",
+  "4656ac4e72ca7d52": "Beta: Nutzung im Modellblatt",
+  "5e023fe613cbc189": "Nutzung im Modellblatt",
+  "eb116efabc047d0c": "Zeigt für jedes Claude- und Codex-Konto die verbleibenden 5-Stunden- und Wochenlimits im Modellblatt, mit einem Countdown bis zum jeweiligen Zurücksetzen.",
+  "8902ff5e65a79979": "nutzung im modellblatt",
+  "d9aa957e5bf1f094": "5 stunden wöchentliche limits",
+  "eaead8bc90f4bf1f": "{provider}, {usage}, {count, plural, one {{count} Modell} other {{count} Modelle}}"
 }

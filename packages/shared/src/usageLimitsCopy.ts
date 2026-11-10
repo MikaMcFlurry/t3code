@@ -12,9 +12,11 @@ import {
   cursorUsageWindowDetails as cursorUsageWindowDetailsBase,
   type LimitPool,
   type LimitPresentations,
+  type ProviderUsageHeadroom,
   providersWithLimits,
   type ResetCreditChoice,
   resetCountdown,
+  type UsageHeadroomWindow,
 } from "./usageLimits.ts";
 
 const MINUTE = 60_000;
@@ -212,4 +214,41 @@ export function formatResetsIn(
   }
   if (style === "refill") return resolve(msg("↻ {duration}", { duration }));
   return resolve(msg("resets in {duration}", { duration }));
+}
+
+/** Screen-reader text, e.g. "5h: 72% left, resets in 2h 10m; weekly, all models: 41% left …". */
+export function describeUsageHeadroom(
+  headroom: ProviderUsageHeadroom,
+  now: number,
+  resolve: MFunctionType = mFallback,
+): string {
+  const describe = (window: UsageHeadroomWindow) => {
+    const values = { label: window.label, remaining: window.remaining };
+    const remaining =
+      window.kind === "session"
+        ? resolve(msg("{label}: {remaining}% left", values))
+        : window.kind === "weekly"
+          ? resolve(msg("weekly, all models: {remaining}% left", values))
+          : resolve(msg("weekly, {label} only: {remaining}% left", values));
+    const tone =
+      window.tone === "warning"
+        ? resolve(msg("ahead of pace", { $context: "usage limit spent faster than time passes" }))
+        : window.tone === "critical"
+          ? resolve(msg("nearly used up", { $context: "usage limit" }))
+          : null;
+    const reset =
+      window.resetsAt === null
+        ? null
+        : resolve(
+            msg("resets in {duration}", {
+              duration: formatDuration(window.resetsAt - now, resolve),
+            }),
+          );
+    return [remaining, tone, reset].filter(Boolean).join(", ");
+  };
+  const text = [headroom.session, headroom.weekly, ...headroom.scoped]
+    .filter((window): window is UsageHeadroomWindow => window !== null)
+    .map(describe)
+    .join("; ");
+  return headroom.stale ? resolve(msg("Last known usage: {usage}", { usage: text })) : text;
 }

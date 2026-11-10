@@ -12397,5 +12397,13 @@
   "27d76249d09eb69f": "Review-Leitfaden bereit",
   "faa3bb26abb39c93": "Review-Leitfaden fehlgeschlagen",
   "b7df38b7d8792d78": "Leitfaden öffnen",
-  "9e91e9a77b664e4e": "Review-Leitfaden konnte nicht gestartet werden"
+  "9e91e9a77b664e4e": "Review-Leitfaden konnte nicht gestartet werden",
+  "ee8575e62c8f1b8e": "wöchentlich, alle Modelle: {remaining} % übrig",
+  "a0023c491895c917": "wöchentlich, nur {label}: {remaining} % übrig",
+  "ceab8e2addb67499": "schneller als vorgesehen",
+  "fd559a5b80169f19": "fast aufgebraucht",
+  "6b72d86be511939b": "Zuletzt bekannte Nutzung: {usage}",
+  "17e97849f48296e3": "Zeigt für jedes Konto die verbleibenden 5-Stunden- und Wochenlimits in der Modellauswahl, mit einem Countdown bis zum jeweiligen Zurücksetzen.",
+  "aad8594acc996529": "Nutzung in der Modellauswahl",
+  "04e47f8c29b35dc5": "beta limits limit 5 stunden wöchentlich kontingent zurücksetzen countdown konto restkontingent ringe"
 }

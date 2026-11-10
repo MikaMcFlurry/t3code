@@ -12406,5 +12406,13 @@
   "27d76249d09eb69f": "Review guide ready",
   "faa3bb26abb39c93": "Review guide failed",
   "b7df38b7d8792d78": "Open guide",
-  "9e91e9a77b664e4e": "Could not start a review guide"
+  "9e91e9a77b664e4e": "Could not start a review guide",
+  "ee8575e62c8f1b8e": "weekly, all models: {remaining}% left",
+  "a0023c491895c917": "weekly, {label} only: {remaining}% left",
+  "ceab8e2addb67499": "ahead of pace",
+  "fd559a5b80169f19": "nearly used up",
+  "6b72d86be511939b": "Last known usage: {usage}",
+  "17e97849f48296e3": "Show each account's remaining 5-hour and weekly limits in the model picker, with a countdown to each reset.",
+  "aad8594acc996529": "Usage in the model picker",
+  "04e47f8c29b35dc5": "beta limits 5 hour weekly quota reset countdown account headroom rings"
 }

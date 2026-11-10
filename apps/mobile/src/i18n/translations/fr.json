@@ -5393,5 +5393,17 @@
   "ad208e3e32c85029": "Tout masquer",
   "3328503592789bed": "Zen",
   "856812e7e1fc445e": "Appels d’outils dans la discussion",
-  "8d545d54c0a9e950": "Masque les commandes, modifications et recherches lancées par les agents. Masquer les réussis garde les échecs. Zen n’affiche que les réponses finales. Les approbations, questions et erreurs s’affichent toujours."
+  "8d545d54c0a9e950": "Masque les commandes, modifications et recherches lancées par les agents. Masquer les réussis garde les échecs. Zen n’affiche que les réponses finales. Les approbations, questions et erreurs s’affichent toujours.",
+  "3d55c97a8189568e": "{label} : {remaining} % restant",
+  "ee8575e62c8f1b8e": "hebdomadaire, tous les modèles : {remaining} % restant",
+  "a0023c491895c917": "hebdomadaire, {label} uniquement : {remaining} % restant",
+  "ceab8e2addb67499": "plus rapide que prévu",
+  "fd559a5b80169f19": "presque épuisé",
+  "6b72d86be511939b": "Dernière utilisation connue : {usage}",
+  "4656ac4e72ca7d52": "Bêta : utilisation dans la feuille de modèle",
+  "5e023fe613cbc189": "Utilisation dans la feuille de modèle",
+  "eb116efabc047d0c": "Affiche les limites restantes sur 5 heures et hebdomadaires de chaque compte Claude et Codex dans la feuille de modèle, avec un compte à rebours jusqu’à chaque réinitialisation.",
+  "8902ff5e65a79979": "utilisation dans la feuille de modèle",
+  "d9aa957e5bf1f094": "limites 5 heures hebdomadaires",
+  "eaead8bc90f4bf1f": "{provider}, {usage}, {count, plural, one {{count} modèle} other {{count} modèles}}"
 }
