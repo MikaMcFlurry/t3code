@@ -494,27 +494,42 @@ export const layer = Layer.effect(
     const providerRegistry = yield* Effect.serviceOption(ProviderRegistry.ProviderRegistry);
     /**
      * New-thread runs: a webhook's `t3` routing, then the automatic account setting, all limited
-     * to the allowed models. Falls back to the stored model when nothing can be resolved.
+     * to the allowed models. Falls back to the stored model only when the settings or providers
+     * cannot be read; a run no allowed model can take fails with the reason instead of starting.
      */
-    const routedModelSelection = Effect.fn("ScheduledTaskService.routedModelSelection")(
-      function* (task: ScheduledTask, prompt: string, routing: RoutineRoutingDirective | null) {
-        if (Option.isNone(serverSettings) || Option.isNone(providerRegistry)) {
-          return task.modelSelection;
-        }
-        const route = resolveRoutineModelSelection({
-          stored: task.modelSelection,
-          prompt,
-          directive: routing,
-          providers: yield* providerRegistry.value.getProviders,
-          settings: yield* serverSettings.value.getSettings,
-          projectId: task.projectId,
-          now: DateTime.toEpochMillis(yield* DateTime.now),
+    const routedModelSelection = Effect.fn("ScheduledTaskService.routedModelSelection")(function* (
+      task: ScheduledTask,
+      prompt: string,
+      routing: RoutineRoutingDirective | null,
+    ) {
+      if (Option.isNone(serverSettings) || Option.isNone(providerRegistry)) {
+        return task.modelSelection;
+      }
+      const inputs = yield* Effect.all({
+        providers: providerRegistry.value.getProviders,
+        settings: serverSettings.value.getSettings,
+        now: DateTime.now,
+      }).pipe(Effect.option);
+      if (Option.isNone(inputs)) return task.modelSelection;
+      const route = resolveRoutineModelSelection({
+        stored: task.modelSelection,
+        prompt,
+        directive: routing,
+        providers: inputs.value.providers,
+        settings: inputs.value.settings,
+        projectId: task.projectId,
+        now: DateTime.toEpochMillis(inputs.value.now),
+      });
+      yield* Effect.annotateCurrentSpan({ "scheduled_task.model_route": route.reason });
+      if (!route.startable) {
+        yield* Effect.logWarning("Scheduled task run not started: no allowed model", {
+          taskId: task.id,
+          code: route.code,
         });
-        yield* Effect.annotateCurrentSpan({ "scheduled_task.model_route": route.reason });
-        return route.selection;
-      },
-      (effect, task) => effect.pipe(Effect.orElseSucceed(() => task.modelSelection)),
-    );
+        return yield* taskError(route.reason, { taskId: task.id });
+      }
+      return route.selection;
+    });
     const webhookPermits = yield* Ref.make<ReadonlyMap<ScheduledTaskId, Semaphore.Semaphore>>(
       new Map(),
     );
@@ -1094,34 +1109,32 @@ export const layer = Layer.effect(
         const result =
           active.threadId === null
             ? yield* Effect.exit(
-                threadLaunch
-                  .launch({
-                    commandId,
-                    projectId: active.projectId,
-                    title: active.title,
-                    modelSelection: yield* routedModelSelection(
-                      active,
-                      prompt,
-                      webhook?.routing ?? null,
-                    ),
-                    runtimeMode: active.runtimeMode,
-                    interactionMode: active.interactionMode,
-                    workspaceStrategy: active.workspaceStrategy,
-                    initialMessage: {
-                      messageId,
-                      scheduledTaskId: active.id,
-                      text: prompt,
-                      attachments: [],
-                    },
-                    createdBy: active.createdBy,
-                    creationSource: active.creationSource,
-                  })
-                  .pipe(
-                    Effect.map((launched) => launched.threadId),
-                    Effect.tap((threadId) =>
-                      threadMode === "new_thread" ? Effect.void : bindThread(active, threadId),
-                    ),
+                // Inside the exit: a run no allowed model can take is recorded as failed.
+                routedModelSelection(active, prompt, webhook?.routing ?? null).pipe(
+                  Effect.flatMap((modelSelection) =>
+                    threadLaunch.launch({
+                      commandId,
+                      projectId: active.projectId,
+                      title: active.title,
+                      modelSelection,
+                      runtimeMode: active.runtimeMode,
+                      interactionMode: active.interactionMode,
+                      workspaceStrategy: active.workspaceStrategy,
+                      initialMessage: {
+                        messageId,
+                        scheduledTaskId: active.id,
+                        text: prompt,
+                        attachments: [],
+                      },
+                      createdBy: active.createdBy,
+                      creationSource: active.creationSource,
+                    }),
                   ),
+                  Effect.map((launched) => launched.threadId),
+                  Effect.tap((threadId) =>
+                    threadMode === "new_thread" ? Effect.void : bindThread(active, threadId),
+                  ),
+                ),
               )
             : yield* Effect.exit(
                 // The stored selection only seeds fresh threads. A bound run
