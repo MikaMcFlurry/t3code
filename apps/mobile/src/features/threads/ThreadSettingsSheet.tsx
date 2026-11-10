@@ -17,7 +17,6 @@ import type {
   ProviderOptionDescriptor,
   ProviderOptionSelection,
   RuntimeMode,
-  ServerProvider,
   ServerSettings,
   ThreadId,
 } from "@t3tools/contracts";
@@ -107,7 +106,8 @@ import {
 import { useSearchToolbarInset } from "../../components/ui/useBarInset";
 import type { AppBarSearch } from "../../components/ui/AppBar";
 import { ModelRow, ChoiceRow } from "./ThreadSettingsRows";
-import { ProviderHeadroom } from "./ProviderHeadroom";
+import { ProviderHeadroom, type ProviderUsage, useProviderUsage } from "./ProviderHeadroom";
+import { describeUsageHeadroom, type ProviderUsageHeadroom } from "@t3tools/shared/usageLimits";
 import {
   compatibleRuntimeModeForChoices,
   runtimeModeChoicesForSupportedModes,
@@ -146,7 +146,6 @@ const EMPTY_MODEL_FAVORITES: ReadonlyArray<{
   readonly model: string;
 }> = [];
 const FAVORITES_PROVIDER_FILTER = "@favorites";
-const EMPTY_PROVIDERS: ReadonlyArray<ServerProvider> = [];
 // Servers that predate `migrateModelPreferences` drop it and keep reporting null favorites.
 const attemptedMigrationGenerations = new Map<EnvironmentId, number>();
 function ProviderHeader(props: {
@@ -156,7 +155,9 @@ function ProviderHeader(props: {
   readonly collapsible: boolean;
   readonly collapsed: boolean;
   readonly modelCount: number;
-  readonly provider: ServerProvider | undefined;
+  /** Set while the Labs usage preference is on. */
+  readonly usage: ProviderUsageHeadroom | null;
+  readonly usageNow: number;
   readonly onToggle: () => void;
 }) {
   const content = (
@@ -165,10 +166,10 @@ function ProviderHeader(props: {
       <Text className="shrink text-sm font-t3-medium text-foreground-muted" numberOfLines={1}>
         {props.label}
       </Text>
-      <View className="flex-1" />
-      <ProviderHeadroom provider={props.provider} />
+      {props.usage ? <ProviderHeadroom headroom={props.usage} now={props.usageNow} /> : null}
       {props.collapsible ? (
         <>
+          <View className="flex-1" />
           {props.collapsed ? (
             <Text className="text-2xs font-t3-medium text-foreground-muted">
               {props.modelCount}
@@ -188,7 +189,13 @@ function ProviderHeader(props: {
   if (props.collapsible) {
     return (
       <Pressable
-        accessibilityLabel={`${props.label}, ${props.modelCount} models`}
+        accessibilityLabel={[
+          props.label,
+          props.usage ? describeUsageHeadroom(props.usage, props.usageNow) : null,
+          `${props.modelCount} models`,
+        ]
+          .filter(Boolean)
+          .join(", ")}
         accessibilityRole="button"
         accessibilityState={{ expanded: !props.collapsed }}
         className="mx-4 mt-1 flex-row items-center gap-2 rounded-xl px-1 pt-2 active:opacity-60"
@@ -297,8 +304,7 @@ type ThreadSettingsSessionValue = {
   readonly environmentId: EnvironmentId | null;
   readonly providerInstanceId?: ProviderInstanceId;
   readonly providerGroups: ReadonlyArray<ProviderGroup>;
-  /** Provider snapshots, for the usage headroom in each provider header. */
-  readonly providers: ReadonlyArray<ServerProvider>;
+  readonly usage: ProviderUsage | null;
   readonly favoriteKeys: ReadonlySet<string>;
   readonly favoritesLoaded: boolean;
   readonly toggleFavorite: (option: ModelOption) => void;
@@ -364,6 +370,7 @@ function ThreadSettingsSessionProvider(
           ),
         )
       : props.providerGroups;
+  const usage = useProviderUsage(providerGroups, config);
   const legacyFavorites = AsyncResult.isSuccess(preferences)
     ? (preferences.value.modelFavorites ?? EMPTY_MODEL_FAVORITES)
     : EMPTY_MODEL_FAVORITES;
@@ -620,7 +627,7 @@ function ThreadSettingsSessionProvider(
     environmentId,
     providerInstanceId: props.providerInstanceId,
     providerGroups,
-    providers: config?.providers ?? EMPTY_PROVIDERS,
+    usage,
     manageHidden,
     setManageHidden,
     toggleHidden,
@@ -694,8 +701,8 @@ type ThreadSettingsProviderCatalog = {
   readonly collapsible: boolean;
   readonly collapsed: boolean;
   readonly modelCount: number;
+  readonly usage: ProviderUsageHeadroom | null;
   readonly models: ReadonlyArray<ModelOption>;
-  readonly snapshot: ServerProvider | undefined;
 };
 
 type ThreadSettingsCatalogItem =
@@ -767,7 +774,8 @@ function ThreadSettingsProviderListHeader(props: {
       iconUrl={props.provider.iconUrl}
       label={props.provider.label}
       modelCount={props.provider.modelCount}
-      provider={props.provider.snapshot}
+      usage={props.provider.usage}
+      usageNow={session.usage?.now ?? 0}
       onToggle={onToggle}
     />
   );
@@ -831,8 +839,8 @@ function buildThreadSettingsCatalogItems(
       collapsible,
       collapsed,
       modelCount: visibleModels.length,
+      usage: session.usage?.byProvider.get(group.providerKey) ?? null,
       models: collapsed ? [] : visibleModels,
-      snapshot: session.providers.find((entry) => entry.instanceId === group.providerKey),
     };
     return [
       {

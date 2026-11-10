@@ -3,12 +3,13 @@ import { type ProviderInstanceId } from "@t3tools/contracts";
 import { memo, useLayoutEffect, useRef, useState } from "react";
 import { StarIcon } from "lucide-react";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
+import { describeUsageHeadroom } from "@t3tools/shared/usageLimits";
 import {
+  type ModelPickerUsage,
   ProviderResetClock,
   ProviderUsageHalo,
   ProviderUsageTooltipDetails,
-  usageHeadroomLabel,
-} from "./ProviderUsageHalo";
+} from "./ModelPickerUsage";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
 import {
@@ -44,14 +45,14 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
   disabledInstanceIds?: ReadonlySet<ProviderInstanceId>;
   selectableUnavailableInstanceIds?: ReadonlySet<ProviderInstanceId>;
   getDisabledInstanceTooltip?: (entry: ProviderInstanceEntry) => string;
+  /** Set while the Labs usage setting is on. */
+  usage?: ModelPickerUsage | null;
 }) {
   const handleSelect = (instanceId: ProviderInstanceId | "favorites") => {
     props.onSelectInstance(instanceId);
   };
   const showFavorites = props.showFavorites ?? true;
   const [hoveredInstanceId, setHoveredInstanceId] = useState<ProviderInstanceId | null>(null);
-  // The picker is short-lived, so limits are judged against the time it opened.
-  const [now] = useState(() => Date.now());
   const sidebarContentRef = useRef<HTMLDivElement>(null);
   const [selectedIndicatorTop, setSelectedIndicatorTop] = useState<number | null>(null);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the selected provider item's DOM offset to position the selection indicator
@@ -144,6 +145,8 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
             const isSelected = props.selectedInstanceId === entry.instanceId;
             const isHovered = hoveredInstanceId === entry.instanceId;
             const showInstanceBadge = shouldShowInstanceBadge(entry, props.instanceEntries);
+            const headroom = isUnavailable ? null : props.usage?.byInstance.get(entry.instanceId);
+            const now = props.usage?.now ?? 0;
 
             const tooltip = isUnavailable
               ? describeUnavailableInstance(entry)
@@ -174,19 +177,19 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                 aria-label={
                   isUnavailable || isContextDisabled
                     ? tooltip
-                    : [entry.displayName, usageHeadroomLabel(entry.snapshot, now)]
-                        .filter(Boolean)
-                        .join(", ")
+                    : headroom
+                      ? `${entry.displayName}, ${describeUsageHeadroom(headroom, now)}`
+                      : entry.displayName
                 }
               >
-                {isUnavailable ? null : (
+                {headroom ? (
                   <ProviderUsageHalo
-                    provider={entry.snapshot}
+                    headroom={headroom}
+                    driver={entry.driverKind}
                     accentColor={entry.accentColor}
-                    now={now}
                     className="z-20"
                   />
-                )}
+                ) : null}
                 <ProviderInstanceIcon
                   driverKind={entry.driverKind}
                   displayName={entry.displayName}
@@ -228,22 +231,23 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                     align="center"
                   >
                     {tooltip}
-                    {isUnavailable ? null : (
+                    {headroom ? (
                       <ProviderUsageTooltipDetails
-                        provider={entry.snapshot}
+                        headroom={headroom}
+                        driver={entry.driverKind}
                         accentColor={entry.accentColor}
                         now={now}
                       />
-                    )}
+                    ) : null}
                   </TooltipPopup>
                 </Tooltip>
-                {isUnavailable ? null : (
+                {headroom ? (
                   <ProviderResetClock
-                    provider={entry.snapshot}
+                    headroom={headroom}
                     now={now}
                     className={cn("-mt-0.5 pb-1", isDisabled && "opacity-50")}
                   />
-                )}
+                ) : null}
               </div>
             );
           })}

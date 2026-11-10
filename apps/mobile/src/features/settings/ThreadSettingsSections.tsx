@@ -43,6 +43,7 @@ export function SettingsLabsRouteScreen() {
         contentContainerClassName="gap-6 px-5 pt-4"
         contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
       >
+        <ModelSheetUsageSection />
         <MachineBetaSection
           title="Linked environments"
           icon="link"
@@ -59,6 +60,25 @@ export function SettingsLabsRouteScreen() {
         />
       </ScrollView>
     </SettingsScreen>
+  );
+}
+
+/** A device preference, so it applies to every environment the sheet shows. */
+function ModelSheetUsageSection() {
+  const savePreferences = useAtomSet(updateMobilePreferencesAtom);
+  const preferences = useAtomValue(mobilePreferencesAtom);
+  const enabled =
+    AsyncResult.isSuccess(preferences) && preferences.value.modelPickerUsageEnabled === true;
+  return (
+    <SettingsSection title="Beta: Usage in the model sheet">
+      <SettingsSwitchRow
+        icon="chart.bar.xaxis"
+        label="Usage in the model sheet"
+        subtitle="Show each Claude and Codex account's remaining 5-hour and weekly limits in the model sheet, with a countdown to each reset."
+        value={enabled}
+        onValueChange={(value) => savePreferences({ modelPickerUsageEnabled: value })}
+      />
+    </SettingsSection>
   );
 }
 

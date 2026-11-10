@@ -1,85 +1,108 @@
-import type { ServerProvider } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
+import { minuteTick } from "@t3tools/client-runtime/clock";
+import type { ServerProvider, UsageLimitSourceSnapshots } from "@t3tools/contracts";
 import {
-  type UsageHeadroomWindow,
-  usageHeadroomTone,
-  usageHeadroomWindows,
+  describeUsageHeadroom,
+  formatCountdown,
+  type ProviderUsageHeadroom,
+  providerUsageHeadroom,
+  usageHeadroomGroups,
+  type UsagePaceTone,
 } from "@t3tools/shared/usageLimits";
-import { View } from "react-native";
+import { AsyncResult } from "effect/reactivity";
+import { Fragment, useSyncExternalStore } from "react";
 
 import { AppText as Text } from "../../components/ui/AppText";
-import { useNowMinuteMs } from "../../lib/clock";
-import { usageProviderKind, useProviderColors } from "../usage/usageProviders";
+import { cn } from "../../lib/cn";
+import { minuteTickToEpochMs } from "../../lib/clock";
+import type { ProviderGroup } from "../../lib/modelOptions";
+import { mobilePreferencesAtom } from "../../state/preferences";
 
-const resetTimeFormat = new Intl.DateTimeFormat(undefined, {
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23",
-});
-const resetWeekdayFormat = new Intl.DateTimeFormat(undefined, { weekday: "short" });
-
-/** `14:30` for a reset within 12 hours, otherwise the weekday; null without an upcoming reset. */
-function formatHeadroomReset(ring: UsageHeadroomWindow, now: number): string | null {
-  const at = ring.window.resetsAt ? Date.parse(ring.window.resetsAt) : Number.NaN;
-  if (!Number.isFinite(at) || at <= now) return null;
-  const date = new Date(at);
-  return at - now < 12 * 60 * 60 * 1000
-    ? resetTimeFormat.format(date)
-    : resetWeekdayFormat.format(date);
+export interface ProviderUsage {
+  readonly now: number;
+  readonly byProvider: ReadonlyMap<string, ProviderUsageHeadroom>;
 }
 
-/** Remaining session and weekly usage as two short bars, for a provider row in the model sheet. */
-export function ProviderHeadroom(props: { readonly provider: ServerProvider | undefined }) {
-  const now = useNowMinuteMs();
-  const colors = useProviderColors();
-  const rings = usageHeadroomWindows(props.provider?.usageLimits, now);
-  if (!props.provider || rings.length === 0) return null;
-  const kind = usageProviderKind(props.provider.driver);
-  const color = kind ? colors[kind] : null;
-  // Failed probes keep the last good windows; dim them so they don't read as live.
-  const stale = props.provider.usageLimits?.unavailable !== undefined;
+const subscribeNever = () => () => {};
+
+/**
+ * Headroom per provider group while the Labs preference is on, re-read each minute so countdowns
+ * tick. Same rule as the web picker: `providerUsageHeadroom` from `@t3tools/shared/usageLimits`.
+ */
+export function useProviderUsage(
+  groups: ReadonlyArray<ProviderGroup>,
+  config:
+    | {
+        readonly providers: readonly ServerProvider[];
+        readonly usageLimitSources?: UsageLimitSourceSnapshots | undefined;
+      }
+    | undefined,
+): ProviderUsage | null {
+  const preferences = useAtomValue(mobilePreferencesAtom);
+  const enabled =
+    AsyncResult.isSuccess(preferences) && preferences.value.modelPickerUsageEnabled === true;
+  const minute = useSyncExternalStore(
+    enabled ? minuteTick.subscribe : subscribeNever,
+    minuteTick.getSnapshot,
+    minuteTick.getSnapshot,
+  );
+  if (!enabled || !config) return null;
+  const now = minuteTickToEpochMs(minute);
+  const byProvider = new Map<string, ProviderUsageHeadroom>();
+  for (const group of groups) {
+    const instanceId = group.models[0]?.selection.instanceId;
+    const headroom = instanceId
+      ? providerUsageHeadroom(instanceId, config.providers, config.usageLimitSources ?? [], now)
+      : null;
+    if (headroom) byProvider.set(group.providerKey, headroom);
+  }
+  return { now, byProvider };
+}
+
+const TONE_TEXT: Record<UsagePaceTone, string> = {
+  ok: "text-foreground",
+  warning: "text-warning-foreground",
+  critical: "text-danger-foreground",
+};
+
+// A shape next to the colour, so the tone does not rest on telling green from red.
+const TONE_MARK: Record<UsagePaceTone, string> = { ok: "", warning: "▲", critical: "!" };
+
+/** `5h 72% →2h10m | all: 41% • fable: 18% →3d4h` for a provider header in the model sheet. */
+export function ProviderHeadroom(props: {
+  readonly headroom: ProviderUsageHeadroom;
+  readonly now: number;
+}) {
+  const { headroom, now } = props;
+  const groups = usageHeadroomGroups(headroom);
+  if (groups.length === 0) return null;
   return (
-    <View
-      accessible
-      accessibilityLabel={rings
-        .map((ring) => {
-          const reset = formatHeadroomReset(ring, now);
-          return `${ring.kind === "weekly" ? "Weekly" : ring.shortLabel} ${ring.remaining}% left${reset ? `, resets ${reset}` : ""}`;
-        })
-        .join(", ")}
-      className="flex-row items-center gap-2.5"
-      style={stale ? { opacity: 0.5 } : undefined}
+    <Text
+      accessibilityLabel={describeUsageHeadroom(headroom, now)}
+      numberOfLines={1}
+      className="shrink text-2xs tabular-nums text-foreground-tertiary"
+      style={headroom.stale ? { opacity: 0.6 } : undefined}
     >
-      {rings.map((ring) => {
-        const tone = usageHeadroomTone(ring.remaining);
-        const reset = formatHeadroomReset(ring, now);
-        return (
-          <View key={ring.kind} className="flex-row items-center gap-1">
-            <Text className="text-2xs font-t3-medium text-foreground-muted">{ring.shortLabel}</Text>
-            <View className="h-1 w-6 flex-row overflow-hidden rounded-full bg-subtle">
-              <View
-                className={
-                  tone === "critical"
-                    ? "h-full rounded-full bg-red-500"
-                    : tone === "low"
-                      ? "h-full rounded-full bg-amber-500"
-                      : "h-full rounded-full bg-foreground"
-                }
-                style={[
-                  { flex: ring.remaining },
-                  tone === "ok" && color && !stale ? { backgroundColor: color } : null,
-                ]}
-              />
-              <View style={{ flex: 100 - ring.remaining }} />
-            </View>
-            <Text className="text-2xs tabular-nums text-foreground-muted">{ring.remaining}%</Text>
-            {reset ? (
-              <Text className="text-2xs tabular-nums text-foreground-muted opacity-70">
-                ↻{reset}
+      {groups.map((group, groupIndex) => (
+        <Fragment key={group.windows[0]?.window.id ?? groupIndex}>
+          {groupIndex > 0 ? " | " : ""}
+          {group.windows.map((window, index) => (
+            <Fragment key={window.window.id}>
+              {index > 0 ? " • " : ""}
+              {window.kind === "session" ? `${window.label} ` : `${window.label}: `}
+              <Text
+                className={cn(
+                  "text-2xs font-t3-medium",
+                  headroom.stale ? "text-foreground-tertiary" : TONE_TEXT[window.tone],
+                )}
+              >
+                {window.remaining}%{headroom.stale ? "" : TONE_MARK[window.tone]}
               </Text>
-            ) : null}
-          </View>
-        );
-      })}
-    </View>
+            </Fragment>
+          ))}
+          {group.resetsAt === null ? "" : ` →${formatCountdown(group.resetsAt - now)}`}
+        </Fragment>
+      ))}
+    </Text>
   );
 }
