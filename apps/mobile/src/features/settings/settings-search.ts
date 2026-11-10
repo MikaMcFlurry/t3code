@@ -111,6 +111,8 @@ const SETTINGS_SEARCH_TERMS = {
     "link machine",
     "fast worktree checkout",
     "clone cache",
+    "usage in the model sheet",
+    "5 hour weekly limits",
   ],
   SettingsEnvironmentMaintenance: ["updates", "provider updates", "restart", "manage environments"],
   SettingsAbout: [
