@@ -801,6 +801,8 @@ export const OrchestrationV2ThreadLaunchWorkspaceStrategy = Schema.Union([
           description: "Tracked Git folders to give a worktree. Default: all, or none above 8.",
         }),
     ),
+    /** The exact commit to start from, resolved before launch; `baseRef` then only names it. */
+    baseCommit: Schema.optional(TrimmedNonEmptyString),
   }),
 ]);
 export type OrchestrationV2ThreadLaunchWorkspaceStrategy =

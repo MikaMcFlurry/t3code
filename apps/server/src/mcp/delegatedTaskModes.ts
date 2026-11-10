@@ -93,3 +93,26 @@ export function taskPrompt(input: OrchestratorMcpDelegateTaskInput): string {
     ? input.task
     : `Act as the ${input.role} sub-agent for this task.\n\n${input.task}`;
 }
+
+/**
+ * `baseRef` and `startFromOrigin` choose where a "worktree" task starts, so they mean
+ * nothing for a shared one, and `startFromOrigin` means nothing without a ref to fetch.
+ */
+export const validateWorktreeBase = (input: OrchestratorMcpDelegateTaskInput) => {
+  if (input.isolation !== "worktree" && (input.baseRef ?? input.startFromOrigin) !== undefined)
+    return Effect.fail(
+      new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message:
+          'baseRef and startFromOrigin choose where isolation "worktree" starts; pass isolation "worktree", or omit them.',
+      }),
+    );
+  if (input.startFromOrigin !== undefined && input.baseRef === undefined)
+    return Effect.fail(
+      new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message: 'startFromOrigin needs baseRef, the ref to fetch (e.g. "origin/main").',
+      }),
+    );
+  return Effect.void;
+};

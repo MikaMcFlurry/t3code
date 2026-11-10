@@ -168,6 +168,12 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
     /** Set by a linked environment whose workflow run this thread is a step of; ignored otherwise. */
     workflowRun: Schema.optional(OrchestrationV2WorkflowOrigin),
+    /**
+     * Set by a linked environment's delegated task: the worktree base resolves to one commit
+     * before the launch is accepted. `fetchRef` is a branch fetched when `baseRef` is a commit
+     * missing here; its tip is never used.
+     */
+    pinBase: Schema.optional(Schema.Struct({ fetchRef: Schema.optional(TrimmedNonEmptyString) })),
   }),
   success: Schema.Struct({
     threadId: ThreadId,
