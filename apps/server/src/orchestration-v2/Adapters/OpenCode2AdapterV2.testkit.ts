@@ -328,6 +328,23 @@ function layerRegistry(
   );
 }
 
+/** A replay-backed OpenCode 2 adapter, for orchestrator tests that pair it with other providers. */
+export const openCode2ReplayAdapter = (entries: ReadonlyArray<ProviderReplayEntry>) =>
+  makeReplayAdapter(
+    {
+      provider: OPENCODE_PROVIDER,
+      protocol: OPENCODE2_HTTP_PROTOCOL,
+      version: "2.0.18",
+      scenario: "opencode2_adapter",
+      entries,
+    },
+    { external: true },
+  ).pipe(
+    Effect.provide(
+      Layer.mergeAll(layerReplayHost, IdAllocator.layer, NodeServices.layer, NodeCrypto.layer),
+    ),
+  );
+
 export const openCode2ReplayRuntime = (
   entries: ReadonlyArray<ProviderReplayEntry>,
   options?: {

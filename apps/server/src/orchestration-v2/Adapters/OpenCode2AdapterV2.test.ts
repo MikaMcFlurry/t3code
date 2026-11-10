@@ -1461,7 +1461,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
   );
 
   it.effect(
-    "keeps a finished background subagent's queued report pending until its native continuation ends",
+    "keeps a finished background subagent's queued report in the snapshots, but not as running work, until its native continuation ends",
     () =>
       Effect.gen(function* () {
         const gate = makeProviderReplayGate(["continue"]);
@@ -1493,10 +1493,17 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         const queued = yield* Deferred.make<void>();
         const drained = yield* Deferred.make<void>();
         const timeline: Array<boolean | string> = [];
+        const rootSnapshots: Array<boolean> = [];
         yield* runtime.events.pipe(
           Stream.runForEach((event) =>
             Effect.gen(function* () {
               if (event.type === "provider_thread.updated") {
+                if (
+                  event.providerThread.id === thread.id &&
+                  event.pendingBackgroundWork !== undefined
+                ) {
+                  rootSnapshots.push(event.pendingBackgroundWork);
+                }
                 if (
                   event.providerThread.nativeThreadRef?.nativeId === MIDDLE &&
                   event.pendingBackgroundWork !== undefined
@@ -1525,9 +1532,13 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         );
         yield* runtime.startTurn(withLineage(thread));
         yield* Deferred.await(queued);
-        assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
-        assert.isTrue(yield* runtime.hasPendingBackgroundWorkForThread!(thread));
+        // The report is undelivered, not running: a detach would end nothing.
+        assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+        assert.isFalse(yield* runtime.hasPendingBackgroundWorkForThread!(thread));
+        assert.deepEqual(yield* runtime.describePendingBackgroundWork!, []);
+        // The snapshots still hold run ingestion open for the native continuation.
         assert.strictEqual(timeline.at(-1), true);
+        assert.strictEqual(rootSnapshots.at(-1), true);
         timeline.length = 0;
         gate.release("continue");
         yield* Deferred.await(drained);
@@ -1811,6 +1822,114 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       assert.deepEqual(watch.state.roster, []);
       assert.isFalse(yield* runtime.hasPendingBackgroundWorkForThread!(thread));
     }),
+  );
+
+  const outOfFunds = {
+    type: "provider.quota",
+    message: "This request requires more credits.",
+    status: 402,
+  };
+
+  // regression: #32296 an idle, failed thread with finished children refused a provider switch
+  it.effect(
+    "does not count a finished child's undelivered report as running work once the turn fails",
+    () =>
+      Effect.gen(function* () {
+        const gate = makeProviderReplayGate(["finish"]);
+        const { runtime, thread } = yield* resumed(
+          [
+            ...launchedAndRunning,
+            event("session.execution.succeeded", { sessionID: CHILD }, "finish"),
+            // The report reaches the parent's inbox, but the parent fails before
+            // OpenCode delivers it, so neither delivered nor cancelled ever follows.
+            childReport("msg_report", "CHILD_OK"),
+            event("session.execution.failed", { sessionID: SESSION, error: outOfFunds }),
+          ],
+          { replayGate: gate },
+        );
+        const watch = yield* watchBackgroundTurn(runtime);
+        yield* runtime.startTurn(withLineage(thread));
+        yield* watch.attached;
+        assert.isTrue(yield* runtime.hasPendingBackgroundWork!, "a running child is running work");
+        assert.isTrue(yield* runtime.hasPendingBackgroundWorkForThread!(thread));
+        assert.deepEqual(yield* runtime.describePendingBackgroundWork!, [
+          { kind: "subagent", label: "Sleep" },
+        ]);
+        gate.release("finish");
+        assert.equal((yield* watch.terminal)?.status, "failed");
+        assert.isFalse(
+          yield* runtime.hasPendingBackgroundWorkForThread!(thread),
+          "an undelivered report of a finished child still counts as running work",
+        );
+        assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+        assert.deepEqual(yield* runtime.describePendingBackgroundWork!, []);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("does not count a wake whose execution failed at once as running work", () =>
+    Effect.gen(function* () {
+      const offers: Array<ProviderContinuationRequests.ProviderContinuationRequest> = [];
+      const offered = yield* Deferred.make<void>();
+      const gate = makeProviderReplayGate(["fail"]);
+      const { runtime, thread } = yield* resumed(
+        [
+          ...launchedAndRunning,
+          event("session.execution.succeeded", { sessionID: SESSION }),
+          event("session.execution.succeeded", { sessionID: CHILD }),
+          childReport("msg_report", "CHILD_OK"),
+          // OpenCode wakes the idle parent for the report; the wake fails at once.
+          event("session.execution.started", { sessionID: SESSION }),
+          event("session.execution.failed", { sessionID: SESSION, error: outOfFunds }, "fail"),
+          // Not held by the wake, so seeing it proves the failure was consumed.
+          event("session.model.selected", {
+            sessionID: CHILD,
+            model: { providerID: "opencode", id: "big-pickle", variant: "none" },
+          }),
+        ],
+        { replayGate: gate },
+      ).pipe(
+        Effect.provideService(ProviderContinuationRequests.ProviderContinuationRequests, {
+          offer: (request) =>
+            Effect.gen(function* () {
+              offers.push(request);
+              yield* Deferred.succeed(offered, undefined);
+            }),
+          take: Effect.never,
+        }),
+      );
+      const drained = yield* Deferred.make<void>();
+      const firstEnded = yield* Deferred.make<void>();
+      yield* runtime.events.pipe(
+        Stream.runForEach((event) =>
+          event.type === "turn.terminal"
+            ? Deferred.succeed(firstEnded, undefined)
+            : event.type === "provider_thread.updated" &&
+                event.providerThread.nativeThreadRef?.nativeId === CHILD &&
+                event.providerThread.nativeMetadata?.modelSelection?.options?.[0]?.value === "none"
+              ? Deferred.succeed(drained, undefined)
+              : Effect.void,
+        ),
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn(withLineage(thread));
+      yield* Deferred.await(firstEnded);
+      yield* Deferred.await(offered);
+      assert.isTrue(yield* runtime.hasPendingBackgroundWorkForThread!(thread), "a running wake");
+      assert.deepEqual(
+        (yield* runtime.describePendingBackgroundWork!).map((work) => work.kind),
+        ["wake_turn"],
+      );
+      gate.release("fail");
+      yield* Deferred.await(drained);
+      // The continuation was offered but never ran; the wake now only waits to be delivered.
+      assert.lengthOf(offers, 1);
+      assert.isFalse(
+        yield* runtime.hasPendingBackgroundWorkForThread!(thread),
+        "a wake whose execution ended still counts as running work",
+      );
+      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+      assert.deepEqual(yield* runtime.describePendingBackgroundWork!, []);
+    }).pipe(Effect.scoped),
   );
 
   it.effect("settles every call that joined a running subagent with its one report", () =>
