@@ -153,6 +153,12 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
     /** Set by a linked environment launching its agent's delegated task here; ignored otherwise. */
     delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
+    /**
+     * Set by a linked environment's delegated task: the worktree base resolves to one commit
+     * before the launch is accepted. `fetchRef` is a branch fetched when `baseRef` is a commit
+     * missing here; its tip is never used.
+     */
+    pinBase: Schema.optional(Schema.Struct({ fetchRef: Schema.optional(TrimmedNonEmptyString) })),
   }),
   success: Schema.Struct({
     threadId: ThreadId,

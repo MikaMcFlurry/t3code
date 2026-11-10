@@ -70,7 +70,14 @@ export type ThreadLaunchWorkspaceStrategy =
       readonly baseRef: string;
       readonly branch?: string | undefined;
       readonly startFromOrigin?: boolean | undefined;
+      /** The exact commit to start from, resolved before launch; `baseRef` then only names it. */
+      readonly baseCommit?: string | undefined;
     };
+
+type WorktreeStrategy = Extract<ThreadLaunchWorkspaceStrategy, { readonly type: "worktree" }>;
+
+/** A full commit id, which names one commit whatever the refs say. */
+const FULL_COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 
 export interface ThreadLaunchInitialMessage {
   readonly messageId?: MessageId;
@@ -197,6 +204,33 @@ export class ThreadLaunchNotRepositoryError extends Schema.TaggedError<ThreadLau
   }
 }
 
+export class ThreadLaunchBaseUnavailableError extends Schema.TaggedError<ThreadLaunchBaseUnavailableError>()(
+  "ThreadLaunchBaseUnavailableError",
+  {
+    projectId: ProjectId,
+    baseRef: Schema.String,
+    /** The exact commit that was asked for, when one was. */
+    commit: Schema.optional(Schema.String),
+    /** The branch fetched to look for it. */
+    fetchedRef: Schema.optional(Schema.String),
+    projectTitle: Schema.optional(Schema.String),
+    workspaceRoot: Schema.optional(Schema.String),
+    detail: Schema.optional(Schema.String),
+  },
+) {
+  override get message(): string {
+    const where =
+      this.projectTitle === undefined
+        ? `project ${this.projectId}`
+        : `project "${this.projectTitle}" (${this.workspaceRoot})`;
+    const detail = this.detail === undefined ? "" : ` ${this.detail}`;
+    if (this.commit === undefined)
+      return `Base ref "${this.baseRef}" does not resolve to a commit in ${where}.${detail}`;
+    const fetched = this.fetchedRef === undefined ? "" : `, even after fetching ${this.fetchedRef}`;
+    return `Commit ${this.commit} is not in ${where}${fetched}. Push or fetch commit ${this.commit} so that checkout has it.${detail}`;
+  }
+}
+
 export class ThreadLaunchService extends Context.Service<
   ThreadLaunchService,
   {
@@ -215,6 +249,19 @@ export class ThreadLaunchService extends Context.Service<
     ) => Effect.Effect<
       void,
       ThreadLaunchBaseRefError | ThreadLaunchBranchConflictError | ThreadLaunchNotRepositoryError
+    >;
+    /**
+     * Pins a worktree base to one commit in the project's checkout before launch; any doubt
+     * refuses. `fetchRef` only brings an exact commit (`baseCommit` or a full id as `baseRef`)
+     * the checkout lacks: that branch is fetched and its tip is never used.
+     */
+    readonly resolveWorktreeBase: (input: {
+      readonly projectId: ProjectId;
+      readonly workspaceStrategy: WorktreeStrategy;
+      readonly fetchRef?: string | undefined;
+    }) => Effect.Effect<
+      WorktreeStrategy & { readonly baseCommit: string },
+      ThreadLaunchBaseUnavailableError
     >;
     readonly retryPreparation: (
       input: ThreadLaunchPreparationInput,
@@ -409,6 +456,73 @@ const make = Effect.gen(function* () {
       });
   });
 
+  const resolveWorktreeBase: ThreadLaunchService["Service"]["resolveWorktreeBase"] = Effect.fn(
+    "ThreadLaunchService.resolveWorktreeBase",
+  )(function* (input) {
+    const strategy = input.workspaceStrategy;
+    const { baseRef } = strategy;
+    const exact =
+      strategy.baseCommit ?? (FULL_COMMIT_ID.test(baseRef) ? baseRef.toLowerCase() : undefined);
+    const project = Option.getOrUndefined(
+      yield* projects.getById(input.projectId).pipe(Effect.orElseSucceed(() => Option.none())),
+    );
+    const unavailable = (fields: { fetchedRef?: string; detail?: string } = {}) =>
+      new ThreadLaunchBaseUnavailableError({
+        projectId: input.projectId,
+        baseRef,
+        ...(exact === undefined ? {} : { commit: exact }),
+        ...(project === undefined
+          ? {}
+          : { projectTitle: project.title, workspaceRoot: project.workspaceRoot }),
+        ...fields,
+      });
+    if (project === undefined) return yield* unavailable({ detail: "The project was not found." });
+    const cwd = project.workspaceRoot;
+    const resolve = (revision: string) =>
+      git.resolveCommit({ cwd, revision }).pipe(
+        Effect.map(({ commitSha }) => commitSha),
+        Effect.orElseSucceed(() => undefined),
+      );
+    /** Fetches `refName` from the remote this checkout's own config picks; null without one. */
+    const fetchFromRemote = (refName: string) =>
+      git.resolveWorktreeBaseRemote({ cwd, refName }).pipe(
+        Effect.flatMap((remote) =>
+          remote === null
+            ? Effect.succeed(null)
+            : git.fetchWorktreeBaseCommit({ cwd, refName, remote }),
+        ),
+        Effect.mapError((error) => unavailable({ detail: error.message })),
+      );
+
+    let commit: string | undefined;
+    if (exact !== undefined) {
+      commit = yield* resolve(exact);
+      // A branch only carries the commit here. Its tip may have moved past it or never
+      // held it, so it is fetched for its history and the commit is checked again.
+      const transport = strategy.baseCommit !== undefined ? baseRef : input.fetchRef;
+      if (commit === undefined && transport !== undefined && transport !== exact) {
+        const fetched = yield* Effect.result(fetchFromRemote(transport));
+        commit = yield* resolve(exact);
+        if (commit === undefined) {
+          if (fetched._tag === "Failure") return yield* fetched.failure;
+          return yield* unavailable(fetched.success === null ? {} : { fetchedRef: transport });
+        }
+      }
+      // Never a different commit than the one asked for.
+      if (commit !== undefined && !commit.toLowerCase().startsWith(exact.toLowerCase()))
+        commit = undefined;
+    } else if (strategy.startFromOrigin === true) {
+      // As preparation would: the remote branch when there is one, else the local base.
+      const fetched = yield* fetchFromRemote(baseRef);
+      commit = fetched?.commitSha ?? (yield* resolve(baseRef));
+    } else {
+      // `git worktree add` reads `-` as the previous checkout.
+      commit = yield* resolve(baseRef === "-" ? "@{-1}" : baseRef);
+    }
+    if (commit === undefined) return yield* unavailable();
+    return { ...strategy, baseCommit: commit };
+  });
+
   const prepareInBackground = Effect.fn("ThreadLaunchService.prepareInBackground")(function* (
     input: PreparationInput,
     threadId: ThreadId,
@@ -527,7 +641,10 @@ const make = Effect.gen(function* () {
             })
             .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
         }
-        let startRef = input.workspaceStrategy.baseRef;
+        // A base resolved before launch starts from exactly that commit: nothing is
+        // fetched again, so a branch that moved since never changes it.
+        const pinned = input.workspaceStrategy.baseCommit;
+        let startRef = pinned ?? input.workspaceStrategy.baseRef;
         let baseRefName = input.workspaceStrategy.baseRef;
         const remote =
           input.workspaceStrategy.startFromOrigin === true
@@ -538,9 +655,11 @@ const make = Effect.gen(function* () {
                 })
                 .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)))
             : null;
-        const shouldFetch = remote !== null;
+        const shouldFetch = remote !== null && pinned === undefined;
         yield* setupTracker.stageStatus(threadId, "fetch", shouldFetch ? "running" : "skipped");
-        if (remote !== null) {
+        if (remote !== null && pinned !== undefined) {
+          baseRefName = `refs/remotes/${remote.remoteName}/${remote.branchName}`;
+        } else if (remote !== null) {
           const remoteBase = yield* git
             .fetchWorktreeBaseCommit({
               cwd: project.workspaceRoot,
@@ -1356,7 +1475,13 @@ const make = Effect.gen(function* () {
     );
   });
 
-  return ThreadLaunchService.of({ launch, checkWorktreeBase, retryPreparation, prepareRun });
+  return ThreadLaunchService.of({
+    launch,
+    checkWorktreeBase,
+    resolveWorktreeBase,
+    retryPreparation,
+    prepareRun,
+  });
 });
 
 export const layer = Layer.effect(ThreadLaunchService, make);

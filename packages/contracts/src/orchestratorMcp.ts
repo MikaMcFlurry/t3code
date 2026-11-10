@@ -174,8 +174,17 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   isolation: Schema.optional(
     Schema.Literals(["shared", "worktree"]).annotate({
       description:
-        "'shared' (default): parent checkout. 'worktree': new prepared checkout from the parent commit, for a separate checkout or PR per child. Uncommitted edits stay out.",
+        "'shared' (default): parent checkout. 'worktree': new prepared checkout from the parent commit (pushed, for a linked environment), for a separate checkout or PR per child. Uncommitted edits stay out.",
     }),
+  ),
+  baseRef: Schema.optional(
+    TrimmedNonEmptyString.annotate({
+      description:
+        "Worktree only: start from this ref, resolved where the worktree is made (e.g. `HEAD`, `origin/main`).",
+    }),
+  ),
+  startFromOrigin: Schema.optional(
+    Schema.Boolean.annotate({ description: "Fetch `baseRef` from its remote first." }),
   ),
   mode: Schema.optional(
     Schema.Literals(["async", "wait"]).annotate({
@@ -941,6 +950,7 @@ export class OrchestratorMcpFailure extends Schema.TaggedError<OrchestratorMcpFa
       "orchestration_error",
       "thread_credential_required",
       "target_required",
+      "base_unavailable",
     ]),
     message: Schema.String,
   },

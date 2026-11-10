@@ -190,10 +190,45 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         }
         // Reject unresolved base refs and blocked branch names before accepting a launch; worktree provisioning happens later.
         const strategy = input.workspaceStrategy;
+        if (input.pinBase !== undefined && strategy?.type !== "worktree")
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: 'pinBase needs a "worktree" workspaceStrategy.',
+          });
+        // A pinned base resolves to one commit now, so preparation cannot pick another later
+        // (a branch moved, a fresh fetch). A replay keeps the base its first launch resolved.
+        const pinned =
+          !replaying &&
+          strategy?.type === "worktree" &&
+          (input.pinBase !== undefined || strategy.baseCommit !== undefined)
+            ? yield* ThreadLaunch.ThreadLaunchService.pipe(
+                Effect.flatMap((launches) =>
+                  launches.resolveWorktreeBase({
+                    projectId,
+                    workspaceStrategy: strategy,
+                    fetchRef: input.pinBase?.fetchRef,
+                  }),
+                ),
+                Effect.mapError(
+                  (error) =>
+                    new OrchestratorMcpFailure({
+                      code: "base_unavailable",
+                      message: `${error.message} No thread was created.`,
+                    }),
+                ),
+              )
+            : undefined;
+        // A pinned base already resolved, so only its branch name is still checked, against the commit it pinned.
         if (!replaying && strategy?.type === "worktree")
           yield* ThreadLaunch.ThreadLaunchService.pipe(
             Effect.flatMap((launches) =>
-              launches.checkWorktreeBase({ projectId, workspaceStrategy: strategy }),
+              launches.checkWorktreeBase({
+                projectId,
+                workspaceStrategy:
+                  pinned === undefined
+                    ? strategy
+                    : { ...pinned, baseRef: pinned.baseCommit, startFromOrigin: false },
+              }),
             ),
             Effect.mapError(
               (error) =>
@@ -262,7 +297,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           modelSelection,
           runtimeMode: startedRuntimeMode,
           interactionMode,
-          workspaceStrategy: input.workspaceStrategy ?? { type: "root" },
+          workspaceStrategy: pinned ?? input.workspaceStrategy ?? { type: "root" },
           ...(input.message === undefined && attachments.length === 0
             ? {}
             : {

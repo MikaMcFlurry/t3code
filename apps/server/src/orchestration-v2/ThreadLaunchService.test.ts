@@ -1288,6 +1288,316 @@ it.effect.each(["stable", "upstream/release"])(
     ),
 );
 
+// Pinned worktree bases, with real repositories: an origin, the parent's clone, and the
+// target's clone where the worktree is made. Test ideas and the dirty-checkout checks
+// follow glouno's delegated-worktree tests (cf6df217b6).
+const layerRealGit = GitVcsDriver.layer.pipe(
+  Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "launch-pinned-git-" })),
+  Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+);
+
+const pinnedRepositories = Effect.fn("pinnedRepositories")(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const git = yield* GitVcsDriver.GitVcsDriver;
+  const directory = yield* fs.makeTempDirectoryScoped({ prefix: "launch-pinned-" });
+  const origin = `${directory}/origin.git`;
+  const parent = `${directory}/parent`;
+  const target = `${directory}/target`;
+  const other = `${directory}/other`;
+  const worktreePath = `${directory}/worktree`;
+  const run = (at: string, args: ReadonlyArray<string>) =>
+    git.execute({ operation: "launch-test", cwd: at, args });
+  const out = (at: string, args: ReadonlyArray<string>) =>
+    run(at, args).pipe(Effect.map((result) => result.stdout.trim()));
+  const configure = (at: string) =>
+    run(at, ["config", "user.name", "Test"]).pipe(
+      Effect.andThen(run(at, ["config", "user.email", "test@example.test"])),
+    );
+  /** Commits a new file named after `message` in `at` and returns the commit. */
+  const commit = (at: string, message: string) =>
+    fs
+      .writeFileString(`${at}/${message.replaceAll(" ", "-")}.txt`, `${message}\n`)
+      .pipe(
+        Effect.andThen(run(at, ["add", "-A"])),
+        Effect.andThen(run(at, ["commit", "-m", message])),
+        Effect.andThen(out(at, ["rev-parse", "HEAD"])),
+      );
+  const clone = (at: string) =>
+    run(directory, ["clone", "--quiet", origin, at]).pipe(Effect.andThen(configure(at)));
+  yield* fs.makeDirectory(parent);
+  yield* run(directory, ["init", "--quiet", "--bare", "-b", "main", origin]);
+  yield* run(parent, ["init", "--quiet", "-b", "main"]);
+  yield* configure(parent);
+  yield* commit(parent, "initial");
+  yield* run(parent, ["remote", "add", "origin", origin]);
+  yield* run(parent, ["push", "--quiet", "-u", "origin", "main"]);
+  return { fs, run, out, commit, clone, parent, target, other, worktreePath };
+});
+
+type PinnedRepositories = Effect.Success<ReturnType<typeof pinnedRepositories>>;
+
+/** A launch harness whose project checkout is the target clone, with real Git. */
+const pinnedHarness = Effect.fn("pinnedHarness")(function* (repos: PinnedRepositories) {
+  const git = yield* GitVcsDriver.GitVcsDriver;
+  const { run, target, worktreePath } = repos;
+  const setupStarted = yield* Deferred.make<void>();
+  const fetches = yield* Ref.make(0);
+  const harness = makeHarness({
+    hasCommit: ({ refName }) =>
+      run(target, ["rev-parse", "--verify", "--quiet", `${refName}^{commit}`]).pipe(
+        Effect.as(true),
+        Effect.orElseSucceed(() => false),
+      ),
+    git: {
+      hasRefNamed: () => Effect.succeed(false),
+      resolveCommit: (input) => git.resolveCommit({ ...input, cwd: target }),
+      resolveWorktreeBaseRemote: (input) =>
+        git.resolveWorktreeBaseRemote({ ...input, cwd: target }),
+    },
+    fetchWorktreeBaseCommit: (input) =>
+      Ref.update(fetches, (count) => count + 1).pipe(
+        Effect.andThen(git.fetchWorktreeBaseCommit({ ...input, cwd: target })),
+      ),
+    createWorktree: (input, options) =>
+      git.createWorktree({ ...input, cwd: target, path: worktreePath }, options),
+    runSetup: () =>
+      Deferred.succeed(setupStarted, undefined).pipe(Effect.as({ status: "no-script" as const })),
+  });
+  return { harness, setupStarted, fetches };
+});
+
+it.effect("starts a delegated worktree from the parent's commit when the target has it", () =>
+  Effect.gen(function* () {
+    const repos = yield* pinnedRepositories();
+    const parentCommit = yield* repos.commit(repos.parent, "parent work");
+    yield* repos.run(repos.parent, ["push", "--quiet", "origin", "main"]);
+    yield* repos.clone(repos.target);
+    const { harness, setupStarted, fetches } = yield* pinnedHarness(repos);
+    yield* Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const resolved = yield* launches.resolveWorktreeBase({
+        projectId,
+        workspaceStrategy: { type: "worktree", baseRef: parentCommit, startFromOrigin: false },
+        fetchRef: "main",
+      });
+      assert.equal(resolved.baseCommit, parentCommit);
+      assert.equal(yield* Ref.get(fetches), 0);
+      yield* launches.launch(
+        launchInput({
+          command: "command:pinned:present",
+          thread: "thread:pinned:present",
+          workspace: resolved,
+        }),
+      );
+      yield* Deferred.await(setupStarted);
+      assert.equal(yield* repos.out(repos.worktreePath, ["rev-parse", "HEAD"]), parentCommit);
+    }).pipe(Effect.provide(harness.layer));
+  }).pipe(Effect.provide(layerRealGit)),
+);
+
+it.effect.each([
+  { name: "the parent is behind it", parentFetched: true },
+  { name: "it moved before the target fetched", parentFetched: false },
+])("starts from the parent's commit, never the branch tip, when $name", ({ parentFetched }) =>
+  Effect.gen(function* () {
+    const repos = yield* pinnedRepositories();
+    // The target cloned before the parent's commit existed, so it has to fetch it.
+    yield* repos.clone(repos.target);
+    const parentCommit = yield* repos.commit(repos.parent, "parent work");
+    yield* repos.run(repos.parent, ["push", "--quiet", "origin", "main"]);
+    yield* repos.clone(repos.other);
+    const tip = yield* repos.commit(repos.other, "someone else");
+    yield* repos.run(repos.other, ["push", "--quiet", "origin", "main"]);
+    if (parentFetched) {
+      yield* repos.run(repos.parent, ["fetch", "--quiet", "origin"]);
+      assert.equal(
+        yield* repos.out(repos.parent, ["rev-list", "--count", "HEAD..origin/main"]),
+        "1",
+      );
+    }
+    assert.equal(yield* repos.out(repos.parent, ["rev-parse", "HEAD"]), parentCommit);
+    const { harness, setupStarted } = yield* pinnedHarness(repos);
+    yield* Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const resolved = yield* launches.resolveWorktreeBase({
+        projectId,
+        workspaceStrategy: { type: "worktree", baseRef: parentCommit, startFromOrigin: false },
+        fetchRef: "main",
+      });
+      assert.equal(resolved.baseCommit, parentCommit);
+      // The fetch brought the moved tip; it carried the commit and is not used.
+      assert.equal(yield* repos.out(repos.target, ["rev-parse", "origin/main"]), tip);
+      yield* launches.launch(
+        launchInput({
+          command: "command:pinned:behind",
+          thread: "thread:pinned:behind",
+          workspace: resolved,
+        }),
+      );
+      yield* Deferred.await(setupStarted);
+      assert.equal(yield* repos.out(repos.worktreePath, ["rev-parse", "HEAD"]), parentCommit);
+    }).pipe(Effect.provide(harness.layer));
+  }).pipe(Effect.provide(layerRealGit)),
+);
+
+it.effect(
+  "keeps the commit startFromOrigin resolved when the branch moves before preparation",
+  () =>
+    Effect.gen(function* () {
+      const repos = yield* pinnedRepositories();
+      yield* repos.clone(repos.target);
+      yield* repos.clone(repos.other);
+      const fresh = yield* repos.commit(repos.parent, "fresh main");
+      yield* repos.run(repos.parent, ["push", "--quiet", "origin", "main"]);
+      const { harness, setupStarted, fetches } = yield* pinnedHarness(repos);
+      yield* Effect.gen(function* () {
+        const launches = yield* ThreadLaunch.ThreadLaunchService;
+        const resolved = yield* launches.resolveWorktreeBase({
+          projectId,
+          workspaceStrategy: { type: "worktree", baseRef: "main", startFromOrigin: true },
+        });
+        assert.equal(resolved.baseCommit, fresh);
+        yield* repos.run(repos.other, ["pull", "--quiet", "origin", "main"]);
+        yield* repos.commit(repos.other, "later main");
+        yield* repos.run(repos.other, ["push", "--quiet", "origin", "main"]);
+        yield* launches.launch(
+          launchInput({
+            command: "command:pinned:origin",
+            thread: "thread:pinned:origin",
+            workspace: resolved,
+          }),
+        );
+        yield* Deferred.await(setupStarted);
+        assert.equal(yield* repos.out(repos.worktreePath, ["rev-parse", "HEAD"]), fresh);
+        assert.equal(yield* Ref.get(fetches), 1);
+        // The branch still names its base for diffs and pull requests.
+        assert.equal(
+          harness.createWorktree.mock.calls[0]?.[0].baseRefName,
+          "refs/remotes/origin/main",
+        );
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(layerRealGit)),
+);
+
+it.effect(
+  "refuses an unpublished commit before launch, and a launch with it never uses the checkout",
+  () =>
+    Effect.gen(function* () {
+      const repos = yield* pinnedRepositories();
+      yield* repos.clone(repos.target);
+      const unpublished = yield* repos.commit(repos.parent, "not pushed");
+      yield* repos.fs.writeFileString(`${repos.target}/initial.txt`, "dirty target\n");
+      yield* repos.fs.writeFileString(`${repos.target}/untracked.txt`, "keep me\n");
+      const targetHead = yield* repos.out(repos.target, ["rev-parse", "HEAD"]);
+      const { harness } = yield* pinnedHarness(repos);
+      yield* Effect.gen(function* () {
+        const launches = yield* ThreadLaunch.ThreadLaunchService;
+        const refused = yield* launches
+          .resolveWorktreeBase({
+            projectId,
+            workspaceStrategy: { type: "worktree", baseRef: unpublished, startFromOrigin: false },
+            fetchRef: "main",
+          })
+          .pipe(Effect.flip);
+        assert.equal(refused._tag, "ThreadLaunchBaseUnavailableError");
+        assert.include(refused.message, `Push or fetch commit ${unpublished}`);
+        assert.include(refused.message, "even after fetching main");
+        assert.equal(harness.createWorktree.mock.calls.length, 0);
+
+        // Were it launched anyway, preparation fails the run without a worktree or agent.
+        const launched = yield* launches.launch(
+          launchInput({
+            command: "command:pinned:unpublished",
+            thread: "thread:pinned:unpublished",
+            message: "Work in the isolated checkout.",
+            workspace: {
+              type: "worktree",
+              baseRef: unpublished,
+              startFromOrigin: false,
+              baseCommit: unpublished,
+            },
+          }),
+        );
+        const failed = yield* preparationSettled(launched.threadId);
+        assert.equal(failed.runs[0]?.status, "failed");
+        assert.equal(failed.thread.worktreePath, null);
+        assert.equal(harness.runSetup.mock.calls.length, 0);
+        assert.equal(yield* repos.fs.exists(repos.worktreePath), false);
+        assert.equal(yield* repos.out(repos.target, ["rev-parse", "HEAD"]), targetHead);
+        assert.equal(
+          yield* repos.fs.readFileString(`${repos.target}/initial.txt`),
+          "dirty target\n",
+        );
+        assert.equal(yield* repos.fs.readFileString(`${repos.target}/untracked.txt`), "keep me\n");
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(layerRealGit)),
+);
+
+it.effect("starts baseRef HEAD from the target checkout and a replay keeps that commit", () =>
+  Effect.gen(function* () {
+    const repos = yield* pinnedRepositories();
+    yield* repos.clone(repos.target);
+    const targetCommit = yield* repos.commit(repos.target, "target only");
+    yield* repos.fs.writeFileString(`${repos.target}/initial.txt`, "dirty target\n");
+    yield* repos.fs.writeFileString(`${repos.target}/untracked.txt`, "keep me\n");
+    const { harness, setupStarted } = yield* pinnedHarness(repos);
+    yield* Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const resolve = launches.resolveWorktreeBase({
+        projectId,
+        workspaceStrategy: { type: "worktree", baseRef: "HEAD", startFromOrigin: false },
+      });
+      const resolved = yield* resolve;
+      assert.equal(resolved.baseCommit, targetCommit);
+      const input = launchInput({
+        command: "command:pinned:head",
+        thread: "thread:pinned:head",
+        workspace: resolved,
+      });
+      const launched = yield* launches.launch(input);
+      yield* Deferred.await(setupStarted);
+      assert.equal(yield* repos.out(repos.worktreePath, ["rev-parse", "HEAD"]), targetCommit);
+      assert.equal(
+        yield* repos.fs.readFileString(`${repos.worktreePath}/initial.txt`),
+        "initial\n",
+      );
+      assert.equal(yield* repos.fs.exists(`${repos.worktreePath}/untracked.txt`), false);
+      assert.equal(yield* repos.fs.readFileString(`${repos.target}/untracked.txt`), "keep me\n");
+
+      // The target moves on; the same command keeps the thread and base it started with.
+      const moved = yield* repos.commit(repos.target, "target later");
+      assert.equal((yield* resolve).baseCommit, moved);
+      const replayed = yield* launches.launch({
+        ...input,
+        workspaceStrategy: { ...resolved, baseCommit: moved },
+      });
+      assert.equal(replayed.threadId, launched.threadId);
+      assert.equal(harness.createWorktree.mock.calls.length, 1);
+      assert.equal(yield* repos.out(repos.worktreePath, ["rev-parse", "HEAD"]), targetCommit);
+    }).pipe(Effect.provide(harness.layer));
+  }).pipe(Effect.provide(layerRealGit)),
+);
+
+it.effect("refuses a base ref the target cannot resolve", () =>
+  Effect.gen(function* () {
+    const repos = yield* pinnedRepositories();
+    yield* repos.clone(repos.target);
+    const { harness } = yield* pinnedHarness(repos);
+    yield* Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      for (const startFromOrigin of [false, true]) {
+        const refused = yield* launches
+          .resolveWorktreeBase({
+            projectId,
+            workspaceStrategy: { type: "worktree", baseRef: "no-such-branch", startFromOrigin },
+          })
+          .pipe(Effect.flip);
+        assert.include(refused.message, `Base ref "no-such-branch" does not resolve`);
+      }
+    }).pipe(Effect.provide(harness.layer));
+  }).pipe(Effect.provide(layerRealGit)),
+);
+
 it.effect("fetches the origin base from the remote it already resolved", () => {
   let fetchInput: Deferred.Deferred<unknown> | null = null;
   const harness = makeHarness({
@@ -2184,6 +2494,7 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
             ),
           ),
         checkWorktreeBase: launches.checkWorktreeBase,
+        resolveWorktreeBase: launches.resolveWorktreeBase,
         retryPreparation: launches.retryPreparation,
         prepareRun: launches.prepareRun,
       }),
