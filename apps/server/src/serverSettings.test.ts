@@ -38,6 +38,7 @@ import * as SqlitePersistence from "./persistence/Sqlite.ts";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import * as ServerSettingsModule from "./serverSettings.ts";
 import { SECRET_REDACTED } from "./settingsSecrets.ts";
+import { claudeCentralMcpServers } from "./orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import * as ManagedPolicy from "./policy/ManagedPolicy.ts";
 import { resolveProviderInstanceTerminalEnvironment } from "./terminal/Manager.ts";
 
@@ -1590,6 +1591,140 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("server settings"
           assert.isTrue(Option.isNone(yield* store.get(name)));
         }
       }).pipe(Effect.provide(layerServerSettingsWithSecrets())),
+  );
+
+  it.effect("keeps central MCP header and environment values in the secret store", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const store = yield* ServerSecretStore.ServerSecretStore;
+      const saved = yield* service.updateSettings({
+        centralMcpServers: [
+          {
+            name: "github",
+            enabled: true,
+            transport: {
+              type: "stdio",
+              command: "npx",
+              args: ["-y", "gh-mcp"],
+              env: { GITHUB_TOKEN: "mcp-env-secret" },
+            },
+          },
+          {
+            name: "docs",
+            enabled: true,
+            transport: {
+              type: "http",
+              url: "https://docs.example/mcp",
+              headers: { Authorization: "Bearer mcp-header-secret" },
+            },
+          },
+        ],
+      });
+      const values = ["mcp-env-secret", "Bearer mcp-header-secret"];
+      const client = ServerSettingsModule.redactServerSettingsForClient(saved, {
+        secretReferences: true,
+      });
+      const disk = yield* fs.readFileString(config.settingsPath);
+      for (const value of values) {
+        assert.include(JSON.stringify(saved), value);
+        assert.notInclude(JSON.stringify(client), value);
+        assert.notInclude(disk, value);
+      }
+      assert.deepStrictEqual(client.centralMcpServers[0]?.transport, {
+        type: "stdio",
+        command: "npx",
+        args: ["-y", "gh-mcp"],
+        env: { GITHUB_TOKEN: SECRET_REDACTED },
+      });
+      assert.deepStrictEqual(client.centralMcpServers[1]?.transport, {
+        type: "http",
+        url: "https://docs.example/mcp",
+        headers: { Authorization: SECRET_REDACTED },
+      });
+      assert.isTrue(Option.isSome(yield* store.get("central-mcp-Z2l0aHVi-env-R0lUSFVCX1RPS0VO")));
+
+      // Saving the client's copy unchanged, e.g. after toggling a server, keeps every secret.
+      const echoed = yield* service.updateSettings({
+        centralMcpServers: client.centralMcpServers.map((server) =>
+          server.name === "github" ? { ...server, enabled: false } : server,
+        ),
+      });
+      for (const value of values) assert.include(JSON.stringify(echoed), value);
+      assert.isFalse(echoed.centralMcpServers[0]?.enabled);
+
+      // Sessions read the materialized settings, so the injected server gets the real values.
+      const sessionSettings = yield* service.getSettings;
+      assert.deepStrictEqual(claudeCentralMcpServers(sessionSettings.centralMcpServers), {
+        docs: {
+          type: "http",
+          url: "https://docs.example/mcp",
+          headers: { Authorization: "Bearer mcp-header-secret" },
+        },
+      });
+
+      // A new value replaces the stored one; dropping an entry removes its secret.
+      const replaced = yield* service.updateSettings({
+        centralMcpServers: [
+          {
+            ...client.centralMcpServers[0]!,
+            transport: { type: "stdio", command: "npx", args: ["-y", "gh-mcp"], env: {} },
+          },
+          {
+            ...client.centralMcpServers[1]!,
+            transport: {
+              type: "http",
+              url: "https://docs.example/mcp",
+              headers: { Authorization: "Bearer replaced-secret" },
+            },
+          },
+        ],
+      });
+      assert.deepStrictEqual(replaced.centralMcpServers[1]?.transport, {
+        type: "http",
+        url: "https://docs.example/mcp",
+        headers: { Authorization: "Bearer replaced-secret" },
+      });
+      assert.notInclude(yield* fs.readFileString(config.settingsPath), "replaced-secret");
+      assert.isTrue(Option.isNone(yield* store.get("central-mcp-Z2l0aHVi-env-R0lUSFVCX1RPS0VO")));
+    }).pipe(Effect.provide(layerServerSettingsWithSecrets())),
+  );
+
+  it.effect("moves central MCP values saved in settings.json to the secret store on load", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      yield* fs.writeFileString(
+        config.settingsPath,
+        JSON.stringify({
+          centralMcpServers: [
+            {
+              name: "docs",
+              transport: {
+                type: "http",
+                url: "https://docs.example/mcp",
+                headers: { "X-Api-Key": "legacy-mcp-key" },
+              },
+            },
+          ],
+        }),
+      );
+      const saved = yield* service.getSettings;
+      assert.deepStrictEqual(saved.centralMcpServers[0]?.transport, {
+        type: "http",
+        url: "https://docs.example/mcp",
+        headers: { "X-Api-Key": "legacy-mcp-key" },
+      });
+      assert.notInclude(yield* fs.readFileString(config.settingsPath), "legacy-mcp-key");
+      assert.notInclude(
+        JSON.stringify(
+          ServerSettingsModule.redactServerSettingsForClient(saved, { secretReferences: true }),
+        ),
+        "legacy-mcp-key",
+      );
+    }).pipe(Effect.provide(layerServerSettings())),
   );
 
   it.effect("moves saved provider credentials to the secret store when settings load", () =>
