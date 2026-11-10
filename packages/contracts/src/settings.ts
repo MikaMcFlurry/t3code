@@ -1199,7 +1199,7 @@ export const ProjectProviderInstanceOverride = Schema.Struct({
 });
 export type ProjectProviderInstanceOverride = typeof ProjectProviderInstanceOverride.Type;
 
-/** A weekly window in which a linked machine is usually off, in this server's local time. */
+/** A weekly window in which a linked machine is usually off, in its schedule's time zone. */
 export const EnvironmentOfflineWindow = Schema.Struct({
   /** 0 Sunday to 6 Saturday; the day the window starts. */
   days: Schema.Array(Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 6 }))),
@@ -1213,6 +1213,8 @@ export type EnvironmentOfflineWindow = typeof EnvironmentOfflineWindow.Type;
 export const EnvironmentSchedule = Schema.Struct({
   environmentId: TrimmedNonEmptyString,
   alwaysOn: Schema.Boolean,
+  /** IANA zone the windows are wall-clock times in; this server's zone when absent. */
+  timeZone: Schema.optionalKey(TrimmedNonEmptyString),
   offline: Schema.Array(EnvironmentOfflineWindow).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),

@@ -108,12 +108,15 @@ const EnvironmentLoadsTool = Tool.make("t3_environment_loads", {
 const EnvironmentScheduleTool = Tool.make("t3_environment_schedule_set", {
   ...shared,
   description:
-    "Record when a machine (this one or a linked one) is usually off, so work is not placed on it just before it shuts down. `alwaysOn: true` clears planned off times. Times are this server's local time; a window ending before it starts runs past midnight. Only when the user says so.",
+    "Record when a machine (this one or a linked one) is usually off, so work is not placed on it just before it shuts down. `alwaysOn: true` clears planned off times. Times are wall-clock times in `timeZone` (default: this server's zone), correct across daylight-saving changes; a window ending before it starts runs past midnight. Only when the user says so.",
   parameters: Schema.Struct({
     machineEnvironmentId: Schema.String.annotate({
       description: "environmentId from t3_environment_links or t3_environment_read.",
     }),
     alwaysOn: Schema.Boolean,
+    timeZone: Schema.optional(
+      Schema.String.annotate({ description: 'IANA time zone, e.g. "Europe/Berlin".' }),
+    ),
     offline: Schema.optional(Schema.Array(EnvironmentOfflineWindow)),
   }),
   success: Schema.Struct({ schedules: Schema.Array(EnvironmentSchedule) }),
