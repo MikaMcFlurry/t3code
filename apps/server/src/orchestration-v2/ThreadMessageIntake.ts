@@ -151,38 +151,27 @@ const availableThreadAccount = Effect.fn("ThreadMessageIntake.availableThreadAcc
   return next === selection ? undefined : next;
 });
 
-const withAvailableAccount = Effect.fn("ThreadMessageIntake.withAvailableAccount")(function* (
-  command: MessageDispatchCommand,
-) {
-  // Steering stays on the active run's account; server continuations validate their own.
-  if (
-    command.dispatchMode.type === "steer_active" ||
-    command.dispatchMode.type === "restart_active" ||
-    command.usageLimitContinuationOfRunId !== undefined ||
-    command.restartContinuationOfRunId !== undefined
-  ) {
-    return command;
-  }
-  const next = yield* availableThreadAccount(command);
-  return next === undefined ? command : { ...command, modelSelection: next };
-});
-
 /**
- * A queued send that bypasses dispatchCommand, such as a scheduled run on its bound thread,
- * starts on the account dispatchCommand would pick. An agent's send keeps its model.
+ * The account a message's turn starts on, picked under the thread's dispatch lock: a send
+ * that commits first (and so may have started or queued a run) is always seen, never raced.
+ * Steering stays on the active run's account; server continuations validate their own. An
+ * agent's send keeps its model.
  */
-export const withAvailableSendAccount = Effect.fn("ThreadMessageIntake.withAvailableSendAccount")(
-  function* (input: ThreadManagement.ThreadManagementSendInput) {
-    // Other modes may steer the active run, which stays on its account.
-    if (input.mode !== "queue") return input;
-    const next = yield* availableThreadAccount(
-      {
-        threadId: input.threadId,
-        ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-      },
-      input.createdBy === "agent",
-    );
-    return next === undefined ? input : { ...input, modelSelection: next };
+export const messageAccountChoice = Effect.fn("ThreadMessageIntake.messageAccountChoice")(
+  function* (options: { readonly sameModelOnly: boolean }) {
+    const context = yield* Effect.context<
+      | ServerSettings.ServerSettingsService
+      | ProviderRegistry.ProviderRegistry
+      | ThreadManagement.ThreadManagementService
+    >();
+    const resolveModelSelection = (command: MessageDispatchCommand) =>
+      command.dispatchMode.type === "steer_active" ||
+      command.dispatchMode.type === "restart_active" ||
+      command.usageLimitContinuationOfRunId !== undefined ||
+      command.restartContinuationOfRunId !== undefined
+        ? Effect.undefined
+        : availableThreadAccount(command, options.sameModelOnly).pipe(Effect.provide(context));
+    return { resolveModelSelection } satisfies ThreadManagement.ThreadManagementDispatchOptions;
   },
 );
 
@@ -231,9 +220,7 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
   incoming: OrchestrationV2Command,
 ) {
   const command =
-    incoming.type === "message.dispatch"
-      ? yield* withAvailableAccount(yield* withGuestAttachments(incoming))
-      : incoming;
+    incoming.type === "message.dispatch" ? yield* withGuestAttachments(incoming) : incoming;
   const threads = yield* ThreadManagement.ThreadManagementService;
   if (command.type === "runtime-request.respond" && command.attachmentsByQuestionId) {
     const config = yield* ServerConfig.ServerConfig;
@@ -304,24 +291,31 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
     (command.type !== "queued-run.edit" || command.attachments === undefined)
   )
     return yield* threads.dispatch(command);
+  const accountChoice =
+    command.type === "message.dispatch"
+      ? yield* messageAccountChoice({ sameModelOnly: false })
+      : undefined;
   const claimed = yield* AttachmentClaims.claimPendingAttachments({
     threadId: command.threadId,
     attachments: command.attachments ?? [],
   });
   return yield* threads
-    .dispatch({
-      ...command,
-      attachments: claimed.attachments,
-      ...(command.context
-        ? {
-            context: remapComposerContextAttachments(
-              command.context,
-              command.attachments ?? [],
-              claimed.attachments,
-            ),
-          }
-        : {}),
-    })
+    .dispatch(
+      {
+        ...command,
+        attachments: claimed.attachments,
+        ...(command.context
+          ? {
+              context: remapComposerContextAttachments(
+                command.context,
+                command.attachments ?? [],
+                claimed.attachments,
+              ),
+            }
+          : {}),
+      },
+      accountChoice,
+    )
     .pipe(
       Effect.tap((result) =>
         releaseUnusedClaims(
@@ -343,15 +337,18 @@ export const sendToThread = Effect.fn("ThreadMessageIntake.sendToThread")(functi
   input: ThreadManagement.ThreadManagementSendInput,
 ) {
   const threads = yield* ThreadManagement.ThreadManagementService;
+  const accountChoice = yield* messageAccountChoice({ sameModelOnly: input.createdBy === "agent" });
   const claimed = yield* AttachmentClaims.claimPendingAttachments(input);
-  return yield* threads.sendToThread({ ...input, attachments: claimed.attachments }).pipe(
-    Effect.tap((result) => releaseUnusedClaims(claimed.claimedPaths, result.message.attachments)),
-    Effect.tapError((error) =>
-      dispatchWasNotAccepted(error)
-        ? AttachmentClaims.releaseClaimedAttachments(claimed.claimedPaths)
-        : Effect.void,
-    ),
-  );
+  return yield* threads
+    .sendToThread({ ...input, attachments: claimed.attachments }, accountChoice)
+    .pipe(
+      Effect.tap((result) => releaseUnusedClaims(claimed.claimedPaths, result.message.attachments)),
+      Effect.tapError((error) =>
+        dispatchWasNotAccepted(error)
+          ? AttachmentClaims.releaseClaimedAttachments(claimed.claimedPaths)
+          : Effect.void,
+      ),
+    );
 });
 
 export const launchThread = Effect.fn("ThreadMessageIntake.launchThread")(function* (

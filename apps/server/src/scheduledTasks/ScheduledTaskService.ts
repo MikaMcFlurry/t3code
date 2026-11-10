@@ -1067,8 +1067,14 @@ export const layer = Layer.effect(
             createdBy: active.createdBy,
             creationSource: active.creationSource,
           };
-          return withAccountChoice(input, ThreadMessageIntake.withAvailableSendAccount(input)).pipe(
-            Effect.flatMap((next) => threadManagement.sendToThread(next)),
+          // The account is picked under the thread's dispatch lock, as for any other send.
+          return withAccountChoice(
+            undefined,
+            ThreadMessageIntake.messageAccountChoice({
+              sameModelOnly: input.createdBy === "agent",
+            }),
+          ).pipe(
+            Effect.flatMap((accountChoice) => threadManagement.sendToThread(input, accountChoice)),
             Effect.catchTags({
               ThreadManagementThreadNotFoundError: (error) =>
                 retries === 0

@@ -1068,8 +1068,24 @@ it.effect.each([true, false] as const)(
                   },
                 } as never),
               getLatestLimitSwitch: () => Effect.succeed(null),
-              sendToThread: (input) =>
-                Ref.update(sent, (all) => [...all, input.modelSelection]).pipe(
+              // Like ThreadManagement.sendToThread, the account is chosen as the send dispatches.
+              sendToThread: (input, options) =>
+                (
+                  options?.resolveModelSelection?.({
+                    type: "message.dispatch",
+                    commandId: input.commandId,
+                    threadId: input.threadId,
+                    messageId: input.messageId,
+                    text: input.text,
+                    attachments: input.attachments,
+                    dispatchMode: { type: "queue_after_active" },
+                    createdBy: input.createdBy,
+                    creationSource: input.creationSource,
+                  }) ?? Effect.undefined
+                ).pipe(
+                  Effect.flatMap((chosen) =>
+                    Ref.update(sent, (all) => [...all, chosen ?? input.modelSelection]),
+                  ),
                   Effect.as({} as never),
                 ),
             }),

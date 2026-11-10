@@ -382,6 +382,22 @@ export interface OrchestratorV2DispatchResult {
   readonly replayed?: true;
 }
 
+type MessageDispatchServerCommand = Extract<
+  OrchestrationV2ServerCommand,
+  { readonly type: "message.dispatch" }
+>;
+
+export interface OrchestratorV2DispatchOptions<E = never> {
+  /**
+   * Picks a message's model selection under the thread's dispatch lock, right before the
+   * command is decided, so it sees every send that committed first. Undefined keeps the
+   * command's own. Other command types ignore it.
+   */
+  readonly resolveModelSelection?:
+    | ((command: MessageDispatchServerCommand) => Effect.Effect<ModelSelection | undefined, E>)
+    | undefined;
+}
+
 export interface OrchestratorV2Shape {
   readonly resumeQueuedRuns: Effect.Effect<number, OrchestratorV2Error>;
   readonly recoverDelegatedTasks: Effect.Effect<void>;
@@ -405,9 +421,10 @@ export interface OrchestratorV2Shape {
   readonly restartContinuationPending: (run: OrchestrationV2Run) => Effect.Effect<boolean>;
   /** Declined continuations emit no thread event; this still wakes waiters. */
   readonly awaitRestartContinuation: (run: OrchestrationV2Run) => Effect.Effect<void>;
-  readonly dispatch: (
+  readonly dispatch: <E = never>(
     command: OrchestrationV2ServerCommand,
-  ) => Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>;
+    options?: OrchestratorV2DispatchOptions<E>,
+  ) => Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error | E>;
   readonly autoArmLimitRecovery: (input: {
     readonly commandId: CommandId;
     readonly threadId: ThreadId;
@@ -15155,10 +15172,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
 
   // dispatchWithReceiptEffect owns the dispatch span; this wrapper selects the thread locks.
-  const dispatchWithReceipt = Effect.fnUntraced(function* (command: OrchestrationV2ServerCommand) {
+  const dispatchWithReceipt = Effect.fnUntraced(function* <E = never>(
+    command: OrchestrationV2ServerCommand,
+    options?: OrchestratorV2DispatchOptions<E>,
+  ) {
+    const resolveModelSelection = options?.resolveModelSelection;
     const dispatch = threadDispatch.withLock(
       commandThreadId(command),
-      dispatchWithReceiptEffect(command),
+      command.type !== "message.dispatch" || resolveModelSelection === undefined
+        ? dispatchWithReceiptEffect(command)
+        : resolveModelSelection(command).pipe(
+            Effect.flatMap((modelSelection) =>
+              dispatchWithReceiptEffect(
+                modelSelection === undefined ? command : { ...command, modelSelection },
+              ),
+            ),
+          ),
     );
     // A parent's lock comes before its side chats' locks, so a delete cascade and a side chat
     // fork or command never interleave. A fork from a side chat or onto an existing thread would

@@ -2893,3 +2893,93 @@ it.effect("replays an accepted send after the project disables the instance", ()
     }
   }).pipe(Effect.provide(Layer.mergeAll(harness.layer, layerFiles)));
 });
+
+it.effect("an MCP attachment send moves off an account that is out of usage", () => {
+  const personal = {
+    instanceId: ProviderInstanceId.make("codex_personal"),
+    model: modelSelection.model,
+  } as const;
+  const codex = (instanceId: ProviderInstanceId, usedPercent: number): ServerProvider => ({
+    instanceId,
+    driver: ProviderDriverKind.make("codex"),
+    enabled: true,
+    installed: true,
+    version: null,
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt: "2026-09-13T00:00:00.000Z",
+    models: [
+      { slug: modelSelection.model, name: "GPT-5.1 Codex", isCustom: false, capabilities: null },
+    ],
+    slashCommands: [],
+    skills: [],
+    usageLimits: {
+      checkedAt: "2026-09-13T00:00:00.000Z",
+      windows: [
+        {
+          id: "five_hour",
+          kind: "session",
+          label: "Session",
+          usedPercent,
+          resetsAt: "2099-01-01T00:00:00.000Z",
+        },
+      ],
+    },
+  });
+  const harness = makeHarness({
+    adapters: [adapter, { ...adapter, instanceId: personal.instanceId }],
+    providers: [codex(modelSelection.instanceId, 100), codex(personal.instanceId, 20)],
+    serverSettings: {
+      fallbackToAvailableAccounts: true,
+      providerInstances: {
+        [modelSelection.instanceId]: { driver: ProviderDriverKind.make("codex"), enabled: true },
+        [personal.instanceId]: { driver: ProviderDriverKind.make("codex"), enabled: true },
+      },
+    },
+  });
+  const layerFiles = ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-send-limited-" }).pipe(
+    Layer.provideMerge(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
+  );
+  return Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const fs = yield* FileSystem.FileSystem;
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const created = yield* launches.launch(
+      launchInput({ command: "command:mcp-send:setup", thread: "thread:mcp-send:limited" }),
+    );
+    assert.equal(created.projection.thread.modelSelection.instanceId, modelSelection.instanceId);
+    const pendingId = createPendingAttachmentId();
+    assert.isNotNull(pendingId);
+    const attachment: ChatAttachment = {
+      type: "image",
+      id: ChatAttachmentId.make(pendingId),
+      name: "shot.png",
+      mimeType: "image/png",
+      sizeBytes: 4,
+    };
+    const pendingPath = resolveAttachmentPath({
+      attachmentsDir: config.attachmentsDir,
+      attachment,
+    });
+    assert.isNotNull(pendingPath);
+    yield* fs.makeDirectory(config.attachmentsDir, { recursive: true });
+    yield* fs.writeFile(pendingPath, new Uint8Array([1, 2, 3, 4]));
+
+    // The path t3_thread_send_attachments takes.
+    const sent = yield* ThreadMessageIntake.sendToThread({
+      commandId: CommandId.make("command:mcp-send:attachments"),
+      projectId,
+      threadId: created.threadId,
+      messageId: MessageId.make("message:mcp-send:attachments"),
+      text: "",
+      attachments: [attachment],
+      mode: "auto",
+      createdBy: "agent",
+      creationSource: "mcp",
+    });
+    // Another account of the same model, as the agent picked it.
+    assert.deepEqual(sent.run.modelSelection, personal);
+    assert.equal(sent.message.attachments.length, 1);
+    assert.notEqual(sent.message.attachments[0]?.id, attachment.id);
+  }).pipe(Effect.provide(Layer.mergeAll(harness.layer, layerFiles)));
+});

@@ -16,6 +16,8 @@ import { Tool, Toolkit } from "effect/ai";
 import * as ServerSecretStore from "../../../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as DocumentText from "../../../provider/DocumentText.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
+import * as Settings from "../../../serverSettings.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
@@ -46,7 +48,13 @@ const AttachmentDiscardTool = Tool.make("t3_attachment_discard", {
 }).annotate(Tool.Destructive, true);
 const AttachmentSendTool = Tool.make("t3_thread_send_attachments", {
   ...shared,
-  dependencies: [...shared.dependencies, DocumentText.DocumentText],
+  // The send picks its account like any other (ThreadMessageIntake.messageAccountChoice).
+  dependencies: [
+    ...shared.dependencies,
+    DocumentText.DocumentText,
+    ProviderRegistry.ProviderRegistry,
+    Settings.ServerSettingsService,
+  ],
   description:
     "Send uploaded attachments as a new message to a thread. No retry key. Target modes cannot exceed yours. Success does not mean the provider read them or finished.",
   parameters: Schema.Struct({
