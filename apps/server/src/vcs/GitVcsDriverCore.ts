@@ -5039,6 +5039,34 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       return remoteNames.includes(remoteName) ? { remoteName, branchName } : null;
     });
 
+  const repositoryKeyOfUrl = (url: string) =>
+    sourceControlDefinitions.canonicalRepositoryKey(
+      sourceControlDefinitions.repositoryKeyFromRemote(url),
+    );
+
+  const remoteRepositoryKey: GitVcsDriver.GitVcsDriver["Service"]["remoteRepositoryKey"] =
+    Effect.fn("remoteRepositoryKey")(function* (input) {
+      // `get-url` applies `insteadOf`, so the key names where fetches really go.
+      const result = yield* executeGit("GitVcsDriver.remoteRepositoryKey", input.cwd, [
+        "remote",
+        "get-url",
+        input.remoteName,
+      ]);
+      const url = result.stdout.trim();
+      return result.exitCode === 0 && url.length > 0 ? repositoryKeyOfUrl(url) : null;
+    });
+
+  const findRemotesForRepository: GitVcsDriver.GitVcsDriver["Service"]["findRemotesForRepository"] =
+    Effect.fn("findRemotesForRepository")(function* (input) {
+      const wanted = sourceControlDefinitions.canonicalRepositoryKey(input.repository);
+      const matching: Array<string> = [];
+      for (const remoteName of yield* listRemoteNames(input.cwd)) {
+        if ((yield* remoteRepositoryKey({ cwd: input.cwd, remoteName })) === wanted)
+          matching.push(remoteName);
+      }
+      return matching;
+    });
+
   const fetchWorktreeBaseCommit: GitVcsDriver.GitVcsDriver["Service"]["fetchWorktreeBaseCommit"] =
     Effect.fn("fetchWorktreeBaseCommit")(function* (input) {
       const target = input.remote ?? (yield* resolveWorktreeBaseRemote(input));
@@ -5543,6 +5571,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     remoteBranchExists,
     resolveRemoteTrackingCommit,
     resolveWorktreeBaseRemote,
+    remoteRepositoryKey,
+    findRemotesForRepository,
     fetchWorktreeBaseCommit: Effect.fnUntraced(function* (input) {
       return yield* withListRefsInvalidation(input.cwd, fetchWorktreeBaseCommit(input));
     }),

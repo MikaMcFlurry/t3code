@@ -180,6 +180,10 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       (`linkOrigin`). Another environment links to this one only when it is
       set, since without it that work could change the user's own threads. */
   linkFence: Schema.optionalKey(Schema.Boolean),
+  /** `t3_thread_launch` takes `pinBase` and pins a worktree base to one commit before it
+      accepts the launch. Another environment delegates a worktree task here only when it is
+      set; older servers ignore `pinBase`. */
+  pinnedWorktreeLaunch: Schema.optionalKey(Schema.Boolean),
   /** Mints pairing codes that approve one agent sign-in at a set level (`AUTO-…`). */
   mcpApprovalCodes: Schema.optionalKey(Schema.Boolean),
   /** Agent sign-ins on its T3 Connect address are approved on the hosted app, without a code. */

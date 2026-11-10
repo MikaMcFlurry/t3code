@@ -5,6 +5,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
   EventId,
+  type ExecutionEnvironmentDescriptor,
   MessageId,
   type ModelSelection,
   NodeId,
@@ -148,6 +149,8 @@ interface BoxThread {
   readonly fetchable: Ref.Ref<Readonly<Record<string, ReadonlyArray<string>>>>;
   /** Each worktree base the box resolved before accepting a launch. */
   readonly resolved: Ref.Ref<ReadonlyArray<string>>;
+  /** Where the last base resolution was told the commit was published. */
+  readonly fetchFrom: Ref.Ref<ThreadLaunch.WorktreeBaseFetchHint | null>;
 }
 
 const makeBoxThread = Effect.gen(function* () {
@@ -192,6 +195,7 @@ const makeBoxThread = Effect.gen(function* () {
     bases: yield* Ref.make<Readonly<Record<string, string>>>({}),
     fetchable: yield* Ref.make<Readonly<Record<string, ReadonlyArray<string>>>>({}),
     resolved: yield* Ref.make<ReadonlyArray<string>>([]),
+    fetchFrom: yield* Ref.make<ThreadLaunch.WorktreeBaseFetchHint | null>(null),
   } satisfies BoxThread;
 });
 
@@ -228,8 +232,8 @@ const boxProjects: ReadonlyArray<Project> = [
   },
 ];
 
-const serveBox = (thread: BoxThread) => {
-  return servePeer(box, boxToolkitLayer(thread));
+const serveBox = (thread: BoxThread, descriptor = box) => {
+  return servePeer(descriptor, boxToolkitLayer(thread));
 };
 
 const boxRunId = RunId.make("run:box");
@@ -517,11 +521,15 @@ const boxToolkitLayer = (thread: BoxThread) => {
     checkWorktreeBase: () => Effect.void,
     // As the box's checkout would: a ref resolves to its commit there, and a commit
     // it lacks only counts once fetching the given branch brings that very commit.
-    resolveWorktreeBase: ({ workspaceStrategy, fetchRef }) =>
+    // Only a remote there for the repository it was published to can bring it.
+    resolveWorktreeBase: ({ workspaceStrategy, fetchFrom }) =>
       Effect.gen(function* () {
+        yield* Ref.set(thread.fetchFrom, fetchFrom ?? null);
         const bases = yield* Ref.get(thread.bases);
         const fetchable = yield* Ref.get(thread.fetchable);
         const { baseRef } = workspaceStrategy;
+        const fetchRef =
+          fetchFrom?.repository === "github.com/acme/app" ? fetchFrom.ref : undefined;
         const brought = fetchRef === undefined ? [] : (fetchable[fetchRef] ?? []);
         const commit = bases[baseRef] ?? (brought.includes(baseRef) ? baseRef : undefined);
         if (commit === undefined)
@@ -748,6 +756,15 @@ const makeLaptop = (
       Layer.provide(
         Layer.mock(GitVcsDriver.GitVcsDriver)({
           resolveCommit: () => Effect.succeed({ commitSha: checkout.commit }),
+          // The upstream remote is "origin" here; the box may call it otherwise.
+          resolveWorktreeBaseRemote: () =>
+            Effect.succeed(
+              checkout.pushedBranch === undefined
+                ? null
+                : { remoteName: "origin", branchName: checkout.pushedBranch },
+            ),
+          remoteRepositoryKey: ({ remoteName }) =>
+            Effect.succeed(remoteName === "origin" ? "github.com/acme/app" : null),
           statusDetailsLocal: () =>
             Effect.succeed({
               isRepo: true,
@@ -1324,6 +1341,8 @@ const delegateIsolated = (
   boxCheckout: {
     readonly bases?: Readonly<Record<string, string>>;
     readonly fetchable?: Readonly<Record<string, ReadonlyArray<string>>>;
+    /** What the box says about itself; an older version lacks `pinnedWorktreeLaunch`. */
+    readonly descriptor?: ExecutionEnvironmentDescriptor;
   },
   options: Record<string, unknown> = {},
 ) =>
@@ -1331,7 +1350,7 @@ const delegateIsolated = (
     const thread = yield* makeBoxThread;
     yield* Ref.set(thread.bases, boxCheckout.bases ?? {});
     yield* Ref.set(thread.fetchable, boxCheckout.fetchable ?? {});
-    const b = yield* serveBox(thread);
+    const b = yield* serveBox(thread, boxCheckout.descriptor);
     const offers = yield* SubscriptionRef.make<
       ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
     >([]);
@@ -1473,6 +1492,68 @@ it.effect.each([
       expect(result.isError).toBe(true);
       expect(JSON.stringify(result.content)).toContain("invalid_request");
       expect(yield* Ref.get(thread.launched)).toBeNull();
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("tells that checkout which repository published the commit, not only the branch", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { thread, result } = yield* delegateIsolated(
+        { commit: parentCommit, pushedBranch: "feature" },
+        { fetchable: { feature: [parentCommit] } },
+      );
+      expect(result.isError, JSON.stringify(result.content)).toBeFalsy();
+      expect(yield* Ref.get(thread.fetchFrom)).toEqual({
+        ref: "feature",
+        repository: "github.com/acme/app",
+      });
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+/** The box on a version from before pinned worktree launches. */
+const olderBox: ExecutionEnvironmentDescriptor = (() => {
+  const { pinnedWorktreeLaunch: _pinned, ...capabilities } = box.capabilities;
+  return { ...box, capabilities };
+})();
+
+it.effect.each([
+  { name: "this thread's commit", options: {}, bases: { [parentCommit]: parentCommit } },
+  // As an older version would, with no commit there to check or a symbolic ref it resolves late.
+  { name: "a commit that checkout lacks", options: {}, bases: {} },
+  { name: "a symbolic baseRef", options: { baseRef: "HEAD" }, bases: { HEAD: "d00d" } },
+])(
+  "refuses a worktree task on an older version there before launching anything ($name)",
+  ({ options, bases }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { thread, result } = yield* delegateIsolated(
+          { commit: parentCommit, pushedBranch: "feature" },
+          { bases, descriptor: olderBox },
+          options,
+        );
+        expect(result.isError).toBe(true);
+        const content = JSON.stringify(result.content);
+        expect(content).toContain("update T3 Code on Box");
+        expect(content).toContain("No task was created.");
+        expect(yield* Ref.get(thread.launched)).toBeNull();
+        expect(yield* Ref.get(thread.resolved)).toEqual([]);
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("still delegates a shared task to an older version there", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { thread, result } = yield* delegateIsolated(
+        { commit: parentCommit },
+        { descriptor: olderBox },
+        { isolation: undefined },
+      );
+      expect(result.isError, JSON.stringify(result.content)).toBeFalsy();
+      expect(yield* Ref.get(thread.launched)).not.toBeNull();
+      expect((yield* Ref.get(thread.workspaceStrategy))?.type).not.toBe("worktree");
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

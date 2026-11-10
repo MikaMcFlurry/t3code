@@ -114,6 +114,7 @@ export class GitWorkflowService extends Context.Service<
     >;
     readonly resolveCommit: GitVcsDriver.GitVcsDriver["Service"]["resolveCommit"];
     readonly resolveWorktreeBaseRemote: GitVcsDriver.GitVcsDriver["Service"]["resolveWorktreeBaseRemote"];
+    readonly findRemotesForRepository: GitVcsDriver.GitVcsDriver["Service"]["findRemotesForRepository"];
     readonly fetchWorktreeBaseCommit: (input: {
       readonly cwd: string;
       readonly refName: string;
@@ -489,6 +490,13 @@ export const make = Effect.gen(function* () {
         Effect.andThen(git.resolveCommit(input)),
       );
     }),
+    findRemotesForRepository: Effect.fn("GitWorkflowService.findRemotesForRepository")(
+      function (input) {
+        return ensureGitCommand("GitWorkflowService.findRemotesForRepository", input.cwd).pipe(
+          Effect.andThen(git.findRemotesForRepository(input)),
+        );
+      },
+    ),
     resolveWorktreeBaseRemote: Effect.fn("GitWorkflowService.resolveWorktreeBaseRemote")(
       function (input) {
         return ensureGitCommand("GitWorkflowService.resolveWorktreeBaseRemote", input.cwd).pipe(

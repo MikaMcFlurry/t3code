@@ -1,5 +1,6 @@
 import {
   type EnvironmentId,
+  type ExecutionEnvironmentCapabilities,
   OrchestratorMcpFailure,
   type PeerLinkError,
   type ProviderInteractionMode,
@@ -32,6 +33,15 @@ export interface PeerCallLimits {
 }
 
 /**
+ * A capability the peer must advertise for a call to be sent at all, checked against the very
+ * address the call goes to. Without it the call is refused with `refusal`, given the peer's name.
+ */
+export interface PeerCapabilityRequirement {
+  readonly capability: keyof ExecutionEnvironmentCapabilities;
+  readonly refusal: (label: string) => string;
+}
+
+/**
  * Calls a linked environment's T3 MCP tools as this environment's outside
  * agent. Each call carries the calling agent's limits in `T3-Mode-Limit`, so
  * the peer enforces the narrower of those and the link's own access.
@@ -48,6 +58,7 @@ export class PeerMcpClient extends Context.Service<
       /** The thread here the call is made for, sent as `T3-Sender-Thread`. */
       readonly sender?: OrchestrationV2LinkedSender;
       readonly success: S;
+      readonly requires?: PeerCapabilityRequirement;
     }) => Effect.Effect<S["Type"], OrchestratorMcpFailure>;
   }
 >()("t3/peer/PeerMcpClient") {}
@@ -169,6 +180,11 @@ const make = Effect.gen(function* () {
       const resolved = yield* links
         .resolve(input.environmentId)
         .pipe(Effect.mapError(fromLinkError));
+      if (input.requires !== undefined && resolved.capabilities[input.requires.capability] !== true)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: input.requires.refusal(resolved.link.label),
+        });
       const limitHeader = {
         [McpInvocationContext.MODE_LIMIT_HEADER]: `${input.limits.runtimeMode}/${input.limits.interactionMode}`,
       };
