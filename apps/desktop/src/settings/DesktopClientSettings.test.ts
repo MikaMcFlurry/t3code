@@ -65,6 +65,7 @@ const clientSettings: ClientSettings = {
   boringSidebarEnabled: false,
   boringSidebarMultilineRows: false,
   threadDetailsUsageEnabled: false,
+  modelPickerUsageEnabled: false,
   threadDetailsItems: {},
   sidebarWorkingShelfEnabled: false,
   loadBalancingEnabled: false,
