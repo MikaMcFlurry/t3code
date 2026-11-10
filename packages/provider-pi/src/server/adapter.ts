@@ -462,6 +462,8 @@ const isLiveSessionOf = (state: PiThreadState, nativeId: string | null | undefin
 interface PiWake {
   readonly state: PiThreadState;
   readonly events: Array<PiRpcRecord>;
+  /** Pi settled the native run; only its buffered output still waits for a turn. */
+  settled: boolean;
 }
 
 export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
@@ -2295,8 +2297,14 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           event["type"] !== "response"
         ) {
           pendingWake.events.push(event);
-          if (event["type"] === "agent_start") yield* updateProviderSession("running", null);
-          if (event["type"] === "agent_settled") yield* updateProviderSession("ready", null);
+          if (event["type"] === "agent_start") {
+            pendingWake.settled = false;
+            yield* updateProviderSession("running", null);
+          }
+          if (event["type"] === "agent_settled") {
+            pendingWake.settled = true;
+            yield* updateProviderSession("ready", null);
+          }
           return;
         }
         const state = threadState;
@@ -2310,7 +2318,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               !closed &&
               !stopRequested
             ) {
-              const wake: PiWake = { state, events: [event] };
+              const wake: PiWake = { state, events: [event], settled: false };
               pendingWake = wake;
               if (rollbackBarrier !== null) {
                 yield* stopPendingWake(wake);
@@ -3397,12 +3405,18 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         },
         events: Stream.fromQueue(events),
         backgroundTasksEndWithProcess: true,
-        // An async pi-subagents run dies with the Pi process, so the session stays loaded for it.
-        hasPendingBackgroundWork: Effect.sync(() => pendingWake !== null || piAsyncRuns.size > 0),
+        // Only a wake Pi still runs is work a detach would end; a settled one only waits for its
+        // continuation, which may never come after a failed dispatch. An async pi-subagents run
+        // dies with the Pi process, so the session stays loaded for it.
+        hasPendingBackgroundWork: Effect.sync(
+          () => (pendingWake !== null && !pendingWake.settled) || piAsyncRuns.size > 0,
+        ),
         hasPendingBackgroundWorkForThread: (providerThread, probe) =>
           Effect.sync(
             () =>
-              (pendingWake !== null && pendingWake.state.providerThread.id === providerThread.id) ||
+              (pendingWake !== null &&
+                !pendingWake.settled &&
+                pendingWake.state.providerThread.id === providerThread.id) ||
               (probe?.includeSubagents === true &&
                 [...piAsyncRuns.values()].some(
                   (run) => run.turn.turnInput.providerThread.id === providerThread.id,
