@@ -1,8 +1,11 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 
 import { parseGitSkillUrl } from "./CentralSkills.ts";
 import {
@@ -72,6 +75,176 @@ describe("mirrorCentralSkills", () => {
       assert.deepStrictEqual(result, { mirrored: [], shadowed: [] });
       assert.isFalse(yield* fileSystem.exists(path.join(targetSkillsDir, "review")));
       assert.isTrue(yield* fileSystem.exists(path.join(targetSkillsDir, "notes", "SKILL.md")));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+});
+
+describe("mirrorCentralSkills updates", () => {
+  const writeAsset = Effect.fnUntraced(function* (
+    directory: string,
+    relative: string,
+    contents: string,
+  ) {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const file = path.join(directory, relative);
+    yield* fileSystem.makeDirectory(path.dirname(file), { recursive: true });
+    yield* fileSystem.writeFileString(file, contents);
+  });
+
+  const leftovers = Effect.fnUntraced(function* (targetSkillsDir: string) {
+    const fileSystem = yield* FileSystem.FileSystem;
+    return (yield* fileSystem.readDirectory(targetSkillsDir)).filter((entry) =>
+      entry.startsWith(".t3-"),
+    );
+  });
+
+  it.effect("syncs a change to an asset, script or reference without touching SKILL.md", () =>
+    Effect.gen(function* () {
+      const { fileSystem, path, skillsDir, targetSkillsDir } = yield* setup;
+      yield* writeSkill(skillsDir, "review", "Central review");
+      yield* writeAsset(path.join(skillsDir, "review"), "scripts/run.sh", "echo v1");
+      yield* mirrorCentralSkills({ skillsDir, targetSkillsDir });
+
+      // A different size keeps the test independent of the file system's mtime resolution.
+      yield* writeAsset(path.join(skillsDir, "review"), "scripts/run.sh", "echo version-2");
+      yield* writeAsset(path.join(skillsDir, "review"), "assets/logo.svg", "<svg/>");
+      yield* mirrorCentralSkills({ skillsDir, targetSkillsDir });
+
+      const copy = path.join(targetSkillsDir, "review");
+      assert.strictEqual(
+        yield* fileSystem.readFileString(path.join(copy, "scripts", "run.sh")),
+        "echo version-2",
+      );
+      assert.isTrue(yield* fileSystem.exists(path.join(copy, "assets", "logo.svg")));
+      assert.deepStrictEqual(yield* leftovers(targetSkillsDir), []);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("runs two syncs of the same target one after the other", () =>
+    Effect.gen(function* () {
+      const { fileSystem, path, skillsDir, targetSkillsDir } = yield* setup;
+      yield* writeSkill(skillsDir, "review", "Central review");
+      yield* writeSkill(skillsDir, "deploy", "Central deploy");
+      const firstCopyStarted = yield* Deferred.make<void>();
+      const releaseFirstCopy = yield* Deferred.make<void>();
+      let libraryReads = 0;
+      let copies = 0;
+      const observed = FileSystem.FileSystem.of({
+        ...fileSystem,
+        readDirectory: (directory, options) =>
+          Effect.suspend(() => {
+            if (directory === skillsDir) libraryReads++;
+            return fileSystem.readDirectory(directory, options);
+          }),
+        copy: (from, to, options) =>
+          Effect.suspend(() => {
+            copies++;
+            return copies === 1
+              ? Deferred.succeed(firstCopyStarted, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseFirstCopy)),
+                  Effect.andThen(fileSystem.copy(from, to, options)),
+                )
+              : fileSystem.copy(from, to, options);
+          }),
+      });
+
+      const first = yield* mirrorCentralSkills({ skillsDir, targetSkillsDir }).pipe(
+        Effect.provideService(FileSystem.FileSystem, observed),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(firstCopyStarted);
+      // The same folder spelled differently is the same target.
+      const second = yield* mirrorCentralSkills({
+        skillsDir,
+        targetSkillsDir: `${targetSkillsDir}${path.sep}`,
+      }).pipe(Effect.provideService(FileSystem.FileSystem, observed), Effect.forkChild);
+      for (let turn = 0; turn < 20; turn++) yield* Effect.yieldNow;
+      // While the first sync is mid-copy, the second has not started reading the library.
+      assert.strictEqual(libraryReads, 1);
+
+      yield* Deferred.succeed(releaseFirstCopy, undefined);
+      const results = [yield* Fiber.join(first), yield* Fiber.join(second)];
+
+      for (const result of results) {
+        assert.deepStrictEqual([...result.mirrored].sort(), ["deploy", "review"]);
+      }
+      // The second sync found both copies current and copied nothing.
+      assert.strictEqual(copies, 2);
+      for (const name of ["deploy", "review"]) {
+        assert.isTrue(yield* fileSystem.exists(path.join(targetSkillsDir, name, "SKILL.md")));
+      }
+      assert.deepStrictEqual(yield* leftovers(targetSkillsDir), []);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("keeps the previous copy when the new one cannot be moved into place", () =>
+    Effect.gen(function* () {
+      const { fileSystem, path, skillsDir, targetSkillsDir } = yield* setup;
+      yield* writeSkill(skillsDir, "review", "Central review");
+      yield* writeAsset(path.join(skillsDir, "review"), "references/notes.md", "v1");
+      yield* mirrorCentralSkills({ skillsDir, targetSkillsDir });
+      const copy = path.join(targetSkillsDir, "review");
+      const firstMarker = yield* fileSystem.readFileString(
+        path.join(copy, CENTRAL_SKILL_MIRROR_MARKER),
+      );
+
+      yield* writeAsset(path.join(skillsDir, "review"), "references/notes.md", "version 2");
+      const failingSwap = FileSystem.FileSystem.of({
+        ...fileSystem,
+        rename: (from, to) =>
+          path.basename(from).startsWith(".t3-staging-")
+            ? Effect.fail(
+                PlatformError.systemError({
+                  _tag: "Busy",
+                  module: "FileSystem",
+                  method: "rename",
+                  pathOrDescriptor: from,
+                }),
+              )
+            : fileSystem.rename(from, to),
+      });
+      yield* mirrorCentralSkills({ skillsDir, targetSkillsDir }).pipe(
+        Effect.provideService(FileSystem.FileSystem, failingSwap),
+      );
+
+      assert.strictEqual(
+        yield* fileSystem.readFileString(path.join(copy, "references", "notes.md")),
+        "v1",
+      );
+      assert.strictEqual(
+        yield* fileSystem.readFileString(path.join(copy, CENTRAL_SKILL_MIRROR_MARKER)),
+        firstMarker,
+      );
+      assert.deepStrictEqual(yield* leftovers(targetSkillsDir), []);
+
+      // The next sync that can swap brings the new version.
+      yield* mirrorCentralSkills({ skillsDir, targetSkillsDir });
+      assert.strictEqual(
+        yield* fileSystem.readFileString(path.join(copy, "references", "notes.md")),
+        "version 2",
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("restores a copy a crashed sync left renamed aside", () =>
+    Effect.gen(function* () {
+      const { fileSystem, path, skillsDir, targetSkillsDir } = yield* setup;
+      yield* writeSkill(skillsDir, "review", "Central review");
+      yield* mirrorCentralSkills({ skillsDir, targetSkillsDir });
+      const copy = path.join(targetSkillsDir, "review");
+      // The process died between moving the old copy aside and moving the new one in.
+      yield* fileSystem.rename(copy, path.join(targetSkillsDir, ".t3-backup-review"));
+      yield* fileSystem.makeDirectory(path.join(targetSkillsDir, ".t3-staging-abc"));
+
+      const result = yield* mirrorCentralSkills({ skillsDir, targetSkillsDir });
+
+      assert.deepStrictEqual(result, { mirrored: ["review"], shadowed: [] });
+      assert.include(
+        yield* fileSystem.readFileString(path.join(copy, "SKILL.md")),
+        "Central review",
+      );
+      assert.deepStrictEqual(yield* leftovers(targetSkillsDir), []);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });
