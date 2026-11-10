@@ -1429,7 +1429,8 @@ describe("PiAdapterV2", () => {
         "Rollback changed the native session while its wake was still buffered",
       );
       assert.isFalse(fake.allRequests().some((request) => request["type"] === "fork"));
-      assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+      // Settled output only waits for its continuation; a detach would end nothing.
+      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
       yield* startTurn(
         runtime,
         providerThread,
@@ -1584,7 +1585,12 @@ describe("PiAdapterV2", () => {
         (event) =>
           event.type === "provider_session.updated" && event.providerSession.status === "ready",
       );
-      assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+      // regression: #32296 a settled wake whose continuation never runs pinned the session
+      assert.isFalse(
+        yield* runtime.hasPendingBackgroundWork!,
+        "a settled Pi wake still counts as running work",
+      );
+      assert.isFalse(yield* runtime.hasPendingBackgroundWorkForThread!(providerThread));
       yield* startTurn(
         runtime,
         providerThread,

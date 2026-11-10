@@ -425,6 +425,8 @@ interface PiThreadState {
 interface PiWake {
   readonly state: PiThreadState;
   readonly events: Array<PiRpcRecord>;
+  /** Pi settled the native run; only its buffered output still waits for a turn. */
+  settled: boolean;
 }
 
 export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
@@ -1896,8 +1898,14 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           event["type"] !== "response"
         ) {
           pendingWake.events.push(event);
-          if (event["type"] === "agent_start") yield* updateProviderSession("running", null);
-          if (event["type"] === "agent_settled") yield* updateProviderSession("ready", null);
+          if (event["type"] === "agent_start") {
+            pendingWake.settled = false;
+            yield* updateProviderSession("running", null);
+          }
+          if (event["type"] === "agent_settled") {
+            pendingWake.settled = true;
+            yield* updateProviderSession("ready", null);
+          }
           return;
         }
         const state = threadState;
@@ -1911,7 +1919,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               !closed &&
               !stopRequested
             ) {
-              const wake: PiWake = { state, events: [event] };
+              const wake: PiWake = { state, events: [event], settled: false };
               pendingWake = wake;
               if (rollbackBarrier !== null) {
                 yield* stopPendingWake(wake);
@@ -2700,10 +2708,15 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           return sessionEntity;
         },
         events: Stream.fromQueue(events),
-        hasPendingBackgroundWork: Effect.sync(() => pendingWake !== null),
+        // Only a wake Pi still runs is work a detach would end; a settled one only
+        // waits for its continuation, which may never come after a failed dispatch.
+        hasPendingBackgroundWork: Effect.sync(() => pendingWake !== null && !pendingWake.settled),
         hasPendingBackgroundWorkForThread: (providerThread) =>
           Effect.sync(
-            () => pendingWake !== null && pendingWake.state.providerThread.id === providerThread.id,
+            () =>
+              pendingWake !== null &&
+              !pendingWake.settled &&
+              pendingWake.state.providerThread.id === providerThread.id,
           ),
         getModelContextWindow: (selection) => {
           if (selection.instanceId !== options.instanceId) return undefined;
