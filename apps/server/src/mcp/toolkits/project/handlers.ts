@@ -353,7 +353,8 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             message: 'pinBase needs a "worktree" workspaceStrategy.',
           });
         // A pinned base resolves to one commit now, so preparation cannot pick another later
-        // (a branch moved, a fresh fetch). A replay keeps the base its first launch resolved.
+        // (a branch moved, a fresh fetch). A replay keeps the base its first launch resolved:
+        // the launch service reads it back from the thread or its run.
         const pinned =
           !replaying &&
           strategy?.type === "worktree" &&
@@ -363,7 +364,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                   launches.resolveWorktreeBase({
                     projectId,
                     workspaceStrategy: strategy,
-                    fetchRef: input.pinBase?.fetchRef,
+                    fetchFrom: input.pinBase?.fetch,
                   }),
                 ),
                 Effect.mapError(

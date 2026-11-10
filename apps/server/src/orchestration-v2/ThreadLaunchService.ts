@@ -83,6 +83,14 @@ export type ThreadLaunchWorkspaceStrategy =
 
 type WorktreeStrategy = Extract<ThreadLaunchWorkspaceStrategy, { readonly type: "worktree" }>;
 
+/** Where another checkout's commit was published: a branch of the repository it names. */
+export interface WorktreeBaseFetchHint {
+  /** The branch, as named in that repository. */
+  readonly ref: string;
+  /** The repository's canonical key (`GitVcsDriver.remoteRepositoryKey`). */
+  readonly repository: string;
+}
+
 /** A full commit id, which names one commit whatever the refs say. */
 const FULL_COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 
@@ -278,13 +286,14 @@ export class ThreadLaunchService extends Context.Service<
     readonly isNonGitProject: (projectId: ProjectId) => Effect.Effect<boolean>;
     /**
      * Pins a worktree base to one commit in the project's checkout before launch; any doubt
-     * refuses. `fetchRef` only brings an exact commit (`baseCommit` or a full id as `baseRef`)
-     * the checkout lacks: that branch is fetched and its tip is never used.
+     * refuses. `fetchFrom` only brings an exact commit (a full id as `baseRef`) the checkout
+     * lacks: branch `ref` is fetched from each remote here that names `repository`, and its
+     * tip is never used. A remote is never added for it.
      */
     readonly resolveWorktreeBase: (input: {
       readonly projectId: ProjectId;
       readonly workspaceStrategy: WorktreeStrategy;
-      readonly fetchRef?: string | undefined;
+      readonly fetchFrom?: WorktreeBaseFetchHint | undefined;
     }) => Effect.Effect<
       WorktreeStrategy & { readonly baseCommit: string },
       ThreadLaunchBaseUnavailableError
@@ -609,19 +618,59 @@ const make = Effect.gen(function* () {
         Effect.mapError((error) => unavailable({ detail: error.message })),
       );
 
+    /**
+     * Fetches the hinted branch from each remote here that names the hinted repository,
+     * until the commit is here. The remote's name may differ from the other checkout's.
+     */
+    const fetchFromRepository = Effect.fn("ThreadLaunchService.fetchFromRepository")(function* (
+      hint: WorktreeBaseFetchHint,
+      wanted: string,
+    ) {
+      const remotes = yield* git
+        .findRemotesForRepository({ cwd, repository: hint.repository })
+        .pipe(Effect.mapError((error) => unavailable({ detail: error.message })));
+      if (remotes.length === 0)
+        return yield* unavailable({
+          detail: `No remote of that checkout points at ${hint.repository}, where it was published.`,
+        });
+      let failure: ThreadLaunchBaseUnavailableError | undefined;
+      let fetchedRef: string | undefined;
+      for (const remoteName of remotes) {
+        const fetched = yield* git
+          .fetchWorktreeBaseCommit({
+            cwd,
+            refName: `${remoteName}/${hint.ref}`,
+            remote: { remoteName, branchName: hint.ref },
+          })
+          .pipe(Effect.result);
+        if (fetched._tag === "Failure") {
+          failure = unavailable({ detail: fetched.failure.message });
+          continue;
+        }
+        if (fetched.success !== null) fetchedRef = `${remoteName}/${hint.ref}`;
+        const found = yield* resolve(wanted);
+        if (found !== undefined) return found;
+      }
+      return yield* fetchedRef === undefined && failure !== undefined
+        ? failure
+        : unavailable(fetchedRef === undefined ? {} : { fetchedRef });
+    });
+
     let commit: string | undefined;
     if (exact !== undefined) {
       commit = yield* resolve(exact);
       // A branch only carries the commit here. Its tip may have moved past it or never
       // held it, so it is fetched for its history and the commit is checked again.
-      const transport = strategy.baseCommit !== undefined ? baseRef : input.fetchRef;
-      if (commit === undefined && transport !== undefined && transport !== exact) {
-        const fetched = yield* Effect.result(fetchFromRemote(transport));
+      if (commit === undefined && strategy.baseCommit !== undefined && baseRef !== exact) {
+        // `baseRef` names the commit in this checkout, so its own remote config applies.
+        const fetched = yield* Effect.result(fetchFromRemote(baseRef));
         commit = yield* resolve(exact);
         if (commit === undefined) {
           if (fetched._tag === "Failure") return yield* fetched.failure;
-          return yield* unavailable(fetched.success === null ? {} : { fetchedRef: transport });
+          return yield* unavailable(fetched.success === null ? {} : { fetchedRef: baseRef });
         }
+      } else if (commit === undefined && input.fetchFrom !== undefined) {
+        commit = yield* fetchFromRepository(input.fetchFrom, exact);
       }
       // Never a different commit than the one asked for.
       if (commit !== undefined && !commit.toLowerCase().startsWith(exact.toLowerCase()))
@@ -1505,6 +1554,12 @@ const make = Effect.gen(function* () {
                 ...(input.delegatedFrom === undefined
                   ? {}
                   : { delegatedFrom: input.delegatedFrom }),
+                // The pinned base is bound with the first durable step, so a replay that
+                // arrives before the message was accepted still starts from it.
+                ...(workspaceStrategy.type === "worktree" &&
+                workspaceStrategy.baseCommit !== undefined
+                  ? { worktreeBaseCommit: workspaceStrategy.baseCommit }
+                  : {}),
                 createdBy: input.createdBy,
                 creationSource: input.creationSource,
                 ...(initialMessage === undefined
@@ -1529,6 +1584,20 @@ const make = Effect.gen(function* () {
         if (committedThread?.projectId !== input.projectId) {
           return yield* mapError(input, "resolve-project", threadId)("Project identity changed.");
         }
+        // The first accepted launch's base wins: a replay, or a concurrent launch with the
+        // same key, may carry a base resolved later (or none), which must not replace it.
+        const launchStrategy: ThreadLaunchWorkspaceStrategy =
+          workspaceStrategy.type === "worktree" && input.reuseExistingThread !== true
+            ? yield* threads.getThreadRecords(threadId, []).pipe(
+                Effect.map(({ thread }) =>
+                  thread.worktreeBaseCommit === undefined ||
+                  thread.worktreeBaseCommit === workspaceStrategy.baseCommit
+                    ? workspaceStrategy
+                    : { ...workspaceStrategy, baseCommit: thread.worktreeBaseCommit },
+                ),
+                Effect.mapError(mapError(input, "create-thread", threadId)),
+              )
+            : workspaceStrategy;
         let runId: RunId | null = null;
         let messageSequence: number | undefined;
         let messageWasAlreadyAccepted = false;
@@ -1547,7 +1616,7 @@ const make = Effect.gen(function* () {
                 commandId: messageCommandId,
                 threadId,
                 modelSelection: input.modelSelection,
-                dispatchMode: { type: "defer_start", workspaceStrategy },
+                dispatchMode: { type: "defer_start", workspaceStrategy: launchStrategy },
                 createdBy: input.createdBy,
                 creationSource: input.creationSource,
               })
@@ -1599,10 +1668,12 @@ const make = Effect.gen(function* () {
             }
             const boundWorktreePath = current?.thread.worktreePath ?? null;
             // A retry prepares the worktree the accepted launch asked for, not the
-            // retry's own strategy, whose defaults may resolve differently.
+            // retry's own strategy, whose defaults may resolve differently. A worktree
+            // launch always prepares what its run recorded, so a concurrent launch with
+            // the same key never replaces the first launch's pinned base.
             const accepted = current?.runs.find((run) => run.id === runId)?.workspacePreparation;
             const preparationStrategy: ThreadLaunchWorkspaceStrategy =
-              Option.isSome(launchReceipt) &&
+              (Option.isSome(launchReceipt) || launchStrategy.type === "worktree") &&
               (accepted?.type === "worktree" || accepted?.type === "existing_worktree")
                 ? accepted
                 : Option.isSome(launchReceipt) &&
@@ -1613,7 +1684,7 @@ const make = Effect.gen(function* () {
                       worktreePath: boundWorktreePath,
                       branch: workspaceStrategy.branch,
                     }
-                  : workspaceStrategy;
+                  : launchStrategy;
             yield* schedulePreparation(
               { ...input, workspaceStrategy: preparationStrategy },
               threadId,
