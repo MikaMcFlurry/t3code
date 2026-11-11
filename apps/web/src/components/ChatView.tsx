@@ -2978,6 +2978,7 @@ export default function ChatView(props: ChatViewProps) {
     },
     setFeedbackSubmissionsByThreadKey,
     setThreadError,
+    onStopBackgroundWork: onInterruptStable,
     setKeepFullHistory,
     anchorNewTurn,
     acknowledgeActiveThreadWoke,

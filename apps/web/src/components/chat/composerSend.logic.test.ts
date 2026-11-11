@@ -6,6 +6,7 @@ import { threadContextReference } from "../../lib/composerContextRecords";
 import { threadContextRecord } from "@t3tools/shared/composerContextReferences";
 import {
   approvalRedirectNotice,
+  composerSendRefusal,
   loadBalancingSendWarning,
   multipleModelSendBlock,
   referencedThreadContexts,
@@ -122,5 +123,30 @@ describe("approvalRedirectNotice", () => {
   it("stays quiet when the decline failed or the user left the thread", () => {
     expect(approvalRedirectNotice({ ...settled, declined: false })).toBeNull();
     expect(approvalRedirectNotice(settled)).toBeNull();
+  });
+});
+
+describe("composerSendRefusal", () => {
+  it("offers Stop next to a refusal over background work, with what still runs", () => {
+    const message =
+      'The previous account is still running background agents or commands, and switching would end them. Wait for them to finish, or press Stop, then send the message again. Still running: background task "npm test", wake turn.';
+    expect(composerSendRefusal(message)).toEqual({
+      title: "Message not sent",
+      description: message,
+      offersBackgroundStop: true,
+    });
+    expect(
+      composerSendRefusal(
+        "Claude is still running background agents or commands, and this model or setting change would end them.",
+      ).offersBackgroundStop,
+    ).toBe(true);
+  });
+
+  it("shows any other refusal without a Stop offer", () => {
+    expect(composerSendRefusal("Thread is archived.")).toEqual({
+      title: "Message not sent",
+      description: "Thread is archived.",
+      offersBackgroundStop: false,
+    });
   });
 });
