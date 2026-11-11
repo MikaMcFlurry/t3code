@@ -23,6 +23,8 @@ mika/mobile-camera
 mika/limit-switch-back
 # delegate_task isolation "worktree" for linked environments (upstream discussion #31920).
 mika/remote-delegate-isolation
+# Upstream PR #32109 (juliusmarminge), Grok runs complete with a background dev server; keep until merged upstream.
+mika/pr-32109
 # A send that would end a session's background work waits or hands off instead of bouncing
 # (upstream issue #32296).
 mika/queue-busy-switch
