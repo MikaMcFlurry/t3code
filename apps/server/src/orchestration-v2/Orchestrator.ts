@@ -95,6 +95,7 @@ import { outputRequestProblem } from "./runOutput.ts";
 import { recordThreadOpen } from "@t3tools/shared/paletteSearch";
 import { isSlashCommand } from "@t3tools/shared/composerTrigger";
 import {
+  BACKGROUND_WORK_REFUSAL_PHRASE,
   backgroundWorkHoldsCompletion,
   derivePendingBackgroundWork,
   hasPendingBackgroundSubagent,
@@ -1849,6 +1850,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (yield* probe.pipe(Effect.catchCause(() => Effect.succeed(true)))) return true;
     }
     return false;
+  });
+
+  // Work only the live adapter sees (a native subagent, a held wake) never reaches the
+  // projection. Stop still has to reach that session, or an idle thread that a switch
+  // refuses for it has no way out.
+  const runHasLiveBackgroundWork = Effect.fn("Orchestrator.runHasLiveBackgroundWork")(function* (
+    run: OrchestrationV2Run | undefined,
+    projection: Pick<OrchestrationV2ThreadProjection, "providerThreads" | "providerSessions">,
+  ) {
+    const providerThread = projection.providerThreads.find(
+      (candidate) => candidate.id === run?.providerThreadId,
+    );
+    const session = projection.providerSessions.find(
+      (candidate) => candidate.id === providerThread?.providerSessionId,
+    );
+    if (session === undefined || session.status === "stopped" || session.status === "error")
+      return false;
+    return yield* sessionHasBackgroundWork(session, projection.providerThreads);
   });
 
   // Names what the busy sessions still run, for a refusal's detail. Null when no adapter says.
@@ -8724,7 +8743,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
         commandType: command.type,
-        cause: `The previous account is still running background agents or commands, and switching would end them. Wait for them to finish, or press Stop, then send the message again.${running === null ? "" : ` ${running}`}`,
+        cause: `The previous account ${BACKGROUND_WORK_REFUSAL_PHRASE}, and switching would end them. Wait for them to finish, or press Stop, then send the message again.${running === null ? "" : ` ${running}`}`,
       });
     }
     const sessionsToDetach = releasableSessions.filter(
@@ -14141,6 +14160,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         "turnItems",
         "subagents",
         "runtimeRequests",
+        "providerSessions",
       ],
       // Thread-wide, like the Waiting strip: a settled thread's background
       // work can belong to an earlier run than the one Stop targets.
@@ -14166,15 +14186,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       run?.providerThreadId === null
         ? undefined
         : projection.providerThreads.find((candidate) => candidate.id === run?.providerThreadId);
+    const isLatestRun =
+      run?.id === projection.runs.findLast((candidate) => candidate.status !== "queued")?.id;
     const hasBackgroundWork =
-      run?.id === projection.runs.findLast((candidate) => candidate.status !== "queued")?.id &&
-      derivePendingBackgroundWork({
+      isLatestRun &&
+      (derivePendingBackgroundWork({
         latestRun: run,
         providerThreads: projection.providerThreads,
         turnItems: projection.turnItems,
         activeProviderThreadId: projection.thread.activeProviderThreadId,
         runs: projection.runs,
-      }).length > 0;
+      }).length > 0 ||
+        (run !== undefined &&
+          !isActiveRun(run) &&
+          (yield* runHasLiveBackgroundWork(run, projection))));
     // A failed start has no provider turn. Background work still belongs
     // to the provider thread, so Stop reaches its latest accepted turn.
     const providerTurn =
@@ -14753,10 +14778,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) {
     const projection = yield* projectionStore
-      .getThreadRecords(command.threadId, ["runs", "providerThreads", "turnItems", "subagents"], {
-        turnItemTypes: ["command_execution", "dynamic_tool", "subagent"],
-        turnItemStatuses: ["pending", "running", "waiting"],
-      })
+      .getThreadRecords(
+        command.threadId,
+        ["runs", "providerThreads", "turnItems", "subagents", "providerSessions"],
+        {
+          turnItemTypes: ["command_execution", "dynamic_tool", "subagent"],
+          turnItemStatuses: ["pending", "running", "waiting"],
+        },
+      )
       .pipe(
         Effect.mapError(
           (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
@@ -14783,7 +14812,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         turnItems: projection.turnItems,
         activeProviderThreadId: projection.thread.activeProviderThreadId,
         runs: projection.runs,
-      }).length > 0
+      }).length > 0 || (yield* runHasLiveBackgroundWork(latestRun, projection))
         ? latestRun
         : undefined);
     if (target !== undefined) {
