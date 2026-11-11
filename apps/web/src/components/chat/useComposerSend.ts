@@ -102,7 +102,7 @@ import { environmentPresentations } from "../../state/presentation";
 import {
   approvalRedirectNotice,
   composerDraftContentChanged,
-  composerSendRefusal,
+  composerSendRefusalToast,
   loadBalancingSendWarning,
   multipleModelSendBlock,
   referencedThreadContexts,
@@ -271,8 +271,8 @@ interface ComposerSendInput {
     SetStateAction<Record<string, ReadonlyArray<CodexFeedbackSubmission>>>
   >;
   readonly setThreadError: ReturnType<typeof makeThreadErrorSetter>;
-  /** The composer's Stop: also ends background work of an idle thread's session. */
-  readonly onStopBackgroundWork: () => Promise<void>;
+  /** Stops the given thread, including background work of its idle session. */
+  readonly onStopBackgroundWork: (threadRef: ScopedThreadRef) => Promise<void>;
   readonly setKeepFullHistory: (threadKey: string, keep: boolean) => void;
   readonly anchorNewTurn: TimelineFollow["anchorNewTurn"];
   readonly acknowledgeActiveThreadWoke: () => void;
@@ -1683,25 +1683,14 @@ export function useComposerSend(input: ComposerSendInput) {
         } else if (currentRouteThreadKeyRef.current === routeThreadKey) {
           // The banner sits above the timeline, far from the restored draft, and stays
           // hidden once dismissed: the refusal also shows where the user just pressed Send.
-          const refusal = composerSendRefusal(errorMessage);
           toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: refusal.title,
-              description: refusal.description,
-              ...(isServerThread
-                ? { data: { threadRef: scopeThreadRef(environmentId, threadIdForSend) } }
-                : {}),
-              ...(refusal.offersBackgroundStop
-                ? {
-                    actionProps: {
-                      children: m(msg("Stop background work")),
-                      onClick: () => {
-                        void onStopBackgroundWork();
-                      },
-                    },
-                  }
-                : {}),
+            composerSendRefusalToast({
+              message: errorMessage,
+              threadRef: scopeThreadRef(environmentId, threadIdForSend),
+              isServerThread,
+              onStopBackgroundWork: (threadRef) => {
+                void onStopBackgroundWork(threadRef);
+              },
             }),
           );
         }

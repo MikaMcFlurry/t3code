@@ -1,8 +1,9 @@
-import type { EnvironmentId, ThreadContextRecord } from "@t3tools/contracts";
+import type { EnvironmentId, ScopedThreadRef, ThreadContextRecord } from "@t3tools/contracts";
 import { isBackgroundWorkRefusal } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { msg } from "gt-react";
 import { m, type MessageResolver } from "../../i18n/messages";
 import { collectInlineContextIds } from "../../lib/composerContextReferences";
+import { stackedThreadToast } from "../ui/toastHelpers";
 import type { ComposerThreadDraftState } from "../../composerDraftStore";
 
 /** Compare immutable user content without copying image bytes or upload metadata. */
@@ -38,6 +39,37 @@ export function composerSendRefusal(message: string, resolve: MessageResolver = 
     description: message,
     offersBackgroundStop: isBackgroundWorkRefusal(message),
   };
+}
+
+/**
+ * The toast for a refused send. Its Stop is bound to the refused thread: the toast outlives
+ * navigation, and a Stop that read the open thread at click time would stop another thread.
+ */
+export function composerSendRefusalToast(
+  input: {
+    readonly message: string;
+    readonly threadRef: ScopedThreadRef;
+    readonly isServerThread: boolean;
+    readonly onStopBackgroundWork: (threadRef: ScopedThreadRef) => void;
+  },
+  resolve: MessageResolver = m,
+) {
+  const refusal = composerSendRefusal(input.message, resolve);
+  const { threadRef } = input;
+  return stackedThreadToast({
+    type: "error",
+    title: refusal.title,
+    description: refusal.description,
+    ...(input.isServerThread ? { data: { threadRef } } : {}),
+    ...(refusal.offersBackgroundStop
+      ? {
+          actionProps: {
+            children: resolve(msg("Stop background work")),
+            onClick: () => input.onStopBackgroundWork(threadRef),
+          },
+        }
+      : {}),
+  });
 }
 
 /** Attached threads the prompt still links to; replacing linked text leaves stale records. */
