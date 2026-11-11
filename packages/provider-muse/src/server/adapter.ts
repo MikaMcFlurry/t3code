@@ -370,9 +370,23 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
       const childrenByItemId = new Map<string, ChildContext>();
       const agentTitles = new Map<string, string>();
       const finishedBackground: Array<BackgroundWorkReport> = [];
-      let wake:
-        | { readonly nativeId: string; readonly events: Array<[string, unknown]> }
-        | undefined;
+      // `turnIds`: native turns the held wake covers, in start order (Muse can start another
+      // behind held output); `running`: those not completed. `children`: latest revision of
+      // each subagent/workflow it started, terminal ones too, so a late older one cannot
+      // revive it. `offered`: a continuation can still deliver the output.
+      type HeldWake = {
+        readonly turnIds: Array<string>;
+        readonly running: Set<string>;
+        readonly events: Array<[string, unknown]>;
+        readonly children: Map<string, { readonly revision: number; readonly running: boolean }>;
+        offered: boolean;
+      };
+      let wake: HeldWake | undefined;
+      const wakeRunsWork = () =>
+        wake !== undefined &&
+        (wake.running.size > 0 || [...wake.children.values()].some((child) => child.running));
+      // Held output a continuation can still deliver is pending too; a detach would lose it.
+      const wakePending = () => wakeRunsWork() || wake?.offered === true;
       const emit = (event: ProviderAdapter.ProviderAdapterV2Event) =>
         Queue.offer(events, event).pipe(Effect.asVoid);
       const decode = <A, I>(schema: Schema.Codec<A, I>, data: unknown) =>
@@ -1437,14 +1451,25 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
           method === "turn/started" &&
           typeof params.turnId === "string" &&
           params.turnId !== active?.nativeId &&
-          params.turnId !== wake?.nativeId
+          !wake?.turnIds.includes(params.turnId)
         ) {
           if (active && !active.compact) active.joined.add(params.turnId);
-          else if (!active && !wake) {
-            const held = { nativeId: params.turnId, events: [] };
+          else if (!active && wake) {
+            // Another native turn behind held output: hold it with the same continuation.
+            wake.turnIds.push(params.turnId);
+            wake.running.add(params.turnId);
+          } else if (!active && !wake) {
+            const held: HeldWake = {
+              turnIds: [params.turnId],
+              running: new Set([params.turnId]),
+              events: [],
+              children: new Map(),
+              offered: false,
+            };
             wake = held;
             const notification = backgroundWorkNotification(finishedBackground.splice(0));
-            if (thread?.appThreadId && options.continuationRequests)
+            if (thread?.appThreadId && options.continuationRequests) {
+              held.offered = true;
               yield* options.continuationRequests.offer({
                 threadId: thread.appThreadId,
                 providerThreadId: thread.id,
@@ -1458,17 +1483,28 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
                     if (wake === held) wake = undefined;
                   }),
               });
+            }
           }
         }
         // Muse compacts the latest run, which can be the held wake; its compaction item ends this turn.
         if (
           wake &&
-          active?.nativeId !== wake.nativeId &&
+          !wake.turnIds.includes(active?.nativeId ?? "") &&
           !(active?.compact && itemEvent?.kind === "compaction")
         ) {
           const turnId = typeof params.turnId === "string" ? params.turnId : itemEvent?.turnId;
-          if (turnId === wake.nativeId) {
+          if (typeof turnId === "string" && wake.turnIds.includes(turnId)) {
             wake.events.push([method, data]);
+            if (method === "turn/completed") wake.running.delete(turnId);
+            if (itemEvent && (itemEvent.kind === "subagent" || itemEvent.kind === "workflow")) {
+              const seen = wake.children.get(itemEvent.itemId);
+              if (seen === undefined || itemEvent.revision >= seen.revision) {
+                wake.children.set(itemEvent.itemId, {
+                  revision: itemEvent.revision,
+                  running: itemStatus(itemEvent) === "running",
+                });
+              }
+            }
             return;
           }
         }
@@ -2103,7 +2139,8 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
           });
           session = { ...session, model: targetModel };
         }
-        const nativeId = adopted?.nativeId ?? host.connection.mintCommandId();
+        // The continuation answers for the latest wake turn; earlier ones join it.
+        const nativeId = adopted?.turnIds.at(-1) ?? host.connection.mintCommandId();
         const startedAt = yield* DateTime.now;
         const providerTurn: OrchestrationV2ProviderTurn = {
           id: idAllocator.derive.providerTurn({
@@ -2157,7 +2194,8 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
           const held = compact ? undefined : wake;
           if (held) wake = undefined;
           if (continuation && !held) return yield* finish(turn, "completed");
-          if (held && !continuation) turn.joined.add(held.nativeId);
+          for (const turnId of held?.turnIds ?? [])
+            if (!continuation || turnId !== nativeId) turn.joined.add(turnId);
           for (const [method, data] of held?.events ?? [])
             yield* handleNotification(method, data).pipe(Effect.catch(failHost));
         }).pipe(eventPermit.withPermits(1));
@@ -2273,10 +2311,10 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
         providerSession: session,
         events: Stream.fromQueue(events),
         backgroundTasksEndWithProcess: true,
-        // A running workflow or a held Muse turn keeps the host: idle release must wait.
-        hasPendingBackgroundWork: Effect.sync(
-          () => observedChildren.size > 0 || wake !== undefined,
-        ),
+        // A running workflow, a held Muse turn still running, a child that wake started and
+        // that still runs, or held output a continuation can still deliver keeps the host:
+        // idle release and switches must wait. Held output nothing can deliver ends nothing.
+        hasPendingBackgroundWork: Effect.sync(() => observedChildren.size > 0 || wakePending()),
         ensureThread: (args) =>
           register(args).pipe(
             commands.withPermits(1),
@@ -2357,14 +2395,31 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
         interruptTurn: Effect.fn("MuseAdapter.interruptTurn")(
           function* (args) {
             const turn = active;
-            // Recovering an ended turn is done unless Muse still runs work Stop cannot end.
-            if (
-              !turn &&
-              args.requestRuntimeRestart === true &&
-              observedChildren.size === 0 &&
-              wake === undefined
-            )
+            if (!turn && args.requestRuntimeRestart === true) {
+              // Recovering an ended turn is done when Muse runs nothing more.
+              if (observedChildren.size === 0 && !wakeRunsWork()) return;
+              if (!validateThread(args.providerThread))
+                return yield* protocolError("This Muse thread is not attached to this host");
+              // Background children and held wakes run in the host process
+              // (backgroundTasksEndWithProcess), so a confirmed host close ends all of them.
+              // The next ensure/resume relaunches the host on the same native session.
+              yield* eventPermit.withPermits(1)(
+                Effect.gen(function* () {
+                  if (active || broken || closed) return;
+                  hostEpoch++;
+                  const stopped = host;
+                  yield* Effect.tryPromise({
+                    try: () => stopped.close(),
+                    catch: (cause) => protocolError("Cannot stop Muse background work", cause),
+                  }).pipe(Effect.onError(failHost));
+                  broken = true;
+                  relaunchable = true;
+                  wake = undefined;
+                  yield* settleObservedChildren("interrupted");
+                }),
+              );
               return;
+            }
             if (
               !turn ||
               turn.providerTurn.id !== args.providerTurnId ||
