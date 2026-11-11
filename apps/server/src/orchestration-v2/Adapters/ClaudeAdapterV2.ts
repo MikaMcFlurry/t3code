@@ -11874,6 +11874,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 return true;
               }
             }
+            // An empty roster can precede task_notification; the wake it owes is still pending.
+            for (const taskIds of (yield* Ref.get(
+              wakeEligibleBackgroundTasksByNativeThread,
+            )).values()) {
+              if (taskIds.size > 0) {
+                return true;
+              }
+            }
             const buffers = yield* Ref.get(wakeBuffers);
             for (const entry of buffers.values()) {
               if (

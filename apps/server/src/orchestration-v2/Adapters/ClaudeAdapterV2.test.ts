@@ -10179,7 +10179,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 (event.providerThread.pendingBackgroundTasks?.length ?? 0) === 0,
             ),
           );
-          assert.isFalse(yield* harness.hasPendingBackgroundWork);
+          // The empty level can precede task_notification; the wake it owes keeps the session busy.
+          assert.isTrue(yield* harness.hasPendingBackgroundWork);
         }).pipe(
           Effect.provide(
             Layer.mergeAll(
@@ -16421,7 +16422,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         yield* Queue.offer(firstProcess, turnOneResult);
         yield* changes.until(() => events.some((event) => event.type === "turn.terminal"));
-        assert.isFalse(yield* hasPendingBackgroundWork);
+        // The emptied roster still owes this process a task_notification.
+        assert.isTrue(yield* hasPendingBackgroundWork);
 
         const alternateModel = CLAUDE_TEST_RESTART_MODEL_SELECTION;
         const activeProviderThread = {
