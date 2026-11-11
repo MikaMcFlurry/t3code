@@ -12434,7 +12434,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
         yield* harness.offerAndWait(wakeNotification);
         assert.lengthOf(harness.continuationRequests, 0);
-        assert.isFalse(yield* harness.hasPendingBackgroundWork);
+        assert.isTrue(yield* harness.hasPendingBackgroundWork);
 
         yield* Queue.offer(harness.sdkMessages, wakeAssistant);
         yield* harness.awaitContinuation(1);
@@ -12743,6 +12743,13 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* Queue.offer(harness.sdkMessages, turnOneResult);
         yield* harness.awaitTerminal(1);
         yield* Queue.offer(harness.sdkMessages, wakeNotification);
+        yield* harness.until(
+          () =>
+            (providerThreadRosterEvents(harness.events).at(-1)?.providerThread
+              .pendingBackgroundTasks?.length ?? 0) === 0,
+        );
+        // A queued account switch would detach the session before the wake replies.
+        assert.isTrue(yield* harness.hasPendingBackgroundWork);
         yield* Queue.offer(harness.sdkMessages, wakeResult);
         yield* harness.awaitContinuation(1);
 
@@ -16615,7 +16622,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           yield* changes.until(
             () => events.filter((event) => event.type === "turn.terminal").length === 2,
           );
-          assert.isFalse(yield* hasPendingBackgroundWork);
+          // The buffered notification still owes the wake turn that follows.
+          assert.isTrue(yield* hasPendingBackgroundWork);
           assert.lengthOf(continuationRequests, 0);
 
           yield* Queue.offer(secondProcess, wakeResult);

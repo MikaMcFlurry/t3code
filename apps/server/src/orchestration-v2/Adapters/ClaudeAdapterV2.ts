@@ -11881,7 +11881,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   (message) =>
                     message.type === "user" ||
                     message.type === "assistant" ||
-                    message.type === "result",
+                    message.type === "result" ||
+                    // The roster empties on the notification, before the wake turn's frames arrive.
+                    (message.type === "system" && message.subtype === "task_notification"),
                 )
               ) {
                 return true;
