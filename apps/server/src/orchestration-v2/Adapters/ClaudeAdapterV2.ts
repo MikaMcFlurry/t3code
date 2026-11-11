@@ -73,6 +73,7 @@ import type {
 import * as NodeChildProcess from "node:child_process";
 import * as NodeUtil from "node:util";
 import { parseCliArgs } from "@t3tools/shared/cliArgs";
+import { BACKGROUND_WORK_REFUSAL_PHRASE } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
 import {
   claudeMcpToolName,
@@ -733,7 +734,7 @@ export class ClaudeBackgroundWorkBlocksQueryReplacementError extends Schema.Tagg
   {},
 ) {
   override get message(): string {
-    return "Claude is still running background agents or commands, and this model or setting change would end them. Wait for them to finish, or press Stop, then send the message again.";
+    return `Claude ${BACKGROUND_WORK_REFUSAL_PHRASE}, and this model or setting change would end them. Wait for them to finish, or press Stop, then send the message again.`;
   }
 }
 
