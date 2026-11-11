@@ -1,5 +1,19 @@
 import type { EnvironmentId, ThreadContextRecord } from "@t3tools/contracts";
+import { isBackgroundWorkRefusal } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { collectInlineContextIds } from "../../lib/composerContextReferences";
+
+/**
+ * What the composer shows when the server refuses a send. The message carries the
+ * server's detail ("Still running: …"). A refusal over background work offers Stop,
+ * which also reaches a session whose work no turn shows (no Stop button is visible).
+ */
+export function composerSendRefusal(message: string) {
+  return {
+    title: "Message not sent",
+    description: message,
+    offersBackgroundStop: isBackgroundWorkRefusal(message),
+  };
+}
 
 /** Attached threads the prompt still links to; replacing linked text leaves stale records. */
 export function referencedThreadContexts(draft: {
