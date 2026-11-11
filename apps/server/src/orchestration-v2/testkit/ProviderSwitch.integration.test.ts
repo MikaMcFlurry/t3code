@@ -4277,4 +4277,283 @@ describe("orchestration v2 provider switching", () => {
     "reissues imported v1 context when a queued provider starts after the first provider fails",
     () => importedFailureScenario(true),
   );
+
+  it.live("lets Stop release an idle session's background work that only its adapter sees", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("idle-background-release");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const busy = yield* Ref.make(false);
+        const interrupts = yield* Ref.make<
+          ReadonlyArray<ProviderAdapter.ProviderAdapterV2InterruptInput>
+        >([]);
+        const secondSelection: ModelSelection = {
+          ...CLAUDE_MODEL_SELECTION,
+          instanceId: ProviderInstanceId.make("claude-second-account"),
+        };
+        const adapters = [
+          makeTestAdapter({
+            instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            responseByRunOrdinal: { 1: "First account complete" },
+            capturedTurns,
+            backgroundWork: busy,
+            // Like the Claude adapter: a restart interrupt ends what the session still runs.
+            onInterrupt: (interrupt) =>
+              Ref.update(interrupts, (current) => [...current, interrupt]).pipe(
+                Effect.andThen(
+                  interrupt.requestRuntimeRestart === true ? Ref.set(busy, false) : Effect.void,
+                ),
+              ),
+          }),
+          makeTestAdapter({
+            instanceId: secondSelection.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: secondSelection,
+            responseByRunOrdinal: { 2: "Second account complete" },
+            capturedTurns,
+          }),
+        ];
+        const layerRegistry = Layer.succeed(
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+            get: (instanceId) => {
+              const adapter = adapters.find((candidate) => candidate.instanceId === instanceId);
+              return adapter === undefined
+                ? Effect.fail(
+                    new ProviderAdapterRegistry.ProviderAdapterRegistryLookupError({ instanceId }),
+                  )
+                : Effect.succeed(adapter);
+            },
+            list: () => Effect.succeed(adapters.map((adapter) => adapter.instanceId)),
+            getMetadata: () =>
+              Effect.succeed({
+                driver: CLAUDE_DRIVER,
+                continuationKey: "claude:shared-native-account-history",
+                enabled: true,
+                capabilities: ClaudeProviderCapabilitiesV2,
+              }),
+          }),
+        );
+        const threadId = ThreadId.make("thread:idle-background-release");
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const send = (ordinal: number, modelSelection: ModelSelection) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:idle-background-release:${ordinal}`),
+              threadId,
+              messageId: MessageId.make(`message:idle-background-release:${ordinal}`),
+              text: `Prompt ${ordinal}`,
+              attachments: [],
+              modelSelection,
+              dispatchMode: { type: "start_immediately" },
+            });
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:idle-background-release:create"),
+            threadId,
+            projectId: ProjectId.make("project:idle-background-release"),
+            title: "Idle background release",
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+          });
+          yield* send(1, CLAUDE_MODEL_SELECTION);
+          yield* worker.drain();
+          const idle = yield* waitForIdle(threadId);
+          assert.strictEqual(idle.runs[0]?.status, "completed");
+
+          // The session keeps work the projection does not show (a native subagent, a wake).
+          yield* Ref.set(busy, true);
+          yield* orchestrator.dispatch({
+            type: "thread.stop",
+            commandId: CommandId.make("command:idle-background-release:stop"),
+            threadId,
+          });
+          yield* worker.drain();
+          const sent = yield* Ref.get(interrupts);
+          assert.lengthOf(sent, 1, "Stop on the idle thread never reached the busy session");
+          assert.isTrue(sent[0]?.requestRuntimeRestart);
+          assert.isFalse(yield* Ref.get(busy));
+
+          // With the work ended, the account switch starts at once.
+          yield* send(2, secondSelection);
+          yield* worker.drain();
+          const switched = yield* waitForIdle(threadId);
+          assert.strictEqual(switched.runs.at(-1)?.status, "completed");
+          assert.deepStrictEqual(
+            (yield* Ref.get(capturedTurns)).map((turn) => turn.text),
+            ["Prompt 1", "Prompt 2"],
+          );
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerWithRegistry(
+              {
+                name: "idle-background-release",
+                runtimePolicyOverride: {
+                  cwd,
+                  approvalPolicy: "never",
+                  sandboxPolicy: {
+                    type: "readOnly",
+                    access: { type: "fullAccess" },
+                    networkAccess: false,
+                  },
+                },
+              },
+              layerRegistry,
+            ),
+          ),
+        );
+      }),
+    ),
+  );
+
+  it.live.each(["after the newer run completed", "while the newer run runs"] as const)(
+    "Stop reaches an older kept session's background work %s",
+    (scenario) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const key = scenario === "while the newer run runs" ? "running" : "completed";
+          const cwd = yield* checkpointWorkspace(`stop-kept-session-${key}`);
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const busy = yield* Ref.make(false);
+          const interrupts = yield* Ref.make<
+            ReadonlyArray<ProviderAdapter.ProviderAdapterV2InterruptInput>
+          >([]);
+          const started = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const secondSelection: ModelSelection = {
+            ...CLAUDE_MODEL_SELECTION,
+            instanceId: ProviderInstanceId.make("claude-second-account"),
+          };
+          const adapters = [
+            makeTestAdapter({
+              instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+              driver: CLAUDE_DRIVER,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              responseByRunOrdinal: { 1: "First account complete" },
+              capturedTurns,
+              backgroundWork: busy,
+              // Like the Claude adapter: a restart interrupt ends what the session still runs.
+              onInterrupt: (interrupt) =>
+                Ref.update(interrupts, (current) => [...current, interrupt]).pipe(
+                  Effect.andThen(
+                    interrupt.requestRuntimeRestart === true ? Ref.set(busy, false) : Effect.void,
+                  ),
+                ),
+            }),
+            makeTestAdapter({
+              instanceId: secondSelection.instanceId,
+              driver: CLAUDE_DRIVER,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              modelSelection: secondSelection,
+              responseByRunOrdinal: { 2: "Second account complete" },
+              capturedTurns,
+              ...(key === "running"
+                ? { holdFirstTurn: started, releaseFirstTurn: release, holdRunOrdinal: 2 }
+                : {}),
+            }),
+          ];
+          const layerRegistry = ProviderAdapterRegistry.layerFromAdapters(adapters);
+          const threadId = ThreadId.make(`thread:stop-kept-session-${key}`);
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const send = (ordinal: number, modelSelection: ModelSelection) =>
+              orchestrator.dispatch({
+                type: "message.dispatch",
+                createdBy: "user",
+                creationSource: "web",
+                commandId: CommandId.make(`command:stop-kept-session-${key}:${ordinal}`),
+                threadId,
+                messageId: MessageId.make(`message:stop-kept-session-${key}:${ordinal}`),
+                text: `Prompt ${ordinal}`,
+                attachments: [],
+                modelSelection,
+                dispatchMode: { type: "start_immediately" },
+              });
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:stop-kept-session-${key}:create`),
+              threadId,
+              projectId: ProjectId.make(`project:stop-kept-session-${key}`),
+              title: "Stop kept session",
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: cwd,
+            });
+            yield* send(1, CLAUDE_MODEL_SELECTION);
+            yield* worker.drain();
+            const idle = yield* waitForIdle(threadId);
+            assert.strictEqual(idle.runs[0]?.status, "completed");
+
+            // The session keeps work the projection does not show (a native subagent, a wake).
+            yield* Ref.set(busy, true);
+            yield* send(2, secondSelection);
+            if (key === "running") {
+              yield* Deferred.await(started);
+              yield* worker.drain();
+            } else {
+              yield* worker.drain();
+              const handedOff = yield* waitForIdle(threadId);
+              assert.strictEqual(handedOff.runs.at(-1)?.status, "completed");
+            }
+            const kept = yield* orchestrator.getThreadProjection(threadId);
+            assert.isTrue(yield* Ref.get(busy));
+            assert.isTrue(
+              kept.providerSessions.some(
+                (session) =>
+                  session.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId &&
+                  session.status !== "stopped",
+              ),
+            );
+            yield* orchestrator.dispatch({
+              type: "thread.stop",
+              commandId: CommandId.make(`command:stop-kept-session-${key}:stop`),
+              threadId,
+            });
+            yield* Deferred.succeed(release, undefined);
+            yield* worker.drain();
+            const sent = yield* Ref.get(interrupts);
+            assert.lengthOf(sent, 1, "Stop never reached the older kept session");
+            assert.isTrue(sent[0]?.requestRuntimeRestart);
+            assert.isFalse(yield* Ref.get(busy));
+          }).pipe(
+            Effect.provide(
+              ProviderReplayHarness.layerWithRegistry(
+                {
+                  name: `stop-kept-session-${key}`,
+                  runtimePolicyOverride: {
+                    cwd,
+                    approvalPolicy: "never",
+                    sandboxPolicy: {
+                      type: "readOnly",
+                      access: { type: "fullAccess" },
+                      networkAccess: false,
+                    },
+                  },
+                },
+                layerRegistry,
+              ),
+            ),
+          );
+        }),
+      ),
+  );
 });
