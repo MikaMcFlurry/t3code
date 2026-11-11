@@ -14366,14 +14366,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       afterSequence: terminalEventsAfterSequence,
       eventType: "provider-thread.updated",
     }),
-    eventSink.stream({ afterSequence: terminalEventsAfterSequence, eventType: "subagent.updated" }),
+    Stream.merge(
+      eventSink.stream({
+        afterSequence: terminalEventsAfterSequence,
+        eventType: "subagent.updated",
+      }),
+      // Codex MCP and dynamic tools that outlive their turn settle with only a node update.
+      eventSink.stream({ afterSequence: terminalEventsAfterSequence, eventType: "node.updated" }),
+    ),
   ).pipe(
     Stream.map((stored) => ({ stored, settlesChild: settlesChildWork(stored) })),
     Stream.filter(
       ({ stored, settlesChild }) =>
         settlesChild ||
         (stored.event.type === "provider-thread.updated" &&
-          !backgroundWorkHoldsCompletion(stored.event.payload.pendingBackgroundTasks ?? [])),
+          !backgroundWorkHoldsCompletion(stored.event.payload.pendingBackgroundTasks ?? [])) ||
+        (stored.event.type === "node.updated" &&
+          stored.event.payload.kind === "tool_call" &&
+          !isOrchestrationV2WorkActive(stored.event.payload.status)),
     ),
     Stream.runForEach(({ stored, settlesChild }) =>
       Effect.gen(function* () {
