@@ -2389,6 +2389,60 @@ describe("AcpRegistryAdapterV2", () => {
       }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
+  it.effect("stops counting Claude's root wake as running work once it settles idle", () =>
+    Effect.gen(function* () {
+      const gate = makeProviderReplayGate(["wake", "wake-idle"]);
+      const session = yield* openClaudeReplaySession(
+        [
+          ...claudeFrames.open,
+          ...claudeFrames.prompt(1),
+          claudeFrames.idle("end_turn"),
+          {
+            ...claudeFrames.update(CLAUDE_ROOT_SESSION, {
+              sessionUpdate: "state_update",
+              state: "running",
+            }),
+            label: "wake",
+          },
+          claudeFrames.update(CLAUDE_ROOT_SESSION, {
+            sessionUpdate: "user_message",
+            messageId: "wake-user",
+            content: [{ type: "text", text: "Background task finished." }],
+          }),
+          claudeFrames.update(CLAUDE_ROOT_SESSION, {
+            sessionUpdate: "agent_message_chunk",
+            messageId: "wake-reply",
+            content: { type: "text", text: "The tests passed." },
+          }),
+          claudeMarker("wake running"),
+          { ...claudeFrames.idle("end_turn"), label: "wake-idle" },
+          claudeMarker("wake settled"),
+        ],
+        gate,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(() => gate.releaseAll()));
+      yield* session.runtime.startTurn(session.turnInput(1));
+      assert.equal((yield* session.terminal).status, "completed");
+      assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
+      gate.release("wake");
+      yield* session.throughMarker("wake running");
+      yield* Queue.take(session.offered);
+      assert.isTrue(
+        yield* session.runtime.hasPendingBackgroundWork!,
+        "a wake turn Claude is still producing is running work",
+      );
+      // The single continuation offer is dropped (no route, failed dispatch).
+      yield* session.offers[0]!.clearIfCurrent!();
+      assert.isTrue(yield* session.runtime.hasPendingBackgroundWork!);
+      gate.release("wake-idle");
+      yield* session.throughMarker("wake settled");
+      assert.isFalse(
+        yield* session.runtime.hasPendingBackgroundWork!,
+        "a settled wake turn still counts as running work",
+      );
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
   it.effect("fails active Claude work and releases its children when the process exits", () =>
     Effect.gen(function* () {
       const session = yield* openClaudeReplaySession([

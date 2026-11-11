@@ -2317,6 +2317,17 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             runtimeGeneration,
             Effect.gen(function* () {
               yield* Ref.set(runtimeRestartRequired, true);
+              // Work of the exited process cannot run on: drop it like a stopped run
+              // (quarantineStoppedRun), but keep the turn route so the restarted
+              // runtime can still continue. No permit: a continuation dispatch may
+              // hold it while it waits on this runtime.
+              yield* Ref.update(continuationGeneration, (value) => value + 1);
+              yield* Ref.set(wakeBuffer, []);
+              yield* Ref.set(wakeReports, noWakeReports);
+              yield* Ref.set(continuationRequested, false);
+              yield* Ref.set(runningBackgroundTaskIds, new Set());
+              yield* Ref.set(midTurnUnreportedCompletedTaskIds, new Set());
+              yield* Ref.set(carryoverSubagents, null);
               if (!followsAgentWorkState) return;
               agentWork = { sessionUpdate: "state_update", state: "idle", stopReason: "error" };
               for (const child of nativeChildren.values()) {
@@ -2334,8 +2345,6 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 yield* publishNativeChildStatus(child, "failed");
               }
               agentRequests.clear();
-              yield* Ref.set(wakeBuffer, []);
-              yield* Ref.set(continuationRequested, false);
               yield* cancelPendingRuntimeRequests();
               const context = yield* Ref.get(activeTurn);
               if (context !== null)
@@ -8623,7 +8632,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       agentRequests.size > 0)
                   )
                     return true;
-                  if ((yield* Ref.get(wakeBuffer)).length > 0) return true;
+                  // A wake's output stays pending while its continuation can still deliver
+                  // it. Once an ACP v2 agent settled idle and that continuation was dropped,
+                  // nothing will consume the buffer. ACP v1 (Grok) has no such end signal.
+                  const wakeSettled =
+                    followsAgentWorkState &&
+                    agentWork?.state === "idle" &&
+                    agentRequests.size === 0;
+                  if (!wakeSettled && (yield* Ref.get(wakeBuffer)).length > 0) return true;
                   if (yield* Ref.get(continuationRequested)) return true;
                   if ((yield* Ref.get(runningBackgroundTaskIds)).size > 0) return true;
                   const active = yield* Ref.get(activeTurn);
