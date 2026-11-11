@@ -12171,6 +12171,27 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       };
     }
 
+    // A newer account's start can fail before it accepts a turn. Stop still owes the older
+    // kept sessions their interrupts, and marks and holds the thread like its fallback.
+    if (
+      providerTurn === undefined &&
+      command.holdQueue === true &&
+      hasBackgroundWork &&
+      otherProviderInterrupts.length > 0
+    ) {
+      yield* emitEvent({
+        type: "turn-item.updated",
+        threadId: command.threadId,
+        runId: run.id,
+        nodeId: rootNode.id,
+        providerInstanceId: run.providerInstanceId,
+        occurredAt: now,
+        payload: interruptRequestItem,
+      });
+      yield* stopRemainingWork();
+      yield* Ref.update(effects, (existing) => [...existing, ...otherProviderInterrupts]);
+      return undefined;
+    }
     if (providerTurn === undefined) {
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,

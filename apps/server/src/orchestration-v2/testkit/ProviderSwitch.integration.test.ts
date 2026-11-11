@@ -118,12 +118,17 @@ function makeTestAdapter(input: {
   readonly cancelledRunOrdinals?: ReadonlySet<number>;
   readonly holdRunOrdinal?: number;
   readonly pendingBackgroundWork?: Ref.Ref<boolean>;
+  // Codex-like: adapter-only work of the named provider threads, probed per thread.
+  readonly busyProviderThreads?: Ref.Ref<ReadonlyArray<string>>;
   readonly subagentOnlyBackgroundWork?: boolean;
   readonly holdFirstTurn?: Deferred.Deferred<void>;
   readonly releaseFirstTurn?: Deferred.Deferred<void>;
   readonly backgroundWork?: Ref.Ref<boolean>;
   readonly bufferedWake?: Ref.Ref<boolean>;
   readonly closedSessions?: Ref.Ref<ReadonlyArray<string>>;
+  readonly onInterrupt?: (
+    input: ProviderAdapter.ProviderAdapterV2InterruptInput,
+  ) => Effect.Effect<void>;
 }): ProviderAdapter.ProviderAdapterV2["Service"] {
   return {
     instanceId: input.instanceId,
@@ -166,6 +171,17 @@ function makeTestAdapter(input: {
                   input.subagentOnlyBackgroundWork && options?.includeSubagents !== true
                     ? Effect.succeed(false)
                     : Ref.get(input.pendingBackgroundWork!),
+              }),
+          ...(input.busyProviderThreads === undefined
+            ? {}
+            : {
+                hasPendingBackgroundWork: Ref.get(input.busyProviderThreads).pipe(
+                  Effect.map((ids) => ids.length > 0),
+                ),
+                hasPendingBackgroundWorkForThread: (thread) =>
+                  Ref.get(input.busyProviderThreads!).pipe(
+                    Effect.map((ids) => ids.includes(thread.id)),
+                  ),
               }),
           ...(input.getModelContextWindow === undefined
             ? {}
@@ -404,7 +420,7 @@ function makeTestAdapter(input: {
               }
             }),
           steerTurn: () => Effect.void,
-          interruptTurn: () => Effect.void,
+          interruptTurn: (interrupt) => input.onInterrupt?.(interrupt) ?? Effect.void,
           respondToRuntimeRequest: () => Effect.void,
           readThreadSnapshot: () =>
             unimplemented(input.driver, "readThreadSnapshot unused in provider switch test"),
@@ -3048,6 +3064,177 @@ describe("orchestration v2 provider switching", () => {
                   },
                 },
                 layerRegistry,
+              ),
+            ),
+          );
+        }),
+      ),
+  );
+
+  it.live(
+    "lets Stop reach older kept sessions when a newer account fails before its first turn",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* checkpointWorkspace("stop-after-failed-switch-start");
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          // Provider threads with work only their adapter sees; a restart interrupt ends it.
+          const busy = yield* Ref.make<ReadonlyArray<string>>([]);
+          const interrupts = yield* Ref.make<
+            ReadonlyArray<ProviderAdapter.ProviderAdapterV2InterruptInput>
+          >([]);
+          const failThirdStart = yield* Ref.make(true);
+          const selections = ["first", "second", "third"].map((account): ModelSelection => ({
+            ...CODEX_MODEL_SELECTION,
+            instanceId: ProviderInstanceId.make(`codex-${account}-account`),
+          }));
+          const adapters = selections.map((modelSelection, index) =>
+            makeTestAdapter({
+              instanceId: modelSelection.instanceId,
+              driver: CODEX_DRIVER,
+              capabilities: CodexProviderCapabilitiesV2,
+              modelSelection,
+              responseByRunOrdinal: {},
+              capturedTurns,
+              busyProviderThreads: busy,
+              ...(index === 2 ? { failStartOnce: failThirdStart } : {}),
+              onInterrupt: (interrupt) =>
+                Ref.update(interrupts, (current) => [...current, interrupt]).pipe(
+                  Effect.andThen(
+                    interrupt.requestRuntimeRestart === true
+                      ? Ref.update(busy, (ids) =>
+                          ids.filter((id) => id !== interrupt.providerThread.id),
+                        )
+                      : Effect.void,
+                  ),
+                ),
+            }),
+          );
+          const threadId = ThreadId.make("thread:stop-after-failed-switch-start");
+          const unrelatedThreadId = ThreadId.make(
+            "thread:stop-after-failed-switch-start:unrelated",
+          );
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const create = (id: ThreadId) =>
+              orchestrator.dispatch({
+                type: "thread.create",
+                createdBy: "user",
+                creationSource: "web",
+                commandId: CommandId.make(`command:create:${id}`),
+                threadId: id,
+                projectId: ProjectId.make("project:stop-after-failed-switch-start"),
+                title: "Stop after a failed switch start",
+                modelSelection: selections[0]!,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                branch: null,
+                worktreePath: cwd,
+              });
+            const send = (id: ThreadId, ordinal: number, modelSelection: ModelSelection) =>
+              orchestrator.dispatch({
+                type: "message.dispatch",
+                createdBy: "user",
+                creationSource: "web",
+                commandId: CommandId.make(`command:send:${id}:${ordinal}`),
+                threadId: id,
+                messageId: MessageId.make(`message:${id}:${ordinal}`),
+                text: `Prompt ${ordinal}`,
+                attachments: [],
+                modelSelection,
+                dispatchMode: { type: "start_immediately" },
+              });
+            yield* create(threadId);
+            yield* create(unrelatedThreadId);
+            // Another app thread shares the first account's runtime; Stop must leave its work.
+            yield* send(unrelatedThreadId, 1, selections[0]!);
+            yield* worker.drain();
+            const unrelated = yield* waitForIdle(unrelatedThreadId);
+            const unrelatedProviderThreadId = unrelated.thread.activeProviderThreadId!;
+            yield* Ref.update(busy, (ids) => [...ids, unrelatedProviderThreadId]);
+
+            // Each account completes its run and keeps adapter-only work after the next takes over.
+            for (const index of [0, 1]) {
+              yield* send(threadId, index + 1, selections[index]!);
+              yield* worker.drain();
+              const idle = yield* waitForIdle(threadId);
+              assert.strictEqual(idle.runs.at(-1)?.status, "completed");
+              yield* Ref.update(busy, (ids) => [...ids, idle.thread.activeProviderThreadId!]);
+            }
+            // The third account fails before accepting any provider turn.
+            yield* send(threadId, 3, selections[2]!);
+            yield* worker.drain();
+            const failed = yield* waitForIdle(threadId);
+            assert.deepStrictEqual(
+              failed.runs.map((run) => [run.providerInstanceId, run.status]),
+              [
+                [selections[0]!.instanceId, "completed"],
+                [selections[1]!.instanceId, "completed"],
+                [selections[2]!.instanceId, "failed"],
+              ],
+            );
+            const kept = failed.providerThreads.filter(
+              (thread) => thread.providerInstanceId !== selections[2]!.instanceId,
+            );
+            assert.lengthOf(kept, 2);
+            assert.strictEqual(
+              kept.find((thread) => thread.providerInstanceId === selections[0]!.instanceId)
+                ?.providerSessionId,
+              unrelated.providerThreads[0]?.providerSessionId,
+              "the unrelated thread shares the first account's runtime",
+            );
+
+            // A plain interrupt of the failed run still has no turn to interrupt.
+            const plain = yield* orchestrator
+              .dispatch({
+                type: "run.interrupt",
+                commandId: CommandId.make("command:stop-after-failed-switch-start:interrupt"),
+                threadId,
+                runId: failed.runs[2]!.id,
+              })
+              .pipe(Effect.exit);
+            assert.isTrue(plain._tag === "Failure");
+            yield* worker.drain();
+            assert.deepStrictEqual(yield* Ref.get(interrupts), []);
+
+            yield* orchestrator.dispatch({
+              type: "thread.stop",
+              commandId: CommandId.make("command:stop-after-failed-switch-start:stop"),
+              threadId,
+            });
+            yield* worker.drain();
+            const sent = yield* Ref.get(interrupts);
+            assert.sameMembers(
+              sent.map((interrupt) => interrupt.providerThread.id),
+              kept.map((thread) => thread.id),
+              "Stop never reached the older kept sessions",
+            );
+            assert.isTrue(sent.every((interrupt) => interrupt.requestRuntimeRestart === true));
+            assert.deepStrictEqual(yield* Ref.get(busy), [unrelatedProviderThreadId]);
+            const stopped = yield* orchestrator.getThreadProjection(threadId);
+            assert.isTrue(
+              stopped.turnItems.some(
+                (item) =>
+                  item.runId === failed.runs[2]!.id && item.type === "run_interrupt_request",
+              ),
+            );
+          }).pipe(
+            Effect.provide(
+              ProviderReplayHarness.layerWithRegistry(
+                {
+                  name: "stop-after-failed-switch-start",
+                  runtimePolicyOverride: {
+                    cwd,
+                    approvalPolicy: "never",
+                    sandboxPolicy: {
+                      type: "readOnly",
+                      access: { type: "fullAccess" },
+                      networkAccess: false,
+                    },
+                  },
+                },
+                ProviderAdapterRegistry.layerFromAdapters(adapters),
               ),
             ),
           );
