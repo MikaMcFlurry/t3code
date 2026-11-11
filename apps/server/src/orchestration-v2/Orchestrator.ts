@@ -6431,9 +6431,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       command.createdBy === "agent" &&
       command.creationSource === "provider" &&
       command.notification !== undefined;
-    const bufferedWakeHeld =
-      bufferedProviderWake &&
-      projection.runs.some((run) => run.status === "queued" && run.queueHeld === true);
     // Buffered output is part of the busy session; only its owning turn can drain it.
     const queueWaitingOnBackgroundWork =
       !bufferedProviderWake &&
@@ -6443,7 +6440,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const queueBehindRun =
       activeRun ??
       worktreeMissingRun ??
-      (waitsForBackgroundWork || queueWaitingOnBackgroundWork || bufferedWakeHeld
+      (waitsForBackgroundWork || queueWaitingOnBackgroundWork
         ? (latestRun ?? undefined)
         : undefined);
     const pendingMergeBackTransfers = pendingMergeBackTransfersForThread(projection);

@@ -2550,37 +2550,33 @@ describe("orchestration v2 provider switching", () => {
   it.live.each([
     [
       "detaches the previous instance's session when a send hands off to another instance",
-      { background: false, queued: false, sharedHistory: false, buffered: false, held: false },
+      { background: false, queued: false, sharedHistory: false, buffered: false },
     ],
     [
       "keeps a busy previous session running when a direct send hands off",
-      { background: true, queued: false, sharedHistory: false, buffered: false, held: false },
+      { background: true, queued: false, sharedHistory: false, buffered: false },
     ],
     [
       "resumes a direct account switch when a background tool finishes",
-      { background: true, queued: false, sharedHistory: true, buffered: false, held: false },
+      { background: true, queued: false, sharedHistory: true, buffered: false },
     ],
     [
       "keeps a busy previous session running when a queued hand-off starts",
-      { background: true, queued: true, sharedHistory: false, buffered: false, held: false },
+      { background: true, queued: true, sharedHistory: false, buffered: false },
     ],
     [
       "waits for background work before resuming a queued account switch",
-      { background: true, queued: true, sharedHistory: true, buffered: false, held: false },
+      { background: true, queued: true, sharedHistory: true, buffered: false },
     ],
     [
       "drains buffered provider output before resuming a waiting account switch",
-      { background: true, queued: false, sharedHistory: true, buffered: true, held: false },
+      { background: true, queued: false, sharedHistory: true, buffered: true },
     ],
     [
       "drains buffered output queued before the predecessor settles",
-      { background: true, queued: true, sharedHistory: true, buffered: true, held: false },
+      { background: true, queued: true, sharedHistory: true, buffered: true },
     ],
-    [
-      "keeps buffered provider wakes held when Stop holds the waiting account switch",
-      { background: true, queued: false, sharedHistory: true, buffered: true, held: true },
-    ],
-  ] as const)("%s", ([, { background, queued, sharedHistory, buffered, held }]) =>
+  ] as const)("%s", ([, { background, queued, sharedHistory, buffered }]) =>
     Effect.scoped(
       Effect.gen(function* () {
         const cwd = yield* checkpointWorkspace("handoff-releases-session");
@@ -2767,25 +2763,8 @@ describe("orchestration v2 provider switching", () => {
             yield* Ref.set(bufferedWake, buffered);
             yield* Ref.set(backgroundWork, false);
             if (buffered) {
-              if (held) {
-                yield* orchestrator.dispatch({
-                  type: "thread.stop",
-                  commandId: CommandId.make("command:handoff-buffered-stop"),
-                  threadId: handoffThreadId,
-                });
-                yield* worker.drain();
-              }
               yield* dispatchBufferedWake();
               yield* worker.drain();
-              if (held) {
-                const stopped = yield* orchestrator.getThreadProjection(handoffThreadId);
-                assert.deepEqual(
-                  stopped.runs.filter((run) => run.status === "queued").map((run) => run.queueHeld),
-                  [true, true, true],
-                );
-                assert.lengthOf(yield* Ref.get(capturedTurns), 1);
-                return;
-              }
               assert.isFalse(
                 yield* Ref.get(bufferedWake),
                 "The owning session must drain buffered output before the account switch",
