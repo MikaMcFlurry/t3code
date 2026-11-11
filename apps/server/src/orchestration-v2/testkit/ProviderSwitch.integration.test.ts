@@ -121,6 +121,8 @@ function makeTestAdapter(input: {
   readonly holdFirstTurn?: Deferred.Deferred<void>;
   readonly releaseFirstTurn?: Deferred.Deferred<void>;
   readonly backgroundWork?: Ref.Ref<boolean>;
+  /** Replaces `backgroundWork` as the session-wide probe. */
+  readonly backgroundWorkProbe?: Effect.Effect<boolean>;
   readonly closedSessions?: Ref.Ref<ReadonlyArray<string>>;
 }): ProviderAdapter.ProviderAdapterV2["Service"] {
   return {
@@ -171,12 +173,13 @@ function makeTestAdapter(input: {
           ...(input.canReuseContextUsage === undefined
             ? {}
             : { canReuseContextUsage: input.canReuseContextUsage }),
-          ...(input.backgroundWork === undefined
+          ...(input.backgroundWork === undefined && input.backgroundWorkProbe === undefined
             ? {}
             : {
                 // Like Claude: native subagents are visible only to the session-wide
                 // probe, never to the per-thread roster probe.
-                hasPendingBackgroundWork: Ref.get(input.backgroundWork),
+                hasPendingBackgroundWork:
+                  input.backgroundWorkProbe ?? Ref.get(input.backgroundWork!),
                 hasPendingBackgroundWorkForThread: () => Effect.succeed(false),
               }),
           ensureThread: (threadInput) =>
@@ -2978,6 +2981,147 @@ describe("orchestration v2 provider switching", () => {
             ProviderReplayHarness.layerWithRegistry(
               {
                 name: "held-account-switches",
+                runtimePolicyOverride: {
+                  cwd,
+                  approvalPolicy: "never",
+                  sandboxPolicy: {
+                    type: "readOnly",
+                    access: { type: "fullAccess" },
+                    networkAccess: false,
+                  },
+                },
+              },
+              layerRegistry,
+            ),
+          ),
+        );
+      }),
+    ),
+  );
+
+  // Background work that starts between a switch's wait check and its detach check.
+  it.live("queues an account switch once when background work starts during its dispatch", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("named-busy-refusal");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        // The work starts between the switch's wait check and its detach check.
+        const armed = yield* Ref.make(false);
+        const probes = yield* Ref.make(0);
+        const backgroundWorkProbe = Effect.gen(function* () {
+          if (!(yield* Ref.get(armed))) return false;
+          return (yield* Ref.getAndUpdate(probes, (count) => count + 1)) > 0;
+        });
+        const secondSelection: ModelSelection = {
+          ...CLAUDE_MODEL_SELECTION,
+          instanceId: ProviderInstanceId.make("claude-second-account"),
+        };
+        const adapters = [
+          makeTestAdapter({
+            instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            responseByRunOrdinal: { 1: "First account complete" },
+            capturedTurns,
+            backgroundWorkProbe,
+          }),
+          makeTestAdapter({
+            instanceId: secondSelection.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: secondSelection,
+            responseByRunOrdinal: { 2: "Second account complete" },
+            capturedTurns,
+          }),
+        ];
+        const layerRegistry = Layer.succeed(
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+            get: (instanceId) => {
+              const adapter = adapters.find((candidate) => candidate.instanceId === instanceId);
+              return adapter === undefined
+                ? Effect.fail(
+                    new ProviderAdapterRegistry.ProviderAdapterRegistryLookupError({ instanceId }),
+                  )
+                : Effect.succeed(adapter);
+            },
+            list: () => Effect.succeed(adapters.map((adapter) => adapter.instanceId)),
+            getMetadata: () =>
+              Effect.succeed({
+                driver: CLAUDE_DRIVER,
+                continuationKey: "claude:shared-native-account-history",
+                enabled: true,
+                capabilities: ClaudeProviderCapabilitiesV2,
+              }),
+          }),
+        );
+        const threadId = ThreadId.make("thread:named-busy-refusal");
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const send = (ordinal: number, modelSelection: ModelSelection) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:named-busy-refusal:${ordinal}`),
+              threadId,
+              messageId: MessageId.make(`message:named-busy-refusal:${ordinal}`),
+              text: `Prompt ${ordinal}`,
+              attachments: [],
+              modelSelection,
+              dispatchMode: { type: "start_immediately" },
+            });
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:named-busy-refusal:create"),
+            threadId,
+            projectId: ProjectId.make("project:named-busy-refusal"),
+            title: "Named busy refusal",
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+          });
+          yield* send(1, CLAUDE_MODEL_SELECTION);
+          yield* worker.drain();
+          yield* waitForIdle(threadId);
+
+          yield* Ref.set(armed, true);
+          // Never bounced: the send is accepted and waits queued, written exactly once.
+          yield* send(2, secondSelection);
+          assert.isAtLeast(yield* Ref.get(probes), 2);
+          yield* worker.drain();
+          const waiting = yield* orchestrator.getThreadProjection(threadId);
+          assert.deepEqual(
+            waiting.runs.map((run) => run.status),
+            ["completed", "queued"],
+          );
+          assert.lengthOf(
+            waiting.messages.filter((message) => message.id === "message:named-busy-refusal:2"),
+            1,
+          );
+          // The work ends; the background-work check starts the queued send.
+          yield* Ref.set(armed, false);
+          const done = yield* waitForIdle(threadId);
+          assert.deepEqual(
+            done.runs.map((run) => run.status),
+            ["completed", "completed"],
+          );
+          assert.strictEqual(done.runs[1]?.providerInstanceId, secondSelection.instanceId);
+          assert.lengthOf(
+            (yield* Ref.get(capturedTurns)).filter((turn) => turn.text.endsWith("Prompt 2")),
+            1,
+          );
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerWithRegistry(
+              {
+                name: "named-busy-refusal",
                 runtimePolicyOverride: {
                   cwd,
                   approvalPolicy: "never",

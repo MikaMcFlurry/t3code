@@ -213,6 +213,10 @@ export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDi
   }
 }
 
+// Background work started after a switch's wait check: the send queues instead of being refused.
+// Internal to dispatchMessage, which redoes the dispatch queued and never lets it escape.
+class SwitchWaitRetry extends Schema.TaggedError<SwitchWaitRetry>()("SwitchWaitRetry", {}) {}
+
 export class OrchestratorThreadAlreadyExistsError extends Schema.TaggedError<OrchestratorThreadAlreadyExistsError>()(
   "OrchestratorThreadAlreadyExistsError",
   { commandId: CommandId, threadId: ThreadId },
@@ -6004,6 +6008,31 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) {
+    const eventsBefore = yield* Ref.get(events);
+    const effectsBefore = yield* Ref.get(effects);
+    return yield* dispatchMessageAttempt(command, events, effects, false).pipe(
+      Effect.catchTags({
+        SwitchWaitRetry: () =>
+          // Nothing of the first attempt is kept, so the send is written exactly once.
+          Ref.set(events, eventsBefore).pipe(
+            Effect.andThen(Ref.set(effects, effectsBefore)),
+            Effect.andThen(
+              dispatchMessageAttempt(command, events, effects, true).pipe(
+                Effect.catchTags({
+                  SwitchWaitRetry: () => Effect.die("A queued switch wait cannot wait again"),
+                }),
+              ),
+            ),
+          ),
+      }),
+    );
+  });
+  const dispatchMessageAttempt = Effect.fn("Orchestrator.dispatchMessageAttempt")(function* (
+    command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+    waitForBackgroundWork: boolean,
+  ) {
     let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
     if (command.manualContinuationOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
@@ -6555,7 +6584,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       worktreeMissingRun === undefined &&
       latestRun != null &&
       startsOrQueuesRun &&
-      ((command.createdBy === "user" && backgroundWorkWaits.has(command.threadId)) ||
+      (waitForBackgroundWork ||
+        (command.createdBy === "user" && backgroundWorkWaits.has(command.threadId)) ||
         (!freshContext &&
           (yield* switchWaitsForBackgroundWork({
             projection,
@@ -7004,7 +7034,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ]);
     // As when a queued start runs: a hand-off or a fresh session leaves a busy session up
     // instead of ending its background work. An account switch that would resume its native
-    // thread was held above, so one that still reaches here is refused.
+    // thread waits queued; work that started after the check above redoes the dispatch so.
     const busySessionIds = new Set<ProviderSessionId>();
     for (const session of releasableSessions) {
       if (yield* sessionHasBackgroundWork(session, projection.providerThreads)) {
@@ -7016,6 +7046,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       !freshContext &&
       providerSwitchPlan?.transition.type === "restart_and_resume"
     ) {
+      if (!waitForBackgroundWork && startsOrQueuesRun && activeRun === undefined) {
+        return yield* new SwitchWaitRetry();
+      }
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
         commandType: command.type,
