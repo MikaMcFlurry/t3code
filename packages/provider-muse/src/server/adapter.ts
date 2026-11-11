@@ -370,8 +370,13 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
       const childrenByItemId = new Map<string, ChildContext>();
       const agentTitles = new Map<string, string>();
       const finishedBackground: Array<BackgroundWorkReport> = [];
+      // `done`: Muse completed the wake's run; its output only waits for a continuation.
       let wake:
-        | { readonly nativeId: string; readonly events: Array<[string, unknown]> }
+        | {
+            readonly nativeId: string;
+            readonly events: Array<[string, unknown]>;
+            done: boolean;
+          }
         | undefined;
       const emit = (event: ProviderAdapter.ProviderAdapterV2Event) =>
         Queue.offer(events, event).pipe(Effect.asVoid);
@@ -1441,7 +1446,7 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
         ) {
           if (active && !active.compact) active.joined.add(params.turnId);
           else if (!active && !wake) {
-            const held = { nativeId: params.turnId, events: [] };
+            const held = { nativeId: params.turnId, events: [], done: false };
             wake = held;
             const notification = backgroundWorkNotification(finishedBackground.splice(0));
             if (thread?.appThreadId && options.continuationRequests)
@@ -1469,6 +1474,7 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
           const turnId = typeof params.turnId === "string" ? params.turnId : itemEvent?.turnId;
           if (turnId === wake.nativeId) {
             wake.events.push([method, data]);
+            if (method === "turn/completed") wake.done = true;
             return;
           }
         }
@@ -2273,9 +2279,11 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
         providerSession: session,
         events: Stream.fromQueue(events),
         backgroundTasksEndWithProcess: true,
-        // A running workflow or a held Muse turn keeps the host: idle release must wait.
+        // A running workflow or a held Muse turn still running keeps the host: idle
+        // release must wait. A completed held wake is finished output; a detach ends
+        // nothing, it only loses the projection of that output (like Claude/Pi).
         hasPendingBackgroundWork: Effect.sync(
-          () => observedChildren.size > 0 || wake !== undefined,
+          () => observedChildren.size > 0 || (wake !== undefined && !wake.done),
         ),
         ensureThread: (args) =>
           register(args).pipe(
@@ -2362,7 +2370,7 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
               !turn &&
               args.requestRuntimeRestart === true &&
               observedChildren.size === 0 &&
-              wake === undefined
+              (wake === undefined || wake.done)
             )
               return;
             if (

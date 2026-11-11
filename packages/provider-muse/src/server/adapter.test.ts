@@ -1689,6 +1689,39 @@ describe("MuseAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("stops counting a held wake as running work once Muse completes it", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeMuse();
+      // No continuation route: the wake is held but never offered.
+      const drainNotifications = Effect.forEach(Array.from({ length: 20 }), () => Effect.yieldNow, {
+        discard: true,
+      });
+      const harness = yield* makeHarness(fake);
+      const previous = yield* startConversation(harness, fake);
+      yield* fake.emit("turn/completed", { turnId: previous.nativeId, terminal: "completed" });
+      yield* harness.takeEvent("turn.terminal");
+      assert.isFalse(yield* harness.runtime.hasPendingBackgroundWork!);
+      yield* fake.emit("turn/started", { turnId: "background-wake" });
+      yield* drainNotifications;
+      assert.isTrue(
+        yield* harness.runtime.hasPendingBackgroundWork!,
+        "a wake turn Muse still runs is running work",
+      );
+      yield* fake.emit("turn/completed", { turnId: "background-wake", terminal: "completed" });
+      yield* drainNotifications;
+      assert.isFalse(
+        yield* harness.runtime.hasPendingBackgroundWork!,
+        "a completed held wake still counts as running work",
+      );
+      // Releasing the idle session acknowledges, since nothing runs any more.
+      yield* harness.runtime.interruptTurn({
+        providerThread: harness.providerThread,
+        providerTurnId: previous.providerTurn.id,
+        requestRuntimeRestart: true,
+      });
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("does not acknowledge Stop on an ended turn while a background subagent runs", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakeMuse();
@@ -1741,7 +1774,7 @@ describe("MuseAdapterV2", () => {
       yield* fake.emit("turn/completed", { turnId: previous.nativeId, terminal: "completed" });
       yield* harness.takeEvent("turn.terminal");
       yield* fake.emit("turn/started", { turnId: "background-wake" });
-      yield* Deferred.await(offered);
+      const continuation = yield* Deferred.await(offered);
       yield* fake.emit("turn/completed", { turnId: "background-wake", terminal: "completed" });
       yield* harness.runtime.compactThread!(yield* turnInput(harness.providerThread, 2));
       yield* fake.emit("item/completed", {
@@ -1757,7 +1790,11 @@ describe("MuseAdapterV2", () => {
       const terminal = yield* harness.takeEvent("turn.terminal");
       assert.strictEqual(terminal.runOrdinal, 2);
       assert.strictEqual(terminal.status, "completed");
-      assert.isTrue(yield* harness.runtime.hasPendingBackgroundWork!);
+      // The completed wake stays held for its continuation, but it is finished
+      // output, not work a detach would end.
+      assert.isFalse(yield* harness.runtime.hasPendingBackgroundWork!);
+      const dispatched = yield* continuation.dispatchIfCurrent!(Effect.void);
+      assert.isTrue(Option.isSome(dispatched), "compaction keeps the wake for its continuation");
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
