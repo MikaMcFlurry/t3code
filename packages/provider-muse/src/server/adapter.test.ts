@@ -1689,6 +1689,126 @@ describe("MuseAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  // A held wake's still-running child keeps the host busy, and Stop
+  // ends a running held wake or child with a confirmed host close.
+  const makeWakeHarness = Effect.fnUntraced(function* (
+    replacement?: Effect.Success<ReturnType<typeof makeFakeMuse>>,
+  ) {
+    const fake = yield* makeFakeMuse();
+    const barrier = yield* Queue.unbounded<void>();
+    const harness = yield* makeHarness(
+      fake,
+      INSTANCE_ID,
+      undefined,
+      replacement,
+      undefined,
+      runtimePolicy,
+      {
+        nativeEventLogger: {
+          filePath: "/unused",
+          close: () => Effect.void,
+          write: (event) =>
+            (event as { method: string }).method === "review/barrier"
+              ? Queue.offer(barrier, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+        },
+      },
+    );
+    // Muse handles notifications in order; the barrier returns once all before it ran.
+    const drain = Effect.gen(function* () {
+      yield* fake.emit("review/barrier", {});
+      yield* Queue.take(barrier);
+    });
+    const previous = yield* startConversation(harness, fake);
+    yield* fake.emit("turn/completed", { turnId: previous.nativeId, terminal: "completed" });
+    yield* harness.takeEvent("turn.terminal");
+    yield* fake.emit("turn/started", { turnId: "review-wake" });
+    yield* drain;
+    assert.isTrue(yield* harness.runtime.hasPendingBackgroundWork!);
+    return { fake, harness, drain, previous };
+  });
+  const wakeChild = (kind: "subagent" | "workflow", status: string, revision: number) => ({
+    turnId: "review-wake",
+    item:
+      kind === "subagent"
+        ? {
+            itemId: "review-child",
+            kind,
+            revision,
+            status,
+            turnId: "review-wake",
+            subagentId: "review-subagent",
+            controlStatus: status === "inProgress" ? "running" : "completed",
+            childSessionId: "review-child-session",
+            objective: "Keep running after the wake",
+          }
+        : {
+            itemId: "review-child",
+            kind,
+            revision,
+            status,
+            turnId: "review-wake",
+            entryId: "review-workflow",
+          },
+  });
+
+  it.effect.each(["subagent", "workflow"] as const)(
+    "keeps a completed held wake busy while its %s child still runs",
+    (kind) =>
+      Effect.gen(function* () {
+        const { fake, harness, drain } = yield* makeWakeHarness();
+        yield* fake.emit("item/started", wakeChild(kind, "inProgress", 1));
+        yield* fake.emit("turn/completed", { turnId: "review-wake", terminal: "completed" });
+        yield* drain;
+        assert.isTrue(
+          yield* harness.runtime.hasPendingBackgroundWork!,
+          "completed held wake must keep its still-running native child alive",
+        );
+        // The child ending after its root releases the session.
+        yield* fake.emit("item/completed", wakeChild(kind, "completed", 2));
+        yield* drain;
+        assert.isFalse(yield* harness.runtime.hasPendingBackgroundWork!);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect.each(["running wake", "child of a completed wake"] as const)(
+    "Stop ends an idle session's %s with a confirmed host close and relaunches after",
+    (scenario) =>
+      Effect.gen(function* () {
+        const recovery = yield* makeFakeMuse("replacement");
+        const { fake, harness, drain, previous } = yield* makeWakeHarness(recovery);
+        if (scenario === "child of a completed wake") {
+          yield* fake.emit("item/started", wakeChild("subagent", "inProgress", 1));
+          yield* fake.emit("turn/completed", { turnId: "review-wake", terminal: "completed" });
+          yield* drain;
+          assert.isTrue(yield* harness.runtime.hasPendingBackgroundWork!);
+        }
+        const result = yield* harness.runtime
+          .interruptTurn({
+            providerThread: harness.providerThread,
+            providerTurnId: previous.providerTurn.id,
+            requestRuntimeRestart: true,
+          })
+          .pipe(Effect.exit);
+        assert.strictEqual(
+          result._tag,
+          "Success",
+          "Stop cannot end an idle session's running wake",
+        );
+        assert.strictEqual(fake.closeCount(), 1, "Stop must close the host that runs the wake");
+        assert.isFalse(yield* harness.runtime.hasPendingBackgroundWork!);
+        const resumed = yield* harness.runtime.resumeThread({
+          providerThread: harness.providerThread,
+          threadId: THREAD_ID,
+          modelSelection: modelSelection(),
+          runtimePolicy,
+        });
+        const input = yield* turnInput(resumed);
+        yield* harness.runtime.startTurn(input);
+        assert.isTrue(recovery.calls.some((call) => call.method === "turn/start"));
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("stops counting a held wake as running work once Muse completes it", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakeMuse();
@@ -1722,7 +1842,7 @@ describe("MuseAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
-  it.effect("does not acknowledge Stop on an ended turn while a background subagent runs", () =>
+  it.effect("Stop on an ended turn ends a background subagent with a confirmed host close", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakeMuse();
       const harness = yield* makeHarness(fake);
@@ -1751,8 +1871,9 @@ describe("MuseAdapterV2", () => {
           requestRuntimeRestart: true,
         })
         .pipe(Effect.exit);
-      assert.strictEqual(stopped._tag, "Failure");
-      assert.isTrue(yield* harness.runtime.hasPendingBackgroundWork!);
+      assert.strictEqual(stopped._tag, "Success");
+      assert.strictEqual(fake.closeCount(), 1);
+      assert.isFalse(yield* harness.runtime.hasPendingBackgroundWork!);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
@@ -1851,7 +1972,7 @@ describe("MuseAdapterV2", () => {
       yield* fake.emit("turn/completed", { turnId: previous.nativeId, terminal: "completed" });
       yield* harness.takeEvent("turn.terminal");
       yield* fake.emit("turn/started", { turnId: "background-wake" });
-      yield* Deferred.await(offered);
+      const continuation = yield* Deferred.await(offered);
       fake.queueResponse("session/compact", new Error("command rejected: run_active"));
       yield* harness.runtime.compactThread!(yield* turnInput(harness.providerThread, 2));
       const terminal = yield* harness.takeEvent("turn.terminal");
@@ -1864,7 +1985,11 @@ describe("MuseAdapterV2", () => {
           requestRuntimeRestart: true,
         })
         .pipe(Effect.exit);
-      assert.strictEqual(stopped._tag, "Failure");
+      // Stop ends the still-running wake with its host; its continuation no longer applies.
+      assert.strictEqual(stopped._tag, "Success");
+      assert.strictEqual(fake.closeCount(), 1);
+      assert.isFalse(yield* harness.runtime.hasPendingBackgroundWork!);
+      assert.isTrue(Option.isNone(yield* continuation.dispatchIfCurrent!(Effect.void)));
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
