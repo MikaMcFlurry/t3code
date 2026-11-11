@@ -48,6 +48,16 @@ void TERMINAL_RUN_STATUSES;
 
 export type PendingBackgroundWorkTask = OrchestrationV2PendingBackgroundTask;
 
+/**
+ * Every refusal of a send or switch that would end a session's background work says this,
+ * so a client can offer Stop next to it even when no turn runs.
+ */
+export const BACKGROUND_WORK_REFUSAL_PHRASE = "is still running background agents or commands";
+
+export function isBackgroundWorkRefusal(message: string): boolean {
+  return message.includes(BACKGROUND_WORK_REFUSAL_PHRASE);
+}
+
 export function turnItemUpdateCanEndBackgroundWork(
   item: Pick<OrchestrationV2TurnItem, "type" | "status">,
 ): boolean {
