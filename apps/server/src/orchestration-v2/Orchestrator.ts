@@ -1365,21 +1365,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   // Work only the live adapter sees (a native subagent, a held wake) never reaches the
   // projection. Stop still has to reach that session, or an idle thread that a switch
-  // refuses for it has no way out.
-  const runHasLiveBackgroundWork = Effect.fn("Orchestrator.runHasLiveBackgroundWork")(function* (
-    run: OrchestrationV2Run | undefined,
-    projection: Pick<OrchestrationV2ThreadProjection, "providerThreads" | "providerSessions">,
-  ) {
-    const providerThread = projection.providerThreads.find(
-      (candidate) => candidate.id === run?.providerThreadId,
-    );
-    const session = projection.providerSessions.find(
-      (candidate) => candidate.id === providerThread?.providerSessionId,
-    );
-    if (session === undefined || session.status === "stopped" || session.status === "error")
-      return false;
-    return yield* sessionHasBackgroundWork(session, projection.providerThreads);
-  });
+  // refuses for it has no way out. A hand-off keeps a busy older session connected, so
+  // every provider thread of the app thread is probed, not only the latest run's.
+  const liveBackgroundProviderThreadIds = Effect.fn("Orchestrator.liveBackgroundProviderThreadIds")(
+    function* (
+      projection: Pick<OrchestrationV2ThreadProjection, "providerThreads" | "providerSessions">,
+    ) {
+      const busy: Array<OrchestrationV2ProviderThread["id"]> = [];
+      for (const providerThread of projection.providerThreads) {
+        const session = projection.providerSessions.find(
+          (candidate) => candidate.id === providerThread.providerSessionId,
+        );
+        if (session === undefined || session.status === "stopped" || session.status === "error")
+          continue;
+        // Only this provider thread: a shared runtime's other app threads are not Stop's target.
+        if (yield* sessionHasBackgroundWork(session, [providerThread]))
+          busy.push(providerThread.id);
+      }
+      return busy;
+    },
+  );
 
   // Names what the busy sessions still run, for a refusal's detail. Null when no adapter says.
   const describeSessionsBackgroundWork = Effect.fn("Orchestrator.describeSessionsBackgroundWork")(
@@ -12113,6 +12118,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         : projection.providerThreads.find((candidate) => candidate.id === run?.providerThreadId);
     const isLatestRun =
       run?.id === projection.runs.findLast((candidate) => candidate.status !== "queued")?.id;
+    const liveBackgroundProviderThreads = isLatestRun
+      ? yield* liveBackgroundProviderThreadIds(projection)
+      : [];
     const hasBackgroundWork =
       isLatestRun &&
       (derivePendingBackgroundWork({
@@ -12122,9 +12130,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         activeProviderThreadId: projection.thread.activeProviderThreadId,
         runs: projection.runs,
       }).length > 0 ||
-        (run !== undefined &&
-          !isActiveRun(run) &&
-          (yield* runHasLiveBackgroundWork(run, projection))));
+        (run !== undefined && !isActiveRun(run) && liveBackgroundProviderThreads.length > 0));
     // A failed start has no provider turn. Background work still belongs
     // to the provider thread, so Stop reaches its latest accepted turn.
     const providerTurn =
@@ -12224,6 +12230,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const latest = latestTurnByProviderThread.get(turn.providerThreadId);
         if (latest === undefined || runOrdinal > latest.runOrdinal) {
           latestTurnByProviderThread.set(turn.providerThreadId, { turn, runOrdinal });
+        }
+      }
+      // Work only an older kept session's adapter sees has no item; its last accepted turn
+      // is the route a restart interrupt ends that session's work through.
+      for (const providerThreadId of liveBackgroundProviderThreads) {
+        if (
+          providerThreadId === providerThread?.id ||
+          latestTurnByProviderThread.has(providerThreadId)
+        )
+          continue;
+        const turn = projection.providerTurns.findLast(
+          (candidate) => candidate.providerThreadId === providerThreadId,
+        );
+        if (turn !== undefined) {
+          latestTurnByProviderThread.set(providerThreadId, { turn, runOrdinal: -1 });
         }
       }
       for (const { turn } of latestTurnByProviderThread.values()) {
@@ -12737,7 +12758,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         turnItems: projection.turnItems,
         activeProviderThreadId: projection.thread.activeProviderThreadId,
         runs: projection.runs,
-      }).length > 0 || (yield* runHasLiveBackgroundWork(latestRun, projection))
+      }).length > 0 || (yield* liveBackgroundProviderThreadIds(projection)).length > 0
         ? latestRun
         : undefined);
     if (target !== undefined) {
