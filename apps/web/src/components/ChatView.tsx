@@ -1805,6 +1805,23 @@ export default function ChatView(props: ChatViewProps) {
     }
   };
   const onInterruptStable = useStableCallback(onInterrupt);
+  // A refused send's toast outlives navigation, so its Stop names the refused thread.
+  const onStopBackgroundWork = async (threadRef: ScopedThreadRef) => {
+    if (!readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope)) return;
+    const result = await interruptThreadTurn({
+      environmentId: threadRef.environmentId,
+      input: { threadId: threadRef.threadId },
+    });
+    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      const error = squashAtomCommandFailure(result);
+      toastManager.add({
+        type: "error",
+        title: "Could not stop background work",
+        description: error instanceof Error ? error.message : "Failed to stop the thread.",
+        data: { threadRef },
+      });
+    }
+  };
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- window listener for the desktop snapshot event that focuses the composer
   useEffect(
     () => (embedded ? undefined : subscribeSnapShotComposerFocus(focusComposerStable)),
@@ -2922,7 +2939,7 @@ export default function ChatView(props: ChatViewProps) {
     },
     setFeedbackSubmissionsByThreadKey,
     setThreadError,
-    onStopBackgroundWork: onInterruptStable,
+    onStopBackgroundWork,
     setKeepFullHistory,
     anchorNewTurn,
     acknowledgeActiveThreadWoke,
