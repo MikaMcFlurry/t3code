@@ -42,8 +42,6 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
-import { userFacingDispatchErrorMessage } from "../UserFacingErrors.ts";
-import { isBackgroundWorkRefusal } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
@@ -3416,7 +3414,7 @@ describe("orchestration v2 provider switching", () => {
   );
 
   // regression: #32296 a refusal named nothing, so an idle-looking thread could not be unblocked
-  it.live("names what the replaced session still runs when it refuses an account switch", () =>
+  it.live("queues an account switch once when background work starts during its dispatch", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const cwd = yield* checkpointWorkspace("named-busy-refusal");
@@ -3512,19 +3510,31 @@ describe("orchestration v2 provider switching", () => {
           yield* waitForIdle(threadId);
 
           yield* Ref.set(armed, true);
-          const refused = yield* send(2, secondSelection).pipe(Effect.flip);
-          assert.strictEqual(yield* Ref.get(probes), 2);
-          assert.include(String(refused.cause), "still running background agents or commands");
-          assert.include(
-            String(refused.cause),
-            'Still running: background task "npm test", wake turn.',
+          // Never bounced: the send is accepted and waits queued, written exactly once.
+          yield* send(2, secondSelection);
+          assert.isAtLeast(yield* Ref.get(probes), 2);
+          yield* worker.drain();
+          const waiting = yield* orchestrator.getThreadProjection(threadId);
+          assert.deepEqual(
+            waiting.runs.map((run) => run.status),
+            ["completed", "queued"],
           );
-          assert.include(
-            userFacingDispatchErrorMessage(refused) ?? "",
-            'Still running: background task "npm test", wake turn.',
+          assert.lengthOf(
+            waiting.messages.filter((message) => message.id === "message:named-busy-refusal:2"),
+            1,
           );
-          // Clients key the Stop offer next to the refusal on this phrase.
-          assert.isTrue(isBackgroundWorkRefusal(userFacingDispatchErrorMessage(refused) ?? ""));
+          // The work ends; the background-work check starts the queued send.
+          yield* Ref.set(armed, false);
+          const done = yield* waitForIdle(threadId);
+          assert.deepEqual(
+            done.runs.map((run) => run.status),
+            ["completed", "completed"],
+          );
+          assert.strictEqual(done.runs[1]?.providerInstanceId, secondSelection.instanceId);
+          assert.lengthOf(
+            (yield* Ref.get(capturedTurns)).filter((turn) => turn.text.endsWith("Prompt 2")),
+            1,
+          );
         }).pipe(
           Effect.provide(
             ProviderReplayHarness.layerWithRegistry(
