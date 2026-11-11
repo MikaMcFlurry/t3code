@@ -7,6 +7,7 @@ import { threadContextRecord } from "@t3tools/shared/composerContextReferences";
 import {
   approvalRedirectNotice,
   composerSendRefusal,
+  composerSendRefusalToast,
   loadBalancingSendWarning,
   multipleModelSendBlock,
   referencedThreadContexts,
@@ -148,5 +149,54 @@ describe("composerSendRefusal", () => {
       description: "Thread is archived.",
       offersBackgroundStop: false,
     });
+  });
+});
+
+describe("composerSendRefusalToast", () => {
+  const busy =
+    "Claude is still running background agents or commands, and this model or setting change would end them.";
+  const click = (toast: ReturnType<typeof composerSendRefusalToast>) =>
+    (toast.actionProps?.onClick as (() => void) | undefined)?.();
+
+  it("stops the refused thread even after the user moved to another thread", () => {
+    const refused = scopeThreadRef(local, ThreadId.make("thread-a"));
+    // The thread open at click time, as a route-reading Stop would see it.
+    let open = refused;
+    const stopped: Array<unknown> = [];
+    const toast = composerSendRefusalToast({
+      message: busy,
+      threadRef: refused,
+      isServerThread: true,
+      onStopBackgroundWork: (threadRef) => stopped.push(threadRef ?? open),
+    });
+    open = scopeThreadRef(local, ThreadId.make("thread-b"));
+    click(toast);
+    expect(stopped).toEqual([refused]);
+    expect(toast.data?.threadRef).toEqual(refused);
+  });
+
+  it("keeps the refused thread's environment when another environment has the same thread id", () => {
+    const refused = scopeThreadRef(remote, ThreadId.make("same"));
+    const stopped: Array<unknown> = [];
+    const toast = composerSendRefusalToast({
+      message: busy,
+      threadRef: refused,
+      isServerThread: true,
+      onStopBackgroundWork: (threadRef) => stopped.push(threadRef),
+    });
+    click(toast);
+    expect(stopped).toEqual([scopeThreadRef(remote, ThreadId.make("same"))]);
+  });
+
+  it("offers no Stop for other refusals", () => {
+    const toast = composerSendRefusalToast({
+      message: "Thread is archived.",
+      threadRef: scopeThreadRef(local, ThreadId.make("thread-a")),
+      isServerThread: true,
+      onStopBackgroundWork: () => {
+        throw new Error("no Stop offered");
+      },
+    });
+    expect(toast.actionProps).toBeUndefined();
   });
 });
