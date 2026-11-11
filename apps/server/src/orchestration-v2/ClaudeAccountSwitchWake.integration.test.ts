@@ -163,9 +163,14 @@ const makeAccount = Effect.fn("makeAccount")(function* (input: {
   return { adapter, processes };
 });
 
-it.effect.each(["sent after", "queued behind"] as const)(
-  "keeps a Claude session through an empty roster until its wake replies, for a switch %s the turn",
-  (variant) =>
+it.effect.each([
+  { variant: "sent after", ending: "wake" },
+  { variant: "queued behind", ending: "wake" },
+  { variant: "sent after", ending: "stop" },
+  { variant: "queued behind", ending: "stop" },
+] as const)(
+  "keeps a Claude session through an empty roster until $ending, for a switch $variant the turn",
+  ({ variant, ending }) =>
     Effect.scoped(
       Effect.gen(function* () {
         const cwd = yield* checkpointWorkspace("claude-account-switch-wake");
@@ -300,6 +305,33 @@ it.effect.each(["sent after", "queued behind"] as const)(
             )?.status,
             "ready",
           );
+
+          if (ending === "stop") {
+            // The notification never arrives. Stop must still release the first account,
+            // and resuming the held queue then runs the switch.
+            yield* orchestrator.dispatch({
+              type: "thread.stop",
+              commandId: CommandId.make("stop"),
+              threadId,
+            });
+            yield* worker.drain();
+            assert.deepEqual(closed, [firstAccount.instanceId], "Stop must end the owed wake");
+            const switched = yield* runStatus("send-2", "running");
+            yield* orchestrator.dispatch({
+              type: "queue.resume",
+              commandId: CommandId.make("resume"),
+              threadId,
+            });
+            yield* worker.drain();
+            yield* Fiber.join(switched);
+            const stopped = yield* orchestrator.getThreadProjection(threadId);
+            assert.equal(
+              stopped.runs.find((run) => run.userMessageId === "send-2")?.providerInstanceId,
+              secondAccount.instanceId,
+            );
+            assert.lengthOf(second.processes, 1);
+            return;
+          }
 
           // The notification and wake reply arrive on the still-open process.
           yield* Queue.offer(firstProcess, bashNotification);

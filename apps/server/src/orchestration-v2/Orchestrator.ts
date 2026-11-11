@@ -1324,6 +1324,29 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     return false;
   });
 
+  // Work only the live adapter sees (a native subagent, an owed wake) never reaches the
+  // projection. Stop still has to reach that session, or a switch queued behind it has no
+  // way out. A hand-off keeps a busy older session connected, so every provider thread of
+  // the app thread is probed, not only the latest run's.
+  const liveBackgroundProviderThreadIds = Effect.fn("Orchestrator.liveBackgroundProviderThreadIds")(
+    function* (
+      projection: Pick<OrchestrationV2ThreadProjection, "providerThreads" | "providerSessions">,
+    ) {
+      const busy: Array<OrchestrationV2ProviderThread["id"]> = [];
+      for (const providerThread of projection.providerThreads) {
+        const session = projection.providerSessions.find(
+          (candidate) => candidate.id === providerThread.providerSessionId,
+        );
+        if (session === undefined || session.status === "stopped" || session.status === "error")
+          continue;
+        // Only this provider thread: a shared runtime's other app threads are not Stop's target.
+        if (yield* sessionHasBackgroundWork(session, [providerThread]))
+          busy.push(providerThread.id);
+      }
+      return busy;
+    },
+  );
+
   // Runs in every command transaction; avoid reading thousands of finished leaf nodes.
   const readCommandProjection = (threadId: ThreadId) =>
     projectionStore
@@ -11815,6 +11838,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         "turnItems",
         "subagents",
         "runtimeRequests",
+        "providerSessions",
       ],
       // Thread-wide, like the Waiting strip: a settled thread's background
       // work can belong to an earlier run than the one Stop targets.
@@ -11838,15 +11862,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       run?.providerThreadId === null
         ? undefined
         : projection.providerThreads.find((candidate) => candidate.id === run?.providerThreadId);
+    const isLatestRun =
+      run?.id === projection.runs.findLast((candidate) => candidate.status !== "queued")?.id;
+    const liveBackgroundProviderThreads = isLatestRun
+      ? yield* liveBackgroundProviderThreadIds(projection)
+      : [];
     const hasBackgroundWork =
-      run?.id === projection.runs.findLast((candidate) => candidate.status !== "queued")?.id &&
-      derivePendingBackgroundWork({
+      isLatestRun &&
+      (derivePendingBackgroundWork({
         latestRun: run,
         providerThreads: projection.providerThreads,
         turnItems: projection.turnItems,
         activeProviderThreadId: projection.thread.activeProviderThreadId,
         runs: projection.runs,
-      }).length > 0;
+      }).length > 0 ||
+        (run !== undefined && !isActiveRun(run) && liveBackgroundProviderThreads.length > 0));
     // A failed start has no provider turn. Background work still belongs
     // to the provider thread, so Stop reaches its latest accepted turn.
     const providerTurn =
@@ -11946,6 +11976,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const latest = latestTurnByProviderThread.get(turn.providerThreadId);
         if (latest === undefined || runOrdinal > latest.runOrdinal) {
           latestTurnByProviderThread.set(turn.providerThreadId, { turn, runOrdinal });
+        }
+      }
+      // Work only an older kept session's adapter sees has no item; its last accepted turn
+      // is the route a restart interrupt ends that session's work through.
+      for (const providerThreadId of liveBackgroundProviderThreads) {
+        if (
+          providerThreadId === providerThread?.id ||
+          latestTurnByProviderThread.has(providerThreadId)
+        )
+          continue;
+        const turn = projection.providerTurns.findLast(
+          (candidate) => candidate.providerThreadId === providerThreadId,
+        );
+        if (turn !== undefined) {
+          latestTurnByProviderThread.set(providerThreadId, { turn, runOrdinal: -1 });
         }
       }
       for (const { turn } of latestTurnByProviderThread.values()) {
@@ -12425,10 +12470,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) {
     const projection = yield* projectionStore
-      .getThreadRecords(command.threadId, ["runs", "providerThreads", "turnItems", "subagents"], {
-        turnItemTypes: ["command_execution", "dynamic_tool", "subagent"],
-        turnItemStatuses: ["pending", "running", "waiting"],
-      })
+      .getThreadRecords(
+        command.threadId,
+        ["runs", "providerThreads", "turnItems", "subagents", "providerSessions"],
+        {
+          turnItemTypes: ["command_execution", "dynamic_tool", "subagent"],
+          turnItemStatuses: ["pending", "running", "waiting"],
+        },
+      )
       .pipe(
         Effect.mapError(
           (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
@@ -12455,7 +12504,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         turnItems: projection.turnItems,
         activeProviderThreadId: projection.thread.activeProviderThreadId,
         runs: projection.runs,
-      }).length > 0
+      }).length > 0 || (yield* liveBackgroundProviderThreadIds(projection)).length > 0
         ? latestRun
         : undefined);
     if (target !== undefined) {
