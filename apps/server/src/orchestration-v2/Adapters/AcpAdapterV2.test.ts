@@ -8741,6 +8741,113 @@ describe("AcpAdapterV2", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.live(
+    "stops counting a Grok-style background task as running work once the ACP process exits",
+    () =>
+      Effect.gen(function* () {
+        const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const path = yield* Path.Path;
+        const selfInvocation = yield* resolveSelfInvocation();
+        const mockAgentPath = yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        );
+        const instanceId = ProviderInstanceId.make("acp-test-exit-background-task");
+        const runtimeInputs: AcpAdapterV2RuntimeInput[] = [];
+        const capturedMutation: {
+          current:
+            | ((mutation: {
+                readonly sessionId: string;
+                readonly taskId: string;
+                readonly status: "running" | "completed" | "failed";
+              }) => Effect.Effect<void>)
+            | null;
+        } = { current: null };
+        const baseMakeRuntime = makeMockRuntime({ childProcessSpawner, mockAgentPath });
+        const adapter = yield* makeAcpAdapterV2({
+          instanceId,
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            // Grok's shape: post-settle continuation without ACP v2 agent work state.
+            enablePostSettleContinuation: true,
+            registerExtensions: (context) =>
+              Effect.sync(() => {
+                capturedMutation.current = context.applyBackgroundTaskMutation;
+              }),
+            makeRuntime: (runtimeInput) =>
+              Effect.sync(() => {
+                runtimeInputs.push(runtimeInput);
+              }).pipe(Effect.andThen(baseMakeRuntime(runtimeInput))),
+          },
+          selfInvocation,
+          continuationRequests: { offer: () => Effect.void },
+        });
+        const threadId = ThreadId.make("thread-acp-exit-background-task");
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const modelSelection = { instanceId, model: "default" } as const;
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("provider-session-acp-exit-background-task"),
+          modelSelection,
+          runtimePolicy,
+        });
+        if (runtime.hasPendingBackgroundWork === undefined) {
+          return yield* Effect.die(
+            "ACP runtime must expose hasPendingBackgroundWork when post-settle continuation is enabled.",
+          );
+        }
+        const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const terminal = yield* runtime.events.pipe(
+          Stream.filter((event) => event.type === "turn.terminal"),
+          Stream.runHead,
+          Effect.forkScoped,
+        );
+        yield* runtime.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+          }),
+        );
+        yield* Fiber.join(terminal);
+        const applyMutation = capturedMutation.current;
+        if (applyMutation === null) {
+          return yield* Effect.die("registerExtensions must capture applyBackgroundTaskMutation");
+        }
+        yield* applyMutation({
+          sessionId: "mock-session-1",
+          taskId: "task-outlives-turn",
+          status: "running",
+        });
+        assert.isTrue(
+          yield* hasPendingBackgroundWork,
+          "a background task of the live ACP process is running work",
+        );
+
+        yield* runtimeInputs[0]!.onTermination!(
+          new EffectAcpErrors.AcpTransportError({
+            detail: "Injected Grok process exit",
+            cause: "test",
+          }),
+        );
+        assert.isFalse(
+          yield* hasPendingBackgroundWork,
+          "a background task of an exited ACP process still counts as running work",
+        );
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
   it.effect(
     "does not pin hasPendingBackgroundWork when a late TaskOutput re-reports an in-turn-handled task",
     () =>
