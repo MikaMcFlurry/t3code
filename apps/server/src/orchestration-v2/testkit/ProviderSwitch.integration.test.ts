@@ -3692,6 +3692,147 @@ describe("orchestration v2 provider switching", () => {
     ),
   );
 
+  // A hand-off keeps a busy older session connected. Stop must reach its work, both after the
+  // newer run completed and while it still runs.
+  it.live.each(["after the newer run completed", "while the newer run runs"] as const)(
+    "Stop reaches an older kept session's background work %s",
+    (scenario) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const key = scenario === "while the newer run runs" ? "running" : "completed";
+          const cwd = yield* checkpointWorkspace(`stop-kept-session-${key}`);
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const busy = yield* Ref.make(false);
+          const interrupts = yield* Ref.make<
+            ReadonlyArray<ProviderAdapter.ProviderAdapterV2InterruptInput>
+          >([]);
+          const started = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const secondSelection: ModelSelection = {
+            ...CLAUDE_MODEL_SELECTION,
+            instanceId: ProviderInstanceId.make("claude-second-account"),
+          };
+          const adapters = [
+            makeTestAdapter({
+              instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+              driver: CLAUDE_DRIVER,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              responseByRunOrdinal: { 1: "First account complete" },
+              capturedTurns,
+              backgroundWork: busy,
+              // Like the Claude adapter: a restart interrupt ends what the session still runs.
+              onInterrupt: (interrupt) =>
+                Ref.update(interrupts, (current) => [...current, interrupt]).pipe(
+                  Effect.andThen(
+                    interrupt.requestRuntimeRestart === true ? Ref.set(busy, false) : Effect.void,
+                  ),
+                ),
+            }),
+            makeTestAdapter({
+              instanceId: secondSelection.instanceId,
+              driver: CLAUDE_DRIVER,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              modelSelection: secondSelection,
+              responseByRunOrdinal: { 2: "Second account complete" },
+              capturedTurns,
+              ...(key === "running"
+                ? { holdFirstTurn: started, releaseFirstTurn: release, holdRunOrdinal: 2 }
+                : {}),
+            }),
+          ];
+          const layerRegistry = ProviderAdapterRegistry.layerFromAdapters(adapters);
+          const threadId = ThreadId.make(`thread:stop-kept-session-${key}`);
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const send = (ordinal: number, modelSelection: ModelSelection) =>
+              orchestrator.dispatch({
+                type: "message.dispatch",
+                createdBy: "user",
+                creationSource: "web",
+                commandId: CommandId.make(`command:stop-kept-session-${key}:${ordinal}`),
+                threadId,
+                messageId: MessageId.make(`message:stop-kept-session-${key}:${ordinal}`),
+                text: `Prompt ${ordinal}`,
+                attachments: [],
+                modelSelection,
+                dispatchMode: { type: "start_immediately" },
+              });
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:stop-kept-session-${key}:create`),
+              threadId,
+              projectId: ProjectId.make(`project:stop-kept-session-${key}`),
+              title: "Stop kept session",
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: cwd,
+            });
+            yield* send(1, CLAUDE_MODEL_SELECTION);
+            yield* worker.drain();
+            const idle = yield* waitForIdle(threadId);
+            assert.strictEqual(idle.runs[0]?.status, "completed");
+
+            // The session keeps work the projection does not show (a native subagent, a wake).
+            yield* Ref.set(busy, true);
+            yield* send(2, secondSelection);
+            if (key === "running") {
+              yield* Deferred.await(started);
+              yield* worker.drain();
+            } else {
+              yield* worker.drain();
+              const handedOff = yield* waitForIdle(threadId);
+              assert.strictEqual(handedOff.runs.at(-1)?.status, "completed");
+            }
+            const kept = yield* orchestrator.getThreadProjection(threadId);
+            assert.isTrue(yield* Ref.get(busy));
+            assert.isTrue(
+              kept.providerSessions.some(
+                (session) =>
+                  session.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId &&
+                  session.status !== "stopped",
+              ),
+            );
+            const stopCommandId = CommandId.make(`command:stop-kept-session-${key}:stop`);
+            yield* orchestrator.dispatch({
+              type: "thread.stop",
+              commandId: stopCommandId,
+              threadId,
+            });
+            yield* Deferred.succeed(release, undefined);
+            yield* settleCommandEffects(stopCommandId);
+            const sent = yield* Ref.get(interrupts);
+            assert.lengthOf(sent, 1, "Stop never reached the older kept session");
+            assert.isTrue(sent[0]?.requestRuntimeRestart);
+            assert.isFalse(yield* Ref.get(busy));
+          }).pipe(
+            Effect.provide(
+              ProviderReplayHarness.layerWithRegistry(
+                {
+                  name: `stop-kept-session-${key}`,
+                  runtimePolicyOverride: {
+                    cwd,
+                    approvalPolicy: "never",
+                    sandboxPolicy: {
+                      type: "readOnly",
+                      access: { type: "fullAccess" },
+                      networkAccess: false,
+                    },
+                  },
+                },
+                layerRegistry,
+              ),
+            ),
+          );
+        }),
+      ),
+  );
+
   // regression: #32296 an idle Claude session's finished wake output held an account switch until
   // the idle release. The first account runs the real Claude adapter, so the probe is its own.
   it.live(
