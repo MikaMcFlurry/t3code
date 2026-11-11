@@ -2396,8 +2396,10 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
           function* (args) {
             const turn = active;
             if (!turn && args.requestRuntimeRestart === true) {
-              // Recovering an ended turn is done when Muse runs nothing more.
-              if (observedChildren.size === 0 && !wakeRunsWork()) return;
+              // Recovering an ended turn is done when Muse holds nothing more. Finished output a
+              // continuation still offers counts: an explicit Stop discards it rather than
+              // leaving it to hold the session.
+              if (observedChildren.size === 0 && !wakePending()) return;
               if (!validateThread(args.providerThread))
                 return yield* protocolError("This Muse thread is not attached to this host");
               // Background children and held wakes run in the host process

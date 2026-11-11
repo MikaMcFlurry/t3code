@@ -1693,6 +1693,7 @@ describe("MuseAdapterV2", () => {
   // ends a running held wake or child with a confirmed host close.
   const makeWakeHarness = Effect.fnUntraced(function* (
     replacement?: Effect.Success<ReturnType<typeof makeFakeMuse>>,
+    continuationRequests?: MuseAdapterV2Options["continuationRequests"],
   ) {
     const fake = yield* makeFakeMuse();
     const barrier = yield* Queue.unbounded<void>();
@@ -1712,6 +1713,7 @@ describe("MuseAdapterV2", () => {
               ? Queue.offer(barrier, undefined).pipe(Effect.asVoid)
               : Effect.void,
         },
+        ...(continuationRequests === undefined ? {} : { continuationRequests }),
       },
     );
     // Muse handles notifications in order; the barrier returns once all before it ran.
@@ -1870,24 +1872,10 @@ describe("MuseAdapterV2", () => {
 
   it.effect("stops counting a held wake as running work once Muse completes it", () =>
     Effect.gen(function* () {
-      const fake = yield* makeFakeMuse();
       // No continuation route: the wake is held but never offered.
-      const drainNotifications = Effect.forEach(Array.from({ length: 20 }), () => Effect.yieldNow, {
-        discard: true,
-      });
-      const harness = yield* makeHarness(fake);
-      const previous = yield* startConversation(harness, fake);
-      yield* fake.emit("turn/completed", { turnId: previous.nativeId, terminal: "completed" });
-      yield* harness.takeEvent("turn.terminal");
-      assert.isFalse(yield* harness.runtime.hasPendingBackgroundWork!);
-      yield* fake.emit("turn/started", { turnId: "background-wake" });
-      yield* drainNotifications;
-      assert.isTrue(
-        yield* harness.runtime.hasPendingBackgroundWork!,
-        "a wake turn Muse still runs is running work",
-      );
-      yield* fake.emit("turn/completed", { turnId: "background-wake", terminal: "completed" });
-      yield* drainNotifications;
+      const { fake, harness, drain, previous } = yield* makeWakeHarness();
+      yield* fake.emit("turn/completed", { turnId: "review-wake", terminal: "completed" });
+      yield* drain;
       assert.isFalse(
         yield* harness.runtime.hasPendingBackgroundWork!,
         "a completed held wake still counts as running work",
@@ -1898,6 +1886,35 @@ describe("MuseAdapterV2", () => {
         providerTurnId: previous.providerTurn.id,
         requestRuntimeRestart: true,
       });
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("Stop releases a finished wake whose output a continuation still offers", () =>
+    Effect.gen(function* () {
+      const offered =
+        yield* Deferred.make<ProviderContinuationRequests.ProviderContinuationRequest>();
+      const { fake, harness, drain, previous } = yield* makeWakeHarness(undefined, {
+        offer: (request) => Deferred.succeed(offered, request).pipe(Effect.asVoid),
+      });
+      const continuation = yield* Deferred.await(offered);
+      yield* fake.emit("turn/completed", { turnId: "review-wake", terminal: "completed" });
+      yield* drain;
+      // Undelivered output keeps the session busy until its continuation drains it...
+      assert.isTrue(yield* harness.runtime.hasPendingBackgroundWork!);
+      // ...but an explicit Stop discards it.
+      yield* harness.runtime.interruptTurn({
+        providerThread: harness.providerThread,
+        providerTurnId: previous.providerTurn.id,
+        requestRuntimeRestart: true,
+      });
+      assert.isFalse(
+        yield* harness.runtime.hasPendingBackgroundWork!,
+        "explicit Stop must release a finished offered wake",
+      );
+      assert.isTrue(
+        Option.isNone(yield* continuation.dispatchIfCurrent!(Effect.void)),
+        "a stopped wake's continuation cannot dispatch",
+      );
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
