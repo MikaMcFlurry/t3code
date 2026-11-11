@@ -2910,6 +2910,151 @@ describe("orchestration v2 provider switching", () => {
     ),
   );
 
+  it.live.each(["direct", "queued"] as const)(
+    "keeps a %s account switch when the retained session reports late activity",
+    (variant) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const queued = variant === "queued";
+          const cwd = yield* checkpointWorkspace(`late-old-session-${variant}`);
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          // The old account's buffered wake output keeps it busy after the switch.
+          const backgroundWork = yield* Ref.make(true);
+          const closedSessions = yield* Ref.make<ReadonlyArray<string>>([]);
+          const firstStarted = yield* Deferred.make<void>();
+          const releaseFirst = yield* Deferred.make<void>();
+          const secondSelection: ModelSelection = {
+            ...CLAUDE_MODEL_SELECTION,
+            instanceId: ProviderInstanceId.make("claude-second-account"),
+          };
+          const adapters = [
+            makeTestAdapter({
+              instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+              driver: CLAUDE_DRIVER,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              responseByRunOrdinal: {},
+              capturedTurns,
+              backgroundWork,
+              closedSessions,
+              ...(queued ? { holdFirstTurn: firstStarted, releaseFirstTurn: releaseFirst } : {}),
+            }),
+            makeTestAdapter({
+              instanceId: secondSelection.instanceId,
+              driver: CLAUDE_DRIVER,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              modelSelection: secondSelection,
+              responseByRunOrdinal: {},
+              capturedTurns,
+            }),
+          ];
+          const layerRegistry = ProviderAdapterRegistry.layerFromAdapters(adapters);
+          const threadId = ThreadId.make(`thread:late-old-session:${variant}`);
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const send = (ordinal: number, modelSelection: ModelSelection) =>
+              orchestrator.dispatch({
+                type: "message.dispatch",
+                createdBy: "user",
+                creationSource: "web",
+                commandId: CommandId.make(`command:late-old-session:${variant}:${ordinal}`),
+                threadId,
+                messageId: MessageId.make(`message:late-old-session:${variant}:${ordinal}`),
+                text: `Prompt ${ordinal}`,
+                attachments: [],
+                modelSelection,
+                dispatchMode: { type: queued ? "queue_after_active" : "start_immediately" },
+              });
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:late-old-session:${variant}:create`),
+              threadId,
+              projectId: ProjectId.make(`project:late-old-session:${variant}`),
+              title: "Late activity from a retained session",
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: cwd,
+            });
+            yield* send(1, CLAUDE_MODEL_SELECTION);
+            if (queued) {
+              yield* Deferred.await(firstStarted);
+              yield* send(2, secondSelection);
+              yield* Deferred.succeed(releaseFirst, undefined);
+            } else {
+              yield* worker.drain();
+              yield* waitForIdle(threadId);
+              yield* send(2, secondSelection);
+            }
+            yield* worker.drain();
+            const switched = yield* waitForIdle(threadId);
+            const oldThread = switched.providerThreads.find(
+              (thread) => thread.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId,
+            )!;
+            const newThreadId = switched.thread.activeProviderThreadId;
+            assert.notEqual(newThreadId, oldThread.id);
+
+            // The retained session runs a wake turn of its own after the switch.
+            const eventSink = yield* EventSink.EventSinkV2;
+            const now = yield* DateTime.now;
+            yield* eventSink.write({
+              events: [
+                {
+                  id: EventId.make(`event:late-old-session:${variant}:wake`),
+                  type: "provider-thread.updated",
+                  threadId,
+                  providerInstanceId: CLAUDE_MODEL_SELECTION.instanceId,
+                  occurredAt: now,
+                  payload: { ...oldThread, status: "active", updatedAt: now },
+                },
+              ],
+            });
+            const afterLate = yield* orchestrator.getThreadProjection(threadId);
+            assert.equal(afterLate.thread.activeProviderThreadId, newThreadId);
+
+            yield* send(3, secondSelection);
+            yield* worker.drain();
+            const projection = yield* waitForIdle(threadId);
+            assert.deepEqual(
+              projection.runs.map((run) => [run.providerInstanceId, run.status]),
+              [
+                [CLAUDE_MODEL_SELECTION.instanceId, "completed"],
+                [secondSelection.instanceId, "completed"],
+                [secondSelection.instanceId, "completed"],
+              ],
+            );
+            const turns = yield* Ref.get(capturedTurns);
+            assert.equal(turns[2]?.text, "Prompt 3");
+            assert.equal(turns[2]?.providerThreadId, turns[1]?.providerThreadId);
+            assert.lengthOf(projection.contextHandoffs, 1);
+            assert.deepEqual(yield* Ref.get(closedSessions), []);
+          }).pipe(
+            Effect.provide(
+              ProviderReplayHarness.layerWithRegistry(
+                {
+                  name: `late-old-session-${variant}`,
+                  runtimePolicyOverride: {
+                    cwd,
+                    approvalPolicy: "never",
+                    sandboxPolicy: {
+                      type: "readOnly",
+                      access: { type: "fullAccess" },
+                      networkAccess: false,
+                    },
+                  },
+                },
+                layerRegistry,
+              ),
+            ),
+          );
+        }),
+      ),
+  );
+
   it.live.each(["immediately", "behind a running turn"] as const)(
     "starts a fresh provider session %s and never hands earlier runs to a later provider",
     (variant) =>
