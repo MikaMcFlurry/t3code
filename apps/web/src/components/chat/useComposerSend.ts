@@ -104,6 +104,7 @@ import { environmentPresentations } from "../../state/presentation";
 import {
   approvalRedirectNotice,
   composerDraftContentChanged,
+  composerSendRefusal,
   loadBalancingSendWarning,
   multipleModelSendBlock,
   referencedThreadContexts,
@@ -275,6 +276,8 @@ interface ComposerSendInput {
     SetStateAction<Record<string, ReadonlyArray<CodexFeedbackSubmission>>>
   >;
   readonly setThreadError: ReturnType<typeof makeThreadErrorSetter>;
+  /** The composer's Stop: also ends background work of an idle thread's session. */
+  readonly onStopBackgroundWork: () => Promise<void>;
   readonly setKeepFullHistory: (threadKey: string, keep: boolean) => void;
   readonly anchorNewTurn: TimelineFollow["anchorNewTurn"];
   readonly acknowledgeActiveThreadWoke: () => void;
@@ -367,6 +370,7 @@ export function useComposerSend(input: ComposerSendInput) {
     optimisticBlobPreviews,
     setFeedbackSubmissionsByThreadKey,
     setThreadError,
+    onStopBackgroundWork,
     setKeepFullHistory,
     anchorNewTurn,
     acknowledgeActiveThreadWoke,
@@ -1717,10 +1721,8 @@ export function useComposerSend(input: ComposerSendInput) {
       }
       if (!isAtomCommandInterrupted(failure)) {
         const error = squashAtomCommandFailure(failure);
-        setThreadError(
-          threadIdForSend,
-          thrownErrorMessage(error, m) ?? m(msg("Failed to send message.")),
-        );
+        const errorMessage = thrownErrorMessage(error, m) ?? m(msg("Failed to send message."));
+        setThreadError(threadIdForSend, errorMessage);
         if (
           draftId &&
           (backgroundDraftOpened || currentRouteThreadKeyRef.current !== routeThreadKey)
@@ -1739,6 +1741,30 @@ export function useComposerSend(input: ComposerSendInput) {
                   void navigate({ to: "/draft/$draftId", params: { draftId } });
                 },
               },
+            }),
+          );
+        } else if (currentRouteThreadKeyRef.current === routeThreadKey) {
+          // The banner sits above the timeline, far from the restored draft, and stays
+          // hidden once dismissed: the refusal also shows where the user just pressed Send.
+          const refusal = composerSendRefusal(errorMessage);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: refusal.title,
+              description: refusal.description,
+              ...(isServerThread
+                ? { data: { threadRef: scopeThreadRef(environmentId, threadIdForSend) } }
+                : {}),
+              ...(refusal.offersBackgroundStop
+                ? {
+                    actionProps: {
+                      children: m(msg("Stop background work")),
+                      onClick: () => {
+                        void onStopBackgroundWork();
+                      },
+                    },
+                  }
+                : {}),
             }),
           );
         }
