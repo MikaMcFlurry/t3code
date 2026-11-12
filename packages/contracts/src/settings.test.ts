@@ -42,6 +42,7 @@ const decodeClientServerSettingsPatch = Schema.decodeUnknownSync(ClientServerSet
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodeServerSettingsPatch = Schema.encodeSync(ServerSettingsPatch);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+const encodeClaudeSettings = Schema.encodeSync(ClaudeSettings);
 
 it("drops theme defaults from a client's settings patch", () => {
   expect(
@@ -269,6 +270,15 @@ describe("custom model settings", () => {
       "bare-slug",
       { slug: "named", name: "Named", capabilities },
     ]);
+  });
+});
+
+describe("Claude shared project memory", () => {
+  it("stays off unless the instance turns it on, and round-trips", () => {
+    expect(decodeClaudeSettings({}).shareProjectMemory).toBe(false);
+    const on = decodeClaudeSettings({ shareProjectMemory: true });
+    expect(on.shareProjectMemory).toBe(true);
+    expect(decodeClaudeSettings(encodeClaudeSettings(on))).toEqual(on);
   });
 });
 
