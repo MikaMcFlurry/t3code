@@ -3021,6 +3021,138 @@ describe("orchestration v2 provider switching", () => {
     ),
   );
 
+  // regression: #32296 a run that only waits on delegated work must not block a provider switch
+  it.live.each(["thread.model-selection.set", "provider.switch"] as const)(
+    "%s during a waiting run waits only for the session's background work",
+    (type) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* checkpointWorkspace(`waiting-selection-${type}`);
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const backgroundWork = yield* Ref.make(true);
+          const closedSessions = yield* Ref.make<ReadonlyArray<string>>([]);
+          const secondSelection: ModelSelection = {
+            ...CLAUDE_MODEL_SELECTION,
+            instanceId: ProviderInstanceId.make("claude-second-account"),
+          };
+          const threadId = ThreadId.make(`thread:waiting-selection-${type}`);
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const eventSink = yield* EventSink.EventSinkV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:waiting-selection-${type}:create`),
+              threadId,
+              projectId: ProjectId.make(`project:waiting-selection-${type}`),
+              title: "Selection while delegated work runs",
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: cwd,
+            });
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:waiting-selection-${type}:send`),
+              threadId,
+              messageId: MessageId.make(`message:waiting-selection-${type}:send`),
+              text: "Delegate the work",
+              attachments: [],
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              dispatchMode: { type: "start_immediately" },
+            });
+            yield* worker.drain();
+            const idle = yield* waitForIdle(threadId);
+            const session = idle.providerSessions[0]!;
+            const run = idle.runs[0]!;
+            // The turn ended; the run waits only on the work it left in the session.
+            yield* eventSink.write({
+              events: [
+                {
+                  id: EventId.make(`event:waiting-selection-${type}:waiting`),
+                  type: "run.updated",
+                  threadId,
+                  runId: run.id,
+                  occurredAt: yield* DateTime.now,
+                  payload: { ...run, status: "waiting", completedAt: null },
+                },
+              ],
+            });
+            const select = (attempt: string) =>
+              orchestrator.dispatch({
+                type,
+                commandId: CommandId.make(`command:waiting-selection-${type}:${attempt}`),
+                threadId,
+                modelSelection: secondSelection,
+              });
+
+            // The session still runs the delegated work, so the background-work check refuses.
+            const refused = yield* select("busy").pipe(Effect.flip);
+            assert.instanceOf(refused, Orchestrator.OrchestratorDispatchError);
+            assert.include(String(refused.cause), "still running background agents or commands");
+            yield* worker.drain();
+            const kept = yield* orchestrator.getThreadProjection(threadId);
+            assert.deepEqual(kept.thread.modelSelection, CLAUDE_MODEL_SELECTION);
+            assert.deepEqual(yield* Ref.get(closedSessions), []);
+            assert.deepEqual(
+              kept.providerSessions.map((candidate) => [candidate.id, candidate.status]),
+              [[session.id, "ready"]],
+            );
+
+            // Once the session is idle, the waiting run no longer blocks the switch.
+            yield* Ref.set(backgroundWork, false);
+            yield* select("idle");
+            yield* worker.drain();
+            const switched = yield* orchestrator.getThreadProjection(threadId);
+            assert.deepEqual(switched.thread.modelSelection, secondSelection);
+            assert.equal(switched.runs[0]?.status, "waiting");
+          }).pipe(
+            Effect.provide(
+              ProviderReplayHarness.layerWithRegistry(
+                {
+                  name: `waiting-selection-${type}`,
+                  runtimePolicyOverride: {
+                    cwd,
+                    approvalPolicy: "never",
+                    sandboxPolicy: {
+                      type: "readOnly",
+                      access: { type: "fullAccess" },
+                      networkAccess: false,
+                    },
+                  },
+                },
+                ProviderAdapterRegistry.layerFromAdapters([
+                  makeTestAdapter({
+                    instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+                    driver: CLAUDE_DRIVER,
+                    capabilities: ClaudeProviderCapabilitiesV2,
+                    modelSelection: CLAUDE_MODEL_SELECTION,
+                    responseByRunOrdinal: { 1: "Delegated the work" },
+                    capturedTurns,
+                    backgroundWork,
+                    closedSessions,
+                  }),
+                  makeTestAdapter({
+                    instanceId: secondSelection.instanceId,
+                    driver: CLAUDE_DRIVER,
+                    capabilities: ClaudeProviderCapabilitiesV2,
+                    modelSelection: secondSelection,
+                    responseByRunOrdinal: {},
+                    capturedTurns,
+                  }),
+                ]),
+              ),
+            ),
+          );
+        }),
+      ),
+  );
+
   it.live.each(["immediately", "behind a running turn"] as const)(
     "starts a fresh provider session %s and never hands earlier runs to a later provider",
     (variant) =>

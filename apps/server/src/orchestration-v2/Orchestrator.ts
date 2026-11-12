@@ -4172,7 +4172,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               const projection = yield* loadProjectionForCommand(command, ["runs"], {
                 turnItemTypes: [],
               });
-              if (projection.runs.some(isActiveRun)) {
+              // A waiting run's turn has ended; it only waits on work it left. The
+              // background-work check below still protects a session that runs that work.
+              if (projection.runs.some((run) => run.status !== "waiting" && isActiveRun(run))) {
                 return yield* new OrchestratorProviderSelectionBusyError({
                   commandId: command.commandId,
                   threadId: command.threadId,

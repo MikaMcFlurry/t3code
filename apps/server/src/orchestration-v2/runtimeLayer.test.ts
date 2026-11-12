@@ -7711,6 +7711,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
 
   it.effect.each([
     { ...modelSelection, model: "gpt-5.5", options: [{ id: "reasoningEffort", value: "high" }] },
+    { instanceId: alternateInstanceId, model: "gpt-5.5" },
   ])(
     "starts a queued delegated completion on a selection set while it waited: %j",
     (newerSelection) =>
@@ -7758,8 +7759,10 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
               threadId,
               runId: active.id,
               occurredAt: now,
+              // The turn ended; the run waits only on the task it delegated.
               payload: {
                 ...active,
+                status: "waiting",
                 delegatedCompletion: {
                   disposition: "open",
                   nextGeneration: 2,
