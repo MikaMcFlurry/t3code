@@ -28,3 +28,6 @@ mika/pr-32109
 # A send that would end a session's background work waits or hands off instead of bouncing
 # (upstream issue #32296).
 mika/queue-busy-switch
+# Picking another provider while only subagents or background work keep a run open; kept busy
+# sessions are not closed (upstream #32296, gate from #22755).
+mika/selection-waiting-run
