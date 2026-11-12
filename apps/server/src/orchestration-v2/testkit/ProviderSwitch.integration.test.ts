@@ -3350,6 +3350,201 @@ describe("orchestration v2 provider switching", () => {
   );
 
   it.live(
+    "holds a run queued behind a waiting run when a later account switch kept the busy session",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* checkpointWorkspace("waiting-selection-queued");
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const backgroundWork = yield* Ref.make(true);
+          const closedSessions = yield* Ref.make<ReadonlyArray<string>>([]);
+          const secondSelection: ModelSelection = {
+            ...CLAUDE_MODEL_SELECTION,
+            instanceId: ProviderInstanceId.make("claude-second-account"),
+          };
+          const adapters = [
+            makeTestAdapter({
+              instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+              driver: CLAUDE_DRIVER,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              responseByRunOrdinal: { 1: "Delegated the work" },
+              capturedTurns,
+              backgroundWork,
+              closedSessions,
+            }),
+            makeTestAdapter({
+              instanceId: secondSelection.instanceId,
+              driver: CLAUDE_DRIVER,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              modelSelection: secondSelection,
+              responseByRunOrdinal: { 2: "Second account complete" },
+              capturedTurns,
+            }),
+          ];
+          const layerRegistry = Layer.succeed(
+            ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+            ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+              get: (instanceId) => {
+                const adapter = adapters.find((candidate) => candidate.instanceId === instanceId);
+                return adapter === undefined
+                  ? Effect.fail(
+                      new ProviderAdapterRegistry.ProviderAdapterRegistryLookupError({
+                        instanceId,
+                      }),
+                    )
+                  : Effect.succeed(adapter);
+              },
+              list: () => Effect.succeed(adapters.map((adapter) => adapter.instanceId)),
+              getMetadata: () =>
+                Effect.succeed({
+                  driver: CLAUDE_DRIVER,
+                  continuationKey: "claude:shared-native-account-history",
+                  enabled: true,
+                  capabilities: ClaudeProviderCapabilitiesV2,
+                }),
+            }),
+          );
+          const threadId = ThreadId.make("thread:waiting-selection:queued");
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const eventSink = yield* EventSink.EventSinkV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const send = (ordinal: number, modelSelection: ModelSelection) =>
+              orchestrator.dispatch({
+                type: "message.dispatch",
+                createdBy: "user",
+                creationSource: "web",
+                commandId: CommandId.make(`command:waiting-selection:queued:${ordinal}`),
+                threadId,
+                messageId: MessageId.make(`message:waiting-selection:queued:${ordinal}`),
+                text: `Prompt ${ordinal}`,
+                attachments: [],
+                modelSelection,
+                dispatchMode: { type: "start_immediately" },
+              });
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make("command:waiting-selection:queued:create"),
+              threadId,
+              projectId: ProjectId.make("project:waiting-selection:queued"),
+              title: "Waiting selection queued",
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: cwd,
+            });
+            yield* send(1, CLAUDE_MODEL_SELECTION);
+            yield* worker.drain();
+            const idle = yield* waitForIdle(threadId);
+            const firstSession = idle.providerSessions.find(
+              (session) => session.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId,
+            )!;
+            const run = idle.runs[0]!;
+            const now = yield* DateTime.now;
+            yield* eventSink.write({
+              events: [
+                {
+                  id: EventId.make("event:waiting-selection:queued:waiting"),
+                  type: "run.updated",
+                  threadId,
+                  runId: run.id,
+                  occurredAt: now,
+                  payload: { ...run, status: "waiting", completedAt: null },
+                },
+              ],
+            });
+
+            // The waiting run is still active, so the send queues behind it.
+            yield* send(2, secondSelection);
+            assert.deepEqual(
+              (yield* orchestrator.getThreadProjection(threadId)).runs.map(
+                (candidate) => candidate.status,
+              ),
+              ["waiting", "queued"],
+            );
+            // The picker catches up; the busy session stays attached for the queued start.
+            yield* orchestrator.dispatch({
+              type: "thread.model-selection.set",
+              commandId: CommandId.make("command:waiting-selection:queued:select"),
+              threadId,
+              modelSelection: secondSelection,
+            });
+            yield* worker.drain();
+            assert.deepEqual(yield* Ref.get(closedSessions), []);
+
+            yield* eventSink.write({
+              events: [
+                {
+                  id: EventId.make("event:waiting-selection:queued:completed"),
+                  type: "run.updated",
+                  threadId,
+                  runId: run.id,
+                  occurredAt: now,
+                  payload: { ...run, status: "completed", completedAt: now },
+                },
+              ],
+            });
+            yield* orchestrator.resumeQueuedRuns;
+            yield* worker.drain();
+            const held = yield* orchestrator.getThreadProjection(threadId);
+            // The selection already matches the queued run, yet resuming the shared native
+            // thread beside the kept session would still fork its history.
+            assert.deepEqual(
+              held.runs.map((candidate) => [candidate.status, candidate.queueHeld === true]),
+              [
+                ["completed", false],
+                ["queued", true],
+              ],
+            );
+            assert.lengthOf(yield* Ref.get(capturedTurns), 1);
+            assert.deepEqual(yield* Ref.get(closedSessions), []);
+
+            yield* Ref.set(backgroundWork, false);
+            yield* orchestrator.dispatch({
+              type: "queue.resume",
+              commandId: CommandId.make("command:waiting-selection:queued:resume"),
+              threadId,
+            });
+            yield* worker.drain();
+            const resumed = yield* waitForIdle(threadId);
+            yield* worker.drain();
+            assert.deepEqual(
+              resumed.runs.map((candidate) => [candidate.providerInstanceId, candidate.status]),
+              [
+                [CLAUDE_MODEL_SELECTION.instanceId, "completed"],
+                [secondSelection.instanceId, "completed"],
+              ],
+            );
+            assert.lengthOf(resumed.contextHandoffs, 0);
+            assert.deepEqual(yield* Ref.get(closedSessions), [firstSession.id]);
+          }).pipe(
+            Effect.provide(
+              ProviderReplayHarness.layerWithRegistry(
+                {
+                  name: "waiting-selection-queued",
+                  runtimePolicyOverride: {
+                    cwd,
+                    approvalPolicy: "never",
+                    sandboxPolicy: {
+                      type: "readOnly",
+                      access: { type: "fullAccess" },
+                      networkAccess: false,
+                    },
+                  },
+                },
+                layerRegistry,
+              ),
+            ),
+          );
+        }),
+      ),
+  );
+
+  it.live(
     "refuses a same-instance restart while a waiting run's work still runs, then restarts once it ends",
     () =>
       Effect.scoped(
