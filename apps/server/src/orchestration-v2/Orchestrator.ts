@@ -4375,7 +4375,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               const projection = yield* loadProjectionForCommand(command, ["runs"], {
                 turnItemTypes: [],
               });
-              if (projection.runs.some(isActiveRun)) {
+              // A waiting run has ended its turn and waits only on the work it left;
+              // the release below keeps any session that still runs that work.
+              if (projection.runs.some((run) => run.status !== "waiting" && isActiveRun(run))) {
                 return yield* new OrchestratorProviderSelectionBusyError({
                   commandId: command.commandId,
                   threadId: command.threadId,
@@ -4403,23 +4405,33 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 .map((session) => session.id)
             : (providerSwitchPlan?.releaseProviderSessionIds ?? []),
     );
-    const liveSessions = (providerContext?.providerSessions ?? []).filter(
+    const releasedSessions = (providerContext?.providerSessions ?? []).filter(
       (session) =>
         detachSessionIds.has(session.id) &&
         session.status !== "stopped" &&
         session.status !== "error",
     );
-    if (command.type !== "thread.archive" && command.type !== "thread.settle") {
-      for (const session of liveSessions) {
-        if (yield* sessionHasBackgroundWork(session, providerContext!.providerThreads)) {
-          return yield* new OrchestratorDispatchError({
-            commandId: command.commandId,
-            commandType: command.type,
-            cause:
-              "The current session is still running background agents or commands, and this change would end them. Wait for them to finish, or press Stop, then try again.",
-          });
+    const liveSessions: typeof releasedSessions = [];
+    for (const session of releasedSessions) {
+      if (
+        command.type !== "thread.archive" &&
+        command.type !== "thread.settle" &&
+        (yield* sessionHasBackgroundWork(session, providerContext!.providerThreads))
+      ) {
+        // A selection can land while a waiting run's left work still runs in a released session.
+        // Keep that session attached; the next turn's dispatch waits for its work or hands off,
+        // and releases it once the work ends.
+        if (providerSwitchPlan !== null) {
+          continue;
         }
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause:
+            "The current session is still running background agents or commands, and this change would end them. Wait for them to finish, or press Stop, then try again.",
+        });
       }
+      liveSessions.push(session);
     }
 
     const now = yield* DateTime.now;
