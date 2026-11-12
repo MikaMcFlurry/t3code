@@ -131,12 +131,18 @@ function makeTestAdapter(input: {
   readonly backgroundTasksEndWithProcess?: true;
   readonly backgroundWork?: Ref.Ref<boolean>;
   readonly closedSessions?: Ref.Ref<ReadonlyArray<string>>;
+  readonly restartSelection?: boolean;
 }): ProviderAdapter.ProviderAdapterV2["Service"] {
   return {
     instanceId: input.instanceId,
     driver: input.driver,
     getCapabilities: () => Effect.succeed(input.capabilities),
-    planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
+    planSelectionTransition: () =>
+      Effect.succeed(
+        input.restartSelection === true
+          ? { type: "restart_session" }
+          : { type: "apply_on_next_turn" },
+      ),
     openSession: (sessionInput) =>
       Effect.gen(function* () {
         const events = yield* PubSub.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
@@ -3339,6 +3345,158 @@ describe("orchestration v2 provider switching", () => {
                   },
                 },
                 layerRegistry,
+              ),
+            ),
+          );
+        }),
+      ),
+  );
+
+  it.live(
+    "refuses a same-instance restart while a waiting run's work still runs, then restarts once it ends",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* checkpointWorkspace("waiting-selection-restart");
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const backgroundWork = yield* Ref.make(true);
+          const closedSessions = yield* Ref.make<ReadonlyArray<string>>([]);
+          // Same instance; the adapter needs a new session for this selection.
+          const restartSelection: ModelSelection = {
+            ...CLAUDE_MODEL_SELECTION,
+            model: "claude-restart-model",
+          };
+          const adapter = makeTestAdapter({
+            instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            responseByRunOrdinal: { 1: "Delegated the work", 2: "Restarted session complete" },
+            capturedTurns,
+            backgroundWork,
+            closedSessions,
+            restartSelection: true,
+          });
+          const threadId = ThreadId.make("thread:waiting-selection:restart");
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const eventSink = yield* EventSink.EventSinkV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const select = (attempt: string) =>
+              orchestrator.dispatch({
+                type: "thread.model-selection.set",
+                commandId: CommandId.make(`command:waiting-selection:restart:select:${attempt}`),
+                threadId,
+                modelSelection: restartSelection,
+              });
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make("command:waiting-selection:restart:create"),
+              threadId,
+              projectId: ProjectId.make("project:waiting-selection:restart"),
+              title: "Waiting restart",
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: cwd,
+            });
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make("command:waiting-selection:restart:1"),
+              threadId,
+              messageId: MessageId.make("message:waiting-selection:restart:1"),
+              text: "Prompt 1",
+              attachments: [],
+              dispatchMode: { type: "start_immediately" },
+            });
+            yield* worker.drain();
+            const idle = yield* waitForIdle(threadId);
+            const firstSession = idle.providerSessions[0]!;
+            const run = idle.runs[0]!;
+            const now = yield* DateTime.now;
+            yield* eventSink.write({
+              events: [
+                {
+                  id: EventId.make("event:waiting-selection:restart:waiting"),
+                  type: "run.updated",
+                  threadId,
+                  runId: run.id,
+                  occurredAt: now,
+                  payload: { ...run, status: "waiting", completedAt: null },
+                },
+              ],
+            });
+
+            // Keeping the busy session would drop the restart: no later dispatch sees a change.
+            const refused = yield* select("busy").pipe(Effect.flip);
+            assert.instanceOf(refused, Orchestrator.OrchestratorProviderSelectionBusyError);
+            assert.include(refused.message, "still running background agents or commands");
+            const unchanged = yield* orchestrator.getThreadProjection(threadId);
+            assert.deepEqual(unchanged.thread.modelSelection, CLAUDE_MODEL_SELECTION);
+            assert.deepEqual(yield* Ref.get(closedSessions), []);
+
+            // Once the work ends, the same selection restarts the session.
+            yield* Ref.set(backgroundWork, false);
+            yield* select("idle");
+            yield* worker.drain();
+            assert.deepEqual(yield* Ref.get(closedSessions), [firstSession.id]);
+            yield* eventSink.write({
+              events: [
+                {
+                  id: EventId.make("event:waiting-selection:restart:completed"),
+                  type: "run.updated",
+                  threadId,
+                  runId: run.id,
+                  occurredAt: now,
+                  payload: { ...run, status: "completed", completedAt: now },
+                },
+              ],
+            });
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make("command:waiting-selection:restart:2"),
+              threadId,
+              messageId: MessageId.make("message:waiting-selection:restart:2"),
+              text: "Prompt 2",
+              attachments: [],
+              dispatchMode: { type: "start_immediately" },
+            });
+            yield* worker.drain();
+            yield* waitForIdle(threadId);
+            const projection = yield* orchestrator.getThreadProjection(threadId);
+            assert.deepEqual(projection.thread.modelSelection, restartSelection);
+            assert.deepEqual(
+              projection.runs.map((candidate) => candidate.status),
+              ["completed", "completed"],
+            );
+            // The second turn ran with the new selection in a session opened after the close.
+            assert.deepEqual(
+              (yield* Ref.get(capturedTurns)).map((turn) => turn.modelSelection.model),
+              [CLAUDE_MODEL_SELECTION.model, restartSelection.model],
+            );
+          }).pipe(
+            Effect.provide(
+              ProviderReplayHarness.layerWithRegistry(
+                {
+                  name: "waiting-selection-restart",
+                  runtimePolicyOverride: {
+                    cwd,
+                    approvalPolicy: "never",
+                    sandboxPolicy: {
+                      type: "readOnly",
+                      access: { type: "fullAccess" },
+                      networkAccess: false,
+                    },
+                  },
+                },
+                ProviderAdapterRegistry.layerFromAdapters([adapter]),
               ),
             ),
           );

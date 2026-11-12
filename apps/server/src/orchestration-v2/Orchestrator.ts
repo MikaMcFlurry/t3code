@@ -302,10 +302,16 @@ export class OrchestratorThreadAboveModeLimitError extends Schema.TaggedError<Or
 
 export class OrchestratorProviderSelectionBusyError extends Schema.TaggedError<OrchestratorProviderSelectionBusyError>()(
   "OrchestratorProviderSelectionBusyError",
-  { commandId: CommandId, threadId: ThreadId },
+  {
+    commandId: CommandId,
+    threadId: ThreadId,
+    reason: Schema.optional(Schema.Literals(["active_turn", "background_work"])),
+  },
 ) {
   override get message(): string {
-    return `Thread ${this.threadId} has an active turn. Wait for it to finish, then retry the provider selection change.`;
+    return this.reason === "background_work"
+      ? `Thread ${this.threadId} is still running background agents or commands, and this selection change restarts their session. Wait for them to finish, or press Stop, then retry the provider selection change.`
+      : `Thread ${this.threadId} has an active turn. Wait for it to finish, then retry the provider selection change.`;
   }
 }
 
@@ -4384,6 +4390,27 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 });
               }
             }
+            // A same-instance restart replaces the session itself. The next dispatch sees no
+            // instance change, so a session kept for its background work would silently keep
+            // the old setting. Refuse until that work ends instead.
+            const restartedSessions = plan.instanceChanged
+              ? []
+              : providerContext!.providerSessions.filter(
+                  (session) =>
+                    plan.releaseProviderSessionIds.includes(session.id) &&
+                    session.providerInstanceId === command.modelSelection.instanceId &&
+                    session.status !== "stopped" &&
+                    session.status !== "error",
+                );
+            for (const session of restartedSessions) {
+              if (yield* sessionHasBackgroundWork(session, providerContext!.providerThreads)) {
+                return yield* new OrchestratorProviderSelectionBusyError({
+                  commandId: command.commandId,
+                  threadId: command.threadId,
+                  reason: "background_work",
+                });
+              }
+            }
             return plan;
           })
         : null;
@@ -4420,7 +4447,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ) {
         // A selection can land while a waiting run's left work still runs in a released session.
         // Keep that session attached; the next turn's dispatch waits for its work or hands off,
-        // and releases it once the work ends.
+        // and releases it once the work ends. Only instance changes get here with such a session:
+        // the gate refuses a same-instance restart, which no later dispatch would apply.
         if (providerSwitchPlan !== null) {
           continue;
         }
