@@ -3387,6 +3387,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     readonly allocateSessionId?: Effect.Effect<string>;
     readonly offer?: (message: SDKUserMessage) => Effect.Effect<void>;
     readonly promptSuggestions?: boolean;
+    readonly sharedMemoryRoot?: string;
   }) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -3446,6 +3447,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         ...(options?.modelCatalog === undefined ? {} : { modelCatalog: options.modelCatalog }),
         environment: options?.environment ?? {},
         attachmentsDir,
+        ...(options?.sharedMemoryRoot === undefined
+          ? {}
+          : { sharedMemoryRoot: options.sharedMemoryRoot }),
         fileSystem,
         path: yield* Path.Path,
         random: yield* SecureRandom.SecureRandom,
@@ -4830,6 +4834,98 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           }),
           "true",
         );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+    );
+    it.effect("points auto memory at the shared project folder when the instance opts in", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-claude-memory-home-",
+        });
+        const state = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-memory-" });
+        const root = path.join(state, "claude-memory");
+        const project = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-project-" });
+        yield* fileSystem.makeDirectory(path.join(project, ".claude"));
+        const openedMemory = (input: {
+          readonly shareProjectMemory: boolean;
+          readonly userSettings?: string;
+          readonly launchArgs?: string;
+          readonly cwd?: string;
+        }) =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              yield* fileSystem.writeFileString(
+                path.join(home, "settings.json"),
+                input.userSettings ?? "{}",
+              );
+              const harness = yield* makeWakeHarnessWithOptions({
+                settings: {
+                  ...DEFAULT_CLAUDE_SETTINGS,
+                  homePath: home,
+                  launchArgs: input.launchArgs ?? "",
+                  shareProjectMemory: input.shareProjectMemory,
+                },
+                sharedMemoryRoot: root,
+              });
+              yield* harness.runtime.startTurn(
+                makeClaudeTestTurnInput({
+                  threadId: harness.threadId,
+                  providerThread: harness.providerThread,
+                  now: yield* DateTime.now,
+                  attemptId: RunAttemptId.make("attempt-shared-memory"),
+                  text: "Remember this.",
+                  attachments: [],
+                  runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+                    ...CLAUDE_TEST_RUNTIME_POLICY,
+                    cwd: input.cwd ?? CLAUDE_TEST_RUNTIME_POLICY.cwd,
+                  }),
+                }),
+              );
+              const settings = harness.getOpenedOptions()?.settings;
+              return {
+                directory: typeof settings === "object" ? settings.autoMemoryDirectory : undefined,
+                projectFolder: path.join(root, `project-${harness.threadId}`),
+              };
+            }),
+          );
+
+        const off = yield* openedMemory({ shareProjectMemory: false });
+        assert.isUndefined(off.directory);
+        assert.isFalse(yield* fileSystem.exists(root));
+
+        const on = yield* openedMemory({ shareProjectMemory: true });
+        assert.equal(on.directory, on.projectFolder);
+        assert.isTrue(yield* fileSystem.exists(on.projectFolder));
+
+        // The user's own value wins: --settings travels unchanged, user settings are left to Claude.
+        const launchArg = yield* openedMemory({
+          shareProjectMemory: true,
+          launchArgs: `--settings '{"autoMemoryDirectory":"~/own-memory"}'`,
+        });
+        assert.equal(launchArg.directory, "~/own-memory");
+        const user = yield* openedMemory({
+          shareProjectMemory: true,
+          userSettings: '{"autoMemoryDirectory":"~/own-memory"}',
+        });
+        assert.isUndefined(user.directory);
+
+        // Claude Code ignores autoMemoryDirectory in checked-in project settings.
+        yield* fileSystem.writeFileString(
+          path.join(project, ".claude", "settings.json"),
+          '{"autoMemoryDirectory":"~/project-memory"}',
+        );
+        const checkedIn = yield* openedMemory({ shareProjectMemory: true, cwd: project });
+        assert.equal(checkedIn.directory, checkedIn.projectFolder);
       }).pipe(
         Effect.provide(
           Layer.mergeAll(
