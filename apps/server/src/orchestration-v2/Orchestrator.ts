@@ -4702,7 +4702,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               const projection = yield* loadProjectionForCommand(command, ["runs"], {
                 turnItemTypes: [],
               });
-              if (projection.runs.some(isActiveRun)) {
+              // A waiting run has ended its turn and waits only on the work it left;
+              // the release below keeps any session that still runs that work.
+              if (projection.runs.some((run) => run.status !== "waiting" && isActiveRun(run))) {
                 return yield* new OrchestratorProviderSelectionBusyError({
                   commandId: command.commandId,
                   threadId: command.threadId,
@@ -4730,16 +4732,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 .map((session) => session.id)
             : (providerSwitchPlan?.releaseProviderSessionIds ?? []),
     );
-    const liveSessions = (providerContext?.providerSessions ?? []).filter(
+    const releasedSessions = (providerContext?.providerSessions ?? []).filter(
       (session) =>
         detachSessionIds.has(session.id) &&
         session.status !== "stopped" &&
         session.status !== "error",
     );
+    const liveSessions: typeof releasedSessions = [];
     if (
       command.type !== "thread.archive" &&
       command.type !== "thread.settle" &&
-      liveSessions.length > 0
+      releasedSessions.length > 0
     ) {
       // The provider context holds only the active and target provider threads; a session kept
       // busy by an earlier queued hand-off owns neither, so probe every thread of this one.
@@ -4748,8 +4751,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           omitSettledSubagentRecords: true,
         })
         .pipe(mapDispatchError(command));
-      for (const session of liveSessions) {
+      for (const session of releasedSessions) {
         if (yield* sessionHasBackgroundWork(session, providerThreads)) {
+          // A selection can land while a waiting run's left work still runs in a released
+          // session. Keep that session attached; the next turn's dispatch waits for its work or
+          // hands off, and releases it once the work ends.
+          if (providerSwitchPlan !== null) continue;
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,
             commandType: command.type,
@@ -4757,7 +4764,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               "The current session is still running background agents or commands, and this change would end them. Wait for them to finish, or press Stop, then try again.",
           });
         }
+        liveSessions.push(session);
       }
+    } else {
+      liveSessions.push(...releasedSessions);
     }
 
     const now = yield* DateTime.now;
