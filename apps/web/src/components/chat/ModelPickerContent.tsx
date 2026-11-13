@@ -25,6 +25,7 @@ import {
 import { ModelListRow } from "./ModelListRow";
 import { ModelPickerSidebar } from "./ModelPickerSidebar";
 import { useProviderWorkspaceSnapshotRefresh } from "./useProviderWorkspaceSnapshotRefresh";
+import { ProviderUsageText, useModelPickerUsage } from "./ModelPickerUsage";
 import { getProviderStatusMessage, hasProviderSetup } from "./ProviderStatusBanner";
 import {
   modelPickerLegacySectionKey,
@@ -171,6 +172,8 @@ const MODEL_LIST_ESTIMATED_ITEM_SIZE = 32;
 const ROW_UNITS = 8;
 const ROW_SEPARATOR_UNITS = 0.5;
 const LIST_CHROME_UNITS = 15.5;
+// The selected account's usage line above the list, while the Labs setting is on.
+const USAGE_ROW_UNITS = 7;
 
 function ModelListSeparator() {
   return <div className="h-0.5" />;
@@ -641,6 +644,15 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     return [...available, ...disabled];
   })();
   const showSidebar = !isSearching && sidebarInstanceEntries.length > 0;
+  const usage = useModelPickerUsage(props.environmentId, sidebarInstanceEntries);
+  const usageRowUnits = usage && usage.byInstance.size > 0 ? USAGE_ROW_UNITS : 0;
+  const selectedUsageEntry =
+    usage && !isSearching && selectedInstanceId !== "favorites"
+      ? entryByInstanceId.get(selectedInstanceId)
+      : undefined;
+  const selectedHeadroom = selectedUsageEntry
+    ? usage?.byInstance.get(selectedUsageEntry.instanceId)
+    : undefined;
   const instanceOrder = instanceEntries.map((entry) => entry.instanceId);
 
   const filteredModels = (() => {
@@ -852,7 +864,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
             : isSearching
               ? { height: searchHeight }
               : {
-                  minHeight: `min(calc(var(--spacing) * ${tallestTabUnits + LIST_CHROME_UNITS} + 1px), calc(var(--spacing) * 86.5))`,
+                  minHeight: `min(calc(var(--spacing) * ${tallestTabUnits + LIST_CHROME_UNITS + usageRowUnits} + 1px), calc(var(--spacing) * 86.5))`,
                 }
         }
         data-model-picker-content="true"
@@ -864,6 +876,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
             onFocusSearch={focusSearchInput}
             instanceEntries={sidebarInstanceEntries}
             showFavorites
+            usage={usage}
             {...(selectableUnavailableInstanceIds ? { selectableUnavailableInstanceIds } : {})}
             {...(lockedDisabledInstanceIds
               ? {
@@ -1011,6 +1024,22 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
               onTouchStart={(e) => e.stopPropagation()}
             />
 
+            {selectedUsageEntry && selectedHeadroom && usage ? (
+              <div
+                data-model-picker-account-usage
+                // Wraps the usage under the name when both don't fit on one line.
+                className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 border-b border-border/50 px-3 py-1.5"
+              >
+                <span className="min-w-0 max-w-full truncate text-xs font-medium text-foreground">
+                  {selectedUsageEntry.displayName}
+                </span>
+                <ProviderUsageText
+                  headroom={selectedHeadroom}
+                  now={usage.now}
+                  className="whitespace-nowrap"
+                />
+              </div>
+            ) : null}
             <ModelPickerList
               listRef={modelListRef}
               itemKeys={filteredItemKeys}

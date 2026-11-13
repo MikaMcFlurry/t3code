@@ -1005,3 +1005,305 @@ export function collectProviderUsageLimits(
   }
   return { createdAt: DateTime.formatIso(DateTime.makeUnsafe(now)), accounts, notices };
 }
+
+// Picker headroom. The account matching, the provider-wide windows and the refill rule follow
+// `providerQuotaStatus` from pingdotgg/t3code#26853, so the picker and that PR's mobile headers
+// agree on which windows count and when a window is full again.
+
+/**
+ * Only windows that stop every model. Codex has no model-scoped windows (Free/Go
+ * allowances are monthly); Claude's others are model-scoped or extra spend.
+ * Antigravity and Cursor split quota by model family, so none count.
+ */
+function gatesProvider(
+  driver: ServerProvider["driver"],
+  window: ServerProviderUsageWindow,
+): boolean {
+  if (driver === "codex") return true;
+  if (driver === "claudeAgent") return window.id === "five_hour" || window.id === "seven_day";
+  return false;
+}
+
+/**
+ * Every readable snapshot of the provider's account: its own, sibling instances
+ * on the same account, and hub entries for it.
+ */
+function accountSnapshots(
+  provider: ServerProvider,
+  providers: readonly ServerProvider[],
+  sources: UsageLimitSourceSnapshots,
+): ReadonlyArray<ServerProviderUsageLimits> {
+  const resolveKey = accountKeyResolver([
+    ...providers.filter((candidate) => candidate.enabled).map(nativeReport),
+    ...sources.flatMap((source) => source.accounts),
+  ]);
+  const key = resolveKey(nativeReport(provider));
+  const readable = (limits: ServerProviderUsageLimits | undefined) =>
+    limits !== undefined && limitsNotice(limits) === null;
+  const native = [
+    provider,
+    ...providersWithLimits(providers).filter(
+      (candidate) =>
+        key !== null &&
+        candidate.instanceId !== provider.instanceId &&
+        candidate.driver === provider.driver &&
+        resolveKey(nativeReport(candidate)) === key,
+    ),
+  ].flatMap((candidate) =>
+    candidate.usageLimits && readable(candidate.usageLimits) ? [candidate.usageLimits] : [],
+  );
+  const hub = sources.flatMap((source) =>
+    source.accounts.flatMap((account) =>
+      key !== null && resolveKey(account) === key && readable(account.usageLimits)
+        ? [account.usageLimits]
+        : [],
+    ),
+  );
+  return [...native, ...hub];
+}
+
+const newestFirst = (left: ServerProviderUsageLimits, right: ServerProviderUsageLimits) =>
+  Date.parse(right.checkedAt) - Date.parse(left.checkedAt);
+
+/**
+ * A reset refills a window only when it passed after the read. One that passed before the read is
+ * a stale clock: the reported usage already belongs to the new window.
+ */
+export function usageWindowRefilled(
+  window: ServerProviderUsageWindow,
+  checkedAt: number,
+  now: number,
+): boolean {
+  const at = resetMillis(window);
+  return at !== null && at > checkedAt && at <= now;
+}
+
+/**
+ * The window as it stands at `now`: full after a reset that passed since the read, and without a
+ * reset time once that time has passed. Use it before showing stored windows next to the headroom.
+ */
+export function currentUsageWindow(
+  window: ServerProviderUsageWindow,
+  checkedAt: number,
+  now: number,
+): ServerProviderUsageWindow {
+  const at = resetMillis(window);
+  if (at === null || at > now) return window;
+  const { resetsAt: _passed, ...rest } = window;
+  return usageWindowRefilled(window, checkedAt, now) ? { ...rest, usedPercent: 0 } : rest;
+}
+
+/** `ok` keeps up with the time left, `warning` runs ahead of it, `critical` is about to run out. */
+export type UsagePaceTone = "ok" | "warning" | "critical";
+
+/**
+ * Colours a remaining percentage by pace: how far usage runs ahead of the share of the window that
+ * has passed. Without a clock (no reset or length), only the remaining share counts.
+ */
+export function usagePaceTone(usedPercent: number, elapsed: number | null): UsagePaceTone {
+  const used = Math.max(0, Math.min(100, usedPercent));
+  if (100 - used <= 10) return "critical";
+  if (elapsed === null) return 100 - used <= 30 ? "warning" : "ok";
+  const ahead = used - elapsed * 100;
+  if (ahead > 25) return "critical";
+  // The same 5-point band `paceOf` reads as "ahead".
+  if (ahead > 5) return "warning";
+  return "ok";
+}
+
+export type UsageHeadroomKind = "session" | "weekly" | "scoped";
+
+export interface UsageHeadroomWindow {
+  /** `session` and `weekly` stop every model; `scoped` is one model's pool. */
+  readonly kind: UsageHeadroomKind;
+  /** `5h`, `all` (the provider-wide weekly window) or the model, e.g. `fable`. */
+  readonly label: string;
+  readonly window: ServerProviderUsageWindow;
+  readonly remaining: number;
+  /** The upcoming reset; null when none is reported, it already passed, or the clock is stale. */
+  readonly resetsAt: number | null;
+  readonly tone: UsagePaceTone;
+}
+
+export interface ProviderUsageHeadroom {
+  /** The snapshot the headroom reads: the freshest readable one for this account. */
+  readonly limits: ServerProviderUsageLimits;
+  readonly session: UsageHeadroomWindow | null;
+  readonly weekly: UsageHeadroomWindow | null;
+  /** Model-scoped weekly pools, such as Claude's Fable limit. Never folded into `weekly`. */
+  readonly scoped: ReadonlyArray<UsageHeadroomWindow>;
+  /** The last probe failed, so these are the last good windows. */
+  readonly stale: boolean;
+}
+
+function sessionLabel(window: ServerProviderUsageWindow): string {
+  const mins = window.windowDurationMins;
+  if (mins === undefined) return "5h";
+  return mins > 0 && mins < DAY / MINUTE && mins % 60 === 0 ? `${mins / 60}h` : "session";
+}
+
+/** `Weekly · Fable` → `fable`. */
+function scopedLabel(window: ServerProviderUsageWindow): string {
+  const named = window.label.split("·").at(-1)?.trim();
+  const label = named && named !== window.label ? named : window.id.replace(/^seven_day_/, "");
+  return label.toLowerCase();
+}
+
+function headroomWindow(
+  kind: UsageHeadroomKind,
+  label: string,
+  window: ServerProviderUsageWindow,
+  checkedAt: number,
+  now: number,
+): UsageHeadroomWindow {
+  const current = currentUsageWindow(window, checkedAt, now);
+  const resetsAt = resetMillis(current);
+  return {
+    kind,
+    label,
+    window,
+    remaining: remainingPercent(current),
+    resetsAt,
+    tone: usagePaceTone(current.usedPercent, resetsAt === null ? null : elapsedShare(current, now)),
+  };
+}
+
+/**
+ * Remaining 5h and weekly headroom of one provider account, for the model picker. Reads the
+ * freshest readable snapshot of the account (its own, sibling instances on the same login, or a
+ * hub entry); after a failed probe it falls back to the instance's last good windows, marked stale.
+ * Null for providers without windows that stop every model.
+ */
+export function providerUsageHeadroom(
+  instanceId: ProviderInstanceId,
+  providers: readonly ServerProvider[],
+  sources: UsageLimitSourceSnapshots,
+  now: number,
+): ProviderUsageHeadroom | null {
+  const provider = providers.find((candidate) => candidate.instanceId === instanceId);
+  if (!provider) return null;
+  const fresh = [...accountSnapshots(provider, providers, sources)].sort(newestFirst)[0];
+  const own = provider.usageLimits;
+  const limits =
+    fresh ?? (own?.unavailable?.reason === "probeFailed" && own.windows.length ? own : undefined);
+  if (!limits) return null;
+  const gates = limits.windows.filter((window) => gatesProvider(provider.driver, window));
+  if (gates.length === 0) return null;
+  const checkedAt = Date.parse(limits.checkedAt);
+  const tightest = (kind: "session" | "weekly") =>
+    gates
+      .filter((window) => window.kind === kind)
+      .map((window) =>
+        headroomWindow(
+          kind,
+          kind === "session" ? sessionLabel(window) : "all",
+          window,
+          checkedAt,
+          now,
+        ),
+      )
+      .sort((left, right) => left.remaining - right.remaining)[0] ?? null;
+  return {
+    limits,
+    session: tightest("session"),
+    weekly: tightest("weekly"),
+    scoped: limits.windows
+      .filter((window) => window.kind === "weekly" && !gatesProvider(provider.driver, window))
+      .map((window) => headroomWindow("scoped", scopedLabel(window), window, checkedAt, now)),
+    stale: fresh === undefined,
+  };
+}
+
+/** Windows that share one reset, shown before a single countdown arrow. */
+export interface UsageHeadroomGroup {
+  readonly windows: ReadonlyArray<UsageHeadroomWindow>;
+  readonly resetsAt: number | null;
+}
+
+const sameReset = (left: number | null, right: number | null) =>
+  left === null || right === null ? left === right : Math.abs(left - right) < MINUTE;
+
+/**
+ * Session first, then the weekly window with every model pool that resets with it, then pools on
+ * their own clock: `5h 72% →2h10m | all: 41% • fable: 18% →3d4h`.
+ */
+export function usageHeadroomGroups(
+  headroom: ProviderUsageHeadroom,
+): ReadonlyArray<UsageHeadroomGroup> {
+  const groups: Array<{ windows: UsageHeadroomWindow[]; resetsAt: number | null }> = [];
+  if (headroom.session) {
+    groups.push({ windows: [headroom.session], resetsAt: headroom.session.resetsAt });
+  }
+  const weekly = headroom.weekly
+    ? { windows: [headroom.weekly], resetsAt: headroom.weekly.resetsAt }
+    : null;
+  if (weekly) groups.push(weekly);
+  for (const pool of headroom.scoped) {
+    if (weekly && sameReset(weekly.resetsAt, pool.resetsAt)) weekly.windows.push(pool);
+    else groups.push({ windows: [pool], resetsAt: pool.resetsAt });
+  }
+  return groups;
+}
+
+/** The countdown after a picker arrow: `2h10m`, `3d4h`, `45m`, `<1m`. */
+export function formatCountdown(ms: number): string {
+  return ms < MINUTE ? "<1m" : formatDuration(ms).replace(" ", "");
+}
+
+/** `5h 72%`, `all: 41%`, `fable: 18%`. */
+function formatHeadroomWindow(window: UsageHeadroomWindow): string {
+  return window.kind === "session"
+    ? `${window.label} ${window.remaining}%`
+    : `${window.label}: ${window.remaining}%`;
+}
+
+/** The picker text, e.g. `5h 72% →2h10m | all: 41% • fable: 18% →3d4h`. */
+export function formatUsageHeadroom(headroom: ProviderUsageHeadroom, now: number): string {
+  return usageHeadroomGroups(headroom)
+    .map((group) => {
+      const windows = group.windows.map(formatHeadroomWindow).join(" • ");
+      return group.resetsAt === null
+        ? windows
+        : `${windows} →${formatCountdown(group.resetsAt - now)}`;
+    })
+    .join(" | ");
+}
+
+const TONE_DESCRIPTION: Record<UsagePaceTone, string | null> = {
+  ok: null,
+  warning: "ahead of pace",
+  critical: "nearly used up",
+};
+
+/** Screen-reader text, e.g. "5h: 72% left, resets in 2h 10m; weekly, all models: 41% left …". */
+export function describeUsageHeadroom(headroom: ProviderUsageHeadroom, now: number): string {
+  const name = (window: UsageHeadroomWindow) =>
+    window.kind === "session"
+      ? window.label
+      : window.kind === "weekly"
+        ? "weekly, all models"
+        : `weekly, ${window.label} only`;
+  const text = [headroom.session, headroom.weekly, ...headroom.scoped]
+    .filter((window): window is UsageHeadroomWindow => window !== null)
+    .map((window) =>
+      [
+        `${name(window)}: ${window.remaining}% left`,
+        TONE_DESCRIPTION[window.tone],
+        window.resetsAt === null ? null : `resets in ${formatDuration(window.resetsAt - now)}`,
+      ]
+        .filter(Boolean)
+        .join(", "),
+    )
+    .join("; ");
+  return headroom.stale ? `Last known usage: ${text}` : text;
+}
+
+/** The soonest upcoming reset among the provider-wide windows. */
+export function nextHeadroomReset(headroom: ProviderUsageHeadroom): UsageHeadroomWindow | null {
+  let next: UsageHeadroomWindow | null = null;
+  for (const window of [headroom.session, headroom.weekly]) {
+    if (!window || window.resetsAt === null) continue;
+    if (next === null || next.resetsAt === null || window.resetsAt < next.resetsAt) next = window;
+  }
+  return next;
+}
