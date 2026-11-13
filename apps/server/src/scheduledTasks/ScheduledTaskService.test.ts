@@ -5,11 +5,13 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it, vi } from "@effect/vitest";
 import {
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ScheduledTaskError,
   ScheduledTaskId,
   type ScheduledTaskUpsertInput,
   SecretRef,
+  type ServerProvider,
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -28,6 +30,8 @@ import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
@@ -1002,5 +1006,87 @@ it.effect("a run interrupted right after it reserves the task does not block the
       assert.equal(second.threadId, ThreadId.make("thread:launched"));
       assert.equal(yield* Ref.get(launches), 1);
     }).pipe(Effect.provide(layer));
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect("a run whose stored model is outside the allowed list fails instead of starting", () =>
+  Effect.gen(function* () {
+    const launches = yield* Ref.make(0);
+    const codex = (instanceId: string, status: "ready" | "error"): ServerProvider => ({
+      instanceId: ProviderInstanceId.make(instanceId),
+      driver: ProviderDriverKind.make("codex"),
+      enabled: true,
+      installed: true,
+      version: null,
+      status,
+      auth: { status: "authenticated" },
+      checkedAt: "2026-09-13T00:00:00.000Z",
+      models: [{ slug: "gpt-5.4", name: "GPT-5.4", isCustom: false, capabilities: null }],
+      slashCommands: [],
+      skills: [],
+    });
+    const run = (autoRoutingAllowed: ReadonlyArray<string>) => {
+      const layer = ScheduledTaskService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            ManagedPolicy.layerTest(),
+            Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+              launch: () =>
+                Ref.update(launches, (n) => n + 1).pipe(
+                  Effect.as({ threadId: ThreadId.make("thread:routed"), resumed: false } as never),
+                ),
+            }),
+            Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+            Layer.mock(SecretRequests.SecretRequests)({}),
+            Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+              namedProjectsRoot: "/projects",
+              isScratchProject: () => Effect.succeed(false),
+            }),
+            // The stored account is ready; the only allowed one is down.
+            Layer.mock(ProviderRegistry.ProviderRegistry)({
+              getProviders: Effect.succeed([codex("codex", "ready"), codex("codex_team", "error")]),
+            }),
+            ServerSettings.layerTest({ autoRoutingAllowed: [...autoRoutingAllowed] }),
+            NodeCrypto.layer,
+            Layer.succeed(Scheduler.Scheduler, { register: () => Effect.void }),
+          ),
+        ),
+      );
+      return Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        const id = ScheduledTaskId.make(`task:allowlist:${autoRoutingAllowed.join(",")}`);
+        yield* service.upsert({
+          id,
+          title: "Nightly",
+          prompt: "Check the contact forms",
+          enabled: true,
+          schedule: { type: "interval", everyMs: 60_000 },
+          projectId: ProjectId.make("project:test"),
+          workspaceStrategy: { type: "root" },
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+        });
+        return yield* service.runNow({ id });
+      }).pipe(Effect.provide(layer));
+    };
+
+    const refused = yield* run(["codex_team"]);
+    assert.equal(yield* Ref.get(launches), 0);
+    assert.isNull(refused.threadId);
+    assert.equal(refused.task.lastRunStatus, "failed");
+    assert.include(refused.task.lastRunError ?? "", "Not started");
+    assert.include(refused.task.lastRunError ?? "", "codex_team");
+
+    // An allowed list that names no configured account refuses the run the same way.
+    const unmatched = yield* run(["claudeAgent"]);
+    assert.equal(yield* Ref.get(launches), 0);
+    assert.equal(unmatched.task.lastRunStatus, "failed");
+    assert.include(unmatched.task.lastRunError ?? "", "match no configured");
+
+    // Without a list the stored model runs as before.
+    const unrestricted = yield* run([]);
+    assert.equal(yield* Ref.get(launches), 1);
+    assert.equal(unrestricted.task.lastRunStatus, "succeeded");
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );

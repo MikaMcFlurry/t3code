@@ -86,6 +86,8 @@ import {
 import * as HtmlHandlers from "./toolkits/html/handlers.ts";
 import * as SkillsHandlers from "./toolkits/skills/handlers.ts";
 import { SkillsToolkit } from "./toolkits/skills/tools.ts";
+import * as UsageHandlers from "./toolkits/usage/handlers.ts";
+import { UsageToolkit } from "./toolkits/usage/tools.ts";
 import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
 import { requestUrl } from "../requestUrl.ts";
 import * as ComputerUseLinuxMcpToolkit from "../desktop/ComputerUseLinuxMcpToolkit.ts";
@@ -1338,6 +1340,7 @@ export const layerAttachmentToolkit = toolkitRegistration(
 );
 
 const layerSkillsToolkit = toolkitRegistration(SkillsToolkit, SkillsHandlers.layer);
+const layerUsageToolkit = toolkitRegistration(UsageToolkit, UsageHandlers.layer);
 
 export const layerPullRequestsToolkit = toolkitRegistration(
   PullRequestsToolkit,
@@ -1413,6 +1416,7 @@ export const layerTools = Layer.mergeAll(
   layerDeviceToolkit,
   layerHtmlToolkit,
   layerSkillsToolkit,
+  layerUsageToolkit,
 );
 
 const layerToolExposure = Layer.effect(

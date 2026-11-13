@@ -1,4 +1,4 @@
-import { FolderPlusIcon, SearchIcon, SquarePenIcon, XIcon } from "lucide-react";
+import { BotIcon, FolderPlusIcon, SearchIcon, SquarePenIcon, XIcon } from "lucide-react";
 import {
   type ComponentProps,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -17,6 +17,8 @@ export interface SidebarThreadHeaderProps {
   projectScope: ReactNode;
   onNewProject: () => void;
   onNewThread: (event: ReactMouseEvent) => void;
+  /** Opens the Auto dialog that picks project, model and account from the task. */
+  onAutoThread?: () => void;
   newThreadDisabled: boolean;
   newThreadShortcutLabel: string | null | undefined;
   newThreadInProjectShortcutLabel: string | null | undefined;
@@ -36,6 +38,7 @@ export function SidebarThreadHeader({
   projectScope,
   onNewProject,
   onNewThread,
+  onAutoThread,
   newThreadDisabled,
   newThreadShortcutLabel,
   newThreadInProjectShortcutLabel,
@@ -104,6 +107,16 @@ export function SidebarThreadHeader({
               <FolderPlusIcon />
             </SidebarHeaderIconButton>
           </>
+        ) : null}
+        {onAutoThread ? (
+          <SidebarHeaderIconButton
+            label="Auto thread"
+            tooltip="Auto thread: pick project, model and account from the task"
+            disabled={newThreadDisabled}
+            onClick={onAutoThread}
+          >
+            <BotIcon />
+          </SidebarHeaderIconButton>
         ) : null}
         <SidebarHeaderIconButton
           label="New thread"
