@@ -61,6 +61,8 @@
         "scripts/update-test-shard-weights.ts",
         "scripts/verify-background-live.ts",
         "src/provider/testFixtures/*.mjs",
+        // Desktop tests spawn these by path.
+        "src/desktop/fixtures/*.{mjs,mts}",
         // graphqlgen reads its config.
         "graphql.config.ts",
       ],

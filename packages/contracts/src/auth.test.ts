@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
 import {
+  AuthDesktopOperateScope,
   AuthEnvironmentScopes,
   AuthEnvironmentScope,
   authScopeRequiredResponse,
@@ -47,6 +48,28 @@ describe("authorization grants", () => {
       expect(response.requiredPermission).toBe(scope);
     },
   );
+
+  it("never lets an older scope imply desktop:operate, though its denial stays decodable", () => {
+    const everyLegacyScope = decodeOldScopes([
+      "orchestration:read",
+      "orchestration:operate",
+      "terminal:operate",
+      "review:write",
+      "access:read",
+      "access:write",
+      "relay:read",
+      "relay:write",
+    ]);
+    expect(
+      sessionGrantsScope(
+        { authenticated: true, scopes: everyLegacyScope },
+        AuthDesktopOperateScope,
+      ),
+    ).toBe(false);
+    expect(authScopeRequiredResponse(AuthDesktopOperateScope).requiredPermission).toBe(
+      AuthDesktopOperateScope,
+    );
+  });
 
   it("keeps old clients able to decode grants with new permissions", () => {
     const response = authScopeResponse(AuthStandardClientScopes);

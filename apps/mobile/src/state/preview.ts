@@ -1,6 +1,9 @@
 import { useAtomValue } from "@effect/atom-react";
 import { parseScopedThreadKey, scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { PREVIEW_STREAM_BASE_PATH } from "@t3tools/client-runtime/preview/server-browser-stream";
+import {
+  type PreviewStreamKind,
+  previewStreamBasePath,
+} from "@t3tools/client-runtime/preview/server-browser-stream";
 import { createPreviewEnvironmentAtoms } from "@t3tools/client-runtime/state/preview";
 import { resolveDeviceHubAccess } from "@t3tools/client-runtime/state/deviceHubAccess";
 import type {
@@ -139,40 +142,75 @@ export function useThreadServerBrowserTabs(input: {
   return { tabs: sessions, loaded: tabs.listed };
 }
 
-// The earliest time the next access request may go out.
-const previewStreamNotBeforeAtom = Atom.family((environmentId: EnvironmentId) =>
-  Atom.make(0).pipe(Atom.withLabel(`mobile-preview-stream-retry:${environmentId}`)),
+interface StreamAccessKey {
+  readonly environmentId: EnvironmentId;
+  readonly stream: PreviewStreamKind;
+}
+
+// The earliest time the next access request may go out, per stream kind like the access itself.
+const previewStreamNotBeforeAtom = Atom.family(({ environmentId, stream }: StreamAccessKey) =>
+  Atom.make(0).pipe(Atom.withLabel(`mobile-${stream}-stream-retry:${environmentId}`)),
 );
 
-const previewStreamAccessAtom = Atom.family((environmentId: EnvironmentId) =>
+// Keyed by stream kind: each socket spends its own media ticket.
+const streamAccessKeys = new Map<string, StreamAccessKey>();
+const streamAccessKey = (environmentId: EnvironmentId, stream: PreviewStreamKind) => {
+  const id = `${stream}:${environmentId}`;
+  let key = streamAccessKeys.get(id);
+  if (!key) {
+    key = { environmentId, stream };
+    streamAccessKeys.set(id, key);
+  }
+  return key;
+};
+
+const previewStreamAccessAtom = Atom.family(({ environmentId, stream }: StreamAccessKey) =>
   connectionAtomRuntime
     .atom((get) => {
       const prepared = Option.getOrNull(
         get(environmentSession.preparedConnectionValueAtom(environmentId)),
       );
-      const notBefore = get(previewStreamNotBeforeAtom(environmentId));
+      const notBefore = get(previewStreamNotBeforeAtom(streamAccessKey(environmentId, stream)));
       if (prepared === null) return Effect.never;
-      const resolve = resolveDeviceHubAccess({ prepared, hubBasePath: PREVIEW_STREAM_BASE_PATH });
+      const resolve = resolveDeviceHubAccess({
+        prepared,
+        hubBasePath: previewStreamBasePath(stream),
+      });
       // A recompute interrupts the wait, so only the newest retry resolves.
       const wait = notBefore - Date.now();
       return wait > 0 ? Effect.andThen(Effect.sleep(wait), resolve) : resolve;
     })
-    .pipe(Atom.setIdleTTL(60_000), Atom.withLabel(`mobile-preview-stream-access:${environmentId}`)),
+    .pipe(
+      Atom.setIdleTTL(60_000),
+      Atom.withLabel(`mobile-${stream}-stream-access:${environmentId}`),
+    ),
 );
 
 /** Resolves fresh stream access once `delayMs` has passed. */
-function retryPreviewStreamAccess(environmentId: EnvironmentId, delayMs: number) {
-  appAtomRegistry.set(previewStreamNotBeforeAtom(environmentId), Date.now() + delayMs);
+function retryPreviewStreamAccess(
+  environmentId: EnvironmentId,
+  stream: PreviewStreamKind,
+  delayMs: number,
+) {
+  appAtomRegistry.set(
+    previewStreamNotBeforeAtom(streamAccessKey(environmentId, stream)),
+    Date.now() + delayMs,
+  );
 }
 
-export function usePreviewStreamAccess(environmentId: EnvironmentId) {
+export function usePreviewStreamAccess(
+  environmentId: EnvironmentId,
+  stream: PreviewStreamKind = "preview",
+) {
   const prepared = usePreparedConnection(environmentId);
-  const query = useEnvironmentQuery(previewStreamAccessAtom(environmentId));
+  const query = useEnvironmentQuery(
+    previewStreamAccessAtom(streamAccessKey(environmentId, stream)),
+  );
   const access = query.data && query.error === null && Option.isSome(prepared) ? query.data : null;
   return {
     access,
     error: query.error,
     refresh: query.refresh,
-    retryAfter: (delayMs: number) => retryPreviewStreamAccess(environmentId, delayMs),
+    retryAfter: (delayMs: number) => retryPreviewStreamAccess(environmentId, stream, delayMs),
   };
 }

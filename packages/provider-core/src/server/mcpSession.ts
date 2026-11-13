@@ -22,6 +22,24 @@ export interface McpProviderSessionConfig {
   readonly hasPendingWake?: Effect.Effect<boolean>;
 }
 
+/**
+ * Environment for shared stdio MCP servers, so one entry can serve every provider: a server
+ * that routes per session (for example agent-to-agent messaging) learns the provider kind,
+ * account and T3 thread it was started for. A server's own env entries win.
+ */
+export function sharedMcpSessionEnvironment(
+  driver: string,
+  session: Pick<McpProviderSessionConfig, "threadId" | "providerInstanceId"> | undefined,
+): Readonly<Record<string, string>> {
+  return session === undefined
+    ? { T3CODE_PROVIDER: driver }
+    : {
+        T3CODE_PROVIDER: driver,
+        T3CODE_PROVIDER_INSTANCE: session.providerInstanceId,
+        T3CODE_THREAD_ID: session.threadId,
+      };
+}
+
 export function withAgentDeviceEnvironment(
   base: NodeJS.ProcessEnv,
   config: Pick<McpProviderSessionConfig, "agentDeviceEnvironment"> | undefined,

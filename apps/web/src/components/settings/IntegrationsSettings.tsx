@@ -7,6 +7,7 @@ import {
   AuthSettingsWriteScope,
   BrowserImportFailureReason,
   BROWSER_PROFILE_MAX_COUNT,
+  type AgentDesktopApproval,
   type BrowserLinkTarget,
   type BrowserProfile,
   BrowserSearchEngine,
@@ -21,6 +22,7 @@ import {
   DEFAULT_BROWSER_SEARCH_ENGINE,
   DEFAULT_BROWSER_VIEWPORT,
   DEFAULT_PREVIEW_APPEARANCE,
+  AuthDesktopOperateScope,
   DEFAULT_PREVIEW_ZOOM_FACTOR,
   DEFAULT_SERVER_SETTINGS,
   FILL_PREVIEW_VIEWPORT,
@@ -114,6 +116,7 @@ import {
   SettingsSection,
 } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
+import { openDesktopLiveView } from "../desktop/DesktopLiveViewDialog";
 import { AdvancedSettings } from "./AdvancedSettings";
 import { useSettingsScope } from "./SettingsScopeContext";
 import { BrowserImportWizard, type WizardTarget } from "./BrowserImportWizard";
@@ -1073,6 +1076,162 @@ function AgentBrowserAccessSetting() {
   );
 }
 
+function AgentDesktopAccessSetting() {
+  const { scope } = useSettingsScope();
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  const isProjectScope = scope.kind === "project" || scope.kind === "checkout";
+
+  return (
+    <SettingsRow
+      serverScoped
+      settingKeys={["enableAgentDesktopAccess"]}
+      {...searchableSetting("agent-desktop-access")}
+      description={
+        <>
+          {isProjectScope
+            ? "Allow agents in this project to see and control this machine's desktop."
+            : "Allow agents to see and control this machine's desktop. Projects can override it."}{" "}
+          Linux needs <code>computer-use-linux</code> on PATH, Windows needs <code>uv</code>. Shell
+          and file tools stay off. Applies to new sessions.
+        </>
+      }
+      resetAction={
+        settings.enableAgentDesktopAccess !== DEFAULT_SERVER_SETTINGS.enableAgentDesktopAccess ? (
+          <SettingResetButton
+            label="default desktop control"
+            onClick={() =>
+              updateSettings({
+                enableAgentDesktopAccess: DEFAULT_SERVER_SETTINGS.enableAgentDesktopAccess,
+              })
+            }
+          />
+        ) : null
+      }
+      control={
+        <ScopedSwitch
+          settingKeys={["enableAgentDesktopAccess"]}
+          aria-label="Agent desktop control"
+          checked={settings.enableAgentDesktopAccess}
+          onCheckedChange={(enabled) => updateSettings({ enableAgentDesktopAccess: enabled })}
+        />
+      }
+    />
+  );
+}
+
+const DESKTOP_APPROVAL_LABELS: Record<AgentDesktopApproval, string> = {
+  "every-action": "Ask every time",
+  "full-access-threads": "Not in full access",
+  standing: "Never ask",
+};
+
+function AgentDesktopApprovalSetting() {
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+
+  return (
+    <SettingsRow
+      serverScoped
+      settingKeys={["agentDesktopApproval"]}
+      {...searchableSetting("agent-desktop-approval")}
+      description="When a desktop click or keystroke waits for your approval. Not in full access: full-access threads act without asking. Never ask: always allowed. Stop or a new session still ends it."
+      resetAction={
+        settings.agentDesktopApproval !== DEFAULT_SERVER_SETTINGS.agentDesktopApproval ? (
+          <SettingResetButton
+            label="desktop approval"
+            onClick={() =>
+              updateSettings({ agentDesktopApproval: DEFAULT_SERVER_SETTINGS.agentDesktopApproval })
+            }
+          />
+        ) : null
+      }
+      control={
+        <Select
+          value={settings.agentDesktopApproval}
+          onValueChange={(value) => {
+            if (
+              value === "every-action" ||
+              value === "full-access-threads" ||
+              value === "standing"
+            ) {
+              updateSettings({ agentDesktopApproval: value });
+            }
+          }}
+        >
+          <SelectTrigger size="sm" className="w-full sm:w-44" aria-label="Desktop approval">
+            <SelectValue>{DESKTOP_APPROVAL_LABELS[settings.agentDesktopApproval]}</SelectValue>
+          </SelectTrigger>
+          <SelectPopup align="end" alignItemWithTrigger={false}>
+            {(Object.keys(DESKTOP_APPROVAL_LABELS) as ReadonlyArray<AgentDesktopApproval>).map(
+              (approval) => (
+                <SelectItem hideIndicator key={approval} value={approval}>
+                  {DESKTOP_APPROVAL_LABELS[approval]}
+                </SelectItem>
+              ),
+            )}
+          </SelectPopup>
+        </Select>
+      }
+    />
+  );
+}
+
+function DesktopLiveViewSetting() {
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  const { connectedEnvironments } = useSettingsScope();
+  // Open shows one machine's screen; with several in scope it would have to guess which.
+  const machine = connectedEnvironments.length === 1 ? connectedEnvironments[0]! : null;
+  const canWatch = useEnvironmentScope(machine?.environmentId ?? null, AuthDesktopOperateScope);
+
+  return (
+    <SettingsRow
+      serverScoped
+      settingKeys={["enableDesktopLiveView"]}
+      {...searchableSetting("desktop-live-view")}
+      description="Show this machine's screen live in your T3 apps and take over for a password, captcha or system prompt. Linux with GNOME only; the machine asks once to share its screen."
+      resetAction={
+        settings.enableDesktopLiveView !== DEFAULT_SERVER_SETTINGS.enableDesktopLiveView ? (
+          <SettingResetButton
+            label="desktop live view"
+            onClick={() =>
+              updateSettings({
+                enableDesktopLiveView: DEFAULT_SERVER_SETTINGS.enableDesktopLiveView,
+              })
+            }
+          />
+        ) : null
+      }
+      control={
+        <div className="flex items-center gap-2">
+          {settings.enableDesktopLiveView && machine !== null ? (
+            canWatch ? (
+              <Button
+                variant="outline"
+                size="xs"
+                onClick={() => openDesktopLiveView(machine.environmentId)}
+              >
+                Open
+              </Button>
+            ) : (
+              <span className="text-xs text-muted-foreground">
+                Needs the &quot;Watch and control the desktop&quot; permission
+              </span>
+            )
+          ) : null}
+          <ScopedSwitch
+            settingKeys={["enableDesktopLiveView"]}
+            aria-label="Desktop live view"
+            checked={settings.enableDesktopLiveView}
+            onCheckedChange={(enabled) => updateSettings({ enableDesktopLiveView: enabled })}
+          />
+        </div>
+      }
+    />
+  );
+}
+
 function BrowserAutoShowFloatingPreviewSetting({ disabled }: { readonly disabled: boolean }) {
   const autoShow = useClientSettings((settings) => settings.browserAutoShowFloatingPreview);
   const updateSettings = useUpdateScopedSettings();
@@ -1586,6 +1745,9 @@ export function BrowserSettingsPanel() {
     <SettingsPageContainer>
       <SettingsSection id="browser-agent-access" title="Agent access">
         <AgentBrowserAccessSetting />
+        <AgentDesktopAccessSetting />
+        <AgentDesktopApprovalSetting />
+        <DesktopLiveViewSetting />
       </SettingsSection>
       <SettingsSection id="browser" title="Browsing">
         <SettingsUnavailableGroup message={desktopOnlyMessage}>

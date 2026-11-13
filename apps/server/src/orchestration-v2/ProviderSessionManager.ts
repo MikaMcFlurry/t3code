@@ -61,6 +61,10 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import {
+  ComputerUseLinuxApprovalRevocation,
+  ComputerUseLinuxDeploymentEnabled,
+} from "../desktop/ComputerUseLinuxAvailability.ts";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_IDLE_PIN_MS = 4 * 60 * 60 * 1000;
@@ -424,6 +428,7 @@ export const layerWithOptions = (
       const fileSystem = yield* FileSystem.FileSystem;
       const mcpSessionRegistry = yield* McpSessionRegistry.McpSessionRegistry;
       const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+      const desktopApprovalRevocation = yield* ComputerUseLinuxApprovalRevocation;
       /** Unreadable settings must preserve explicit browser-access opt-outs. */
       const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
       const projectService = yield* Effect.serviceOption(ProjectService.ProjectService);
@@ -435,6 +440,7 @@ export const layerWithOptions = (
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
       const providerEventIngestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const computerUseLinuxDeploymentEnabled = yield* ComputerUseLinuxDeploymentEnabled;
       const agentScope = yield* AgentScope;
       const installationGate = yield* ProviderInstallationGate.ProviderInstallationGate;
       // Labs flag, read live: Codex per turn (its shared session outlives a toggle), Claude per query.
@@ -445,9 +451,39 @@ export const layerWithOptions = (
             Effect.map((settings) => settings.promptSuggestionsEnabled),
             Effect.orElseSucceed(() => false),
           );
+      const revokeDesktopSession = (providerSessionId: string) =>
+        Effect.promise(() => desktopApprovalRevocation.revokeSession(providerSessionId)).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("desktop-session-revocation-failed", {
+              providerSessionId,
+              cause,
+            }),
+          ),
+        );
+      const revokeDesktopThread = (threadId: ThreadId) =>
+        Effect.promise(() => desktopApprovalRevocation.revokeThread(threadId)).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("desktop-thread-revocation-failed", { threadId, cause }),
+          ),
+        );
+      const interruptDesktopThread = (threadId: ThreadId) =>
+        Effect.promise(() => desktopApprovalRevocation.interruptThread(threadId)).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("desktop-thread-interrupt-failed", { threadId, cause }),
+          ),
+        );
+      const revokeMcpThread = (threadId: ThreadId) =>
+        mcpSessionRegistry
+          .revokeThread(threadId)
+          .pipe(Effect.andThen(revokeDesktopThread(threadId)));
+      const revokeMcpSession = (providerSessionId: string) =>
+        mcpSessionRegistry
+          .revokeProviderSession(providerSessionId)
+          .pipe(Effect.andThen(revokeDesktopSession(providerSessionId)));
       const agentAccessSettings = Effect.fn("ProviderSessionManagerV2.agentAccessSettings")(
         function* (threadId: ThreadId) {
-          if (Option.isNone(serverSettings)) return { browser: true, device: false };
+          if (Option.isNone(serverSettings))
+            return { browser: true, desktop: false, device: false };
           return yield* Effect.gen(function* () {
             const settings = yield* serverSettings.value.getSettings;
             const thread = yield* projectionStore.getThread(threadId);
@@ -458,27 +494,34 @@ export const layerWithOptions = (
             const deviceOverridden = entries.some(
               (entry) => entry.enableAgentDeviceAccess !== undefined,
             );
-            if (browserOverridden || deviceOverridden) {
+            const desktopOverridden = entries.some(
+              (entry) => entry.enableAgentDesktopAccess !== undefined,
+            );
+            if (browserOverridden || deviceOverridden || desktopOverridden) {
               const project = Option.isSome(projectService)
                 ? yield* projectService.value.getById(thread.projectId)
                 : Option.none();
               if (Option.isNone(project))
                 return {
                   browser: browserOverridden ? false : settings.enableAgentBrowserAccess,
+                  desktop:
+                    computerUseLinuxDeploymentEnabled &&
+                    (desktopOverridden ? false : settings.enableAgentDesktopAccess),
                   device: deviceOverridden ? false : settings.enableAgentDeviceAccess,
                 };
             }
             const effective = resolveProjectSettings(settings, thread.projectId).settings;
             return {
               browser: effective.enableAgentBrowserAccess,
+              desktop: computerUseLinuxDeploymentEnabled && effective.enableAgentDesktopAccess,
               device: effective.enableAgentDeviceAccess,
             };
           }).pipe(
             Effect.catch((cause) =>
               Effect.logWarning(
-                "Could not resolve agent access; withholding browser and device tools.",
+                "Could not resolve agent access; withholding browser, desktop, and device tools.",
                 { threadId, cause },
-              ).pipe(Effect.as({ browser: false, device: false })),
+              ).pipe(Effect.as({ browser: false, desktop: false, device: false })),
             ),
           );
         },
@@ -556,12 +599,16 @@ export const layerWithOptions = (
               threadId,
               Effect.gen(function* () {
                 // Live providers build MCP clients once; reuse credentials across workspace handoffs.
-                const { browser: browserToolsAvailable, device: deviceToolsAvailable } =
-                  yield* agentAccessSettings(threadId);
+                const {
+                  browser: browserToolsAvailable,
+                  desktop: desktopToolsAvailable,
+                  device: deviceToolsAvailable,
+                } = yield* agentAccessSettings(threadId);
                 const capabilities = new Set<
                   import("../mcp/McpInvocationContext.ts").McpCapability
                 >(["orchestration", "worktree", "pull-requests"]);
                 if (browserToolsAvailable) capabilities.add("preview");
+                if (desktopToolsAvailable) capabilities.add("desktop");
                 if (deviceToolsAvailable) capabilities.add("device");
                 const subagent = yield* projectionStore.getThread(threadId).pipe(
                   Effect.map((thread) => thread.lineage.relationshipToParent === "subagent"),
@@ -587,15 +634,23 @@ export const layerWithOptions = (
                     resolved.thread.threadId === threadId &&
                     resolved.thread.providerInstanceId === providerInstanceId &&
                     resolved.capabilities.has("preview") === browserToolsAvailable &&
+                    resolved.capabilities.has("desktop") === desktopToolsAvailable &&
                     resolved.capabilities.has("device") === deviceToolsAvailable &&
                     // A credential issued while the lineage read failed is replaced once it works.
                     (resolved.thread.subagent === true) === subagent
                   ) {
+                    if (desktopToolsAvailable) {
+                      desktopApprovalRevocation.activateSession({
+                        providerSessionId: existing.providerSessionId,
+                        threadId,
+                      });
+                    }
                     return { mcpCredentialId: existing.providerSessionId, issued: false };
                   }
                   dropMcpCredentialReservation(threadId, existing.providerSessionId);
+                  yield* revokeMcpSession(existing.providerSessionId);
                 }
-                yield* mcpSessionRegistry.revokeThread(threadId);
+                yield* revokeMcpThread(threadId);
                 const credential = yield* mcpSessionRegistry.issue({
                   threadId,
                   providerInstanceId,
@@ -612,24 +667,34 @@ export const layerWithOptions = (
                       Effect.orElseSucceed(() => false),
                     ),
                 });
+                if (desktopToolsAvailable) {
+                  desktopApprovalRevocation.activateSession({
+                    providerSessionId: credential.config.providerSessionId,
+                    threadId,
+                  });
+                }
                 reserveMcpCredential(threadId, credential.config.providerSessionId);
                 return { mcpCredentialId: credential.config.providerSessionId, issued: true };
               }),
             );
-      const clearMcpSession = (threadId: ThreadId, mcpCredentialId?: string) =>
-        mcpCredentialId === undefined
-          ? mcpSessionRegistry
-              .revokeThread(threadId)
-              .pipe(Effect.tap(() => mcpSessions.clear(threadId)))
-          : mcpSessionRegistry.revokeProviderSession(mcpCredentialId).pipe(
-              Effect.tap(() =>
-                Effect.gen(function* () {
-                  if ((yield* mcpSessions.read(threadId))?.providerSessionId === mcpCredentialId) {
-                    yield* mcpSessions.clear(threadId);
-                  }
-                }),
-              ),
-            );
+      const clearMcpSession = Effect.fn("ProviderSessionManager.clearMcpSession")(function* (
+        threadId: ThreadId,
+        mcpCredentialId?: string,
+      ) {
+        if (mcpCredentialId === undefined) {
+          const existing = yield* mcpSessions.read(threadId);
+          yield* revokeMcpThread(threadId);
+          if (existing !== undefined) {
+            yield* revokeDesktopSession(existing.providerSessionId);
+          }
+          yield* mcpSessions.clear(threadId);
+          return;
+        }
+        yield* revokeMcpSession(mcpCredentialId);
+        if ((yield* mcpSessions.read(threadId))?.providerSessionId === mcpCredentialId) {
+          yield* mcpSessions.clear(threadId);
+        }
+      });
 
       const subscriberReleaseCleanup = new WeakMap<
         Queue.Queue<ProviderSessionEventSignal, Cause.Done>,
@@ -2383,7 +2448,14 @@ export const layerWithOptions = (
                     ),
                   ),
                   () =>
-                    runtime.startTurn(input).pipe(turnMetrics("send", input.modelSelection.model)),
+                    // A new turn may use the desktop again after a Stop closed it.
+                    Effect.sync(() => desktopApprovalRevocation.resumeThread(input.threadId)).pipe(
+                      Effect.andThen(
+                        runtime
+                          .startTurn(input)
+                          .pipe(turnMetrics("send", input.modelSelection.model)),
+                      ),
+                    ),
                   (_, exit) =>
                     Exit.isFailure(exit)
                       ? observeActivity(
@@ -2401,6 +2473,13 @@ export const layerWithOptions = (
           // A provider starved of memory can stop answering, so no caller may wait on it unbounded.
           interruptTurn: (input) =>
             observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
+              // Stop also ends desktop work an MCP call started this turn, which the provider's
+              // own interrupt never reaches: a pending approval or a running click.
+              Effect.andThen(
+                input.providerThread.appThreadId === null
+                  ? Effect.void
+                  : interruptDesktopThread(input.providerThread.appThreadId),
+              ),
               Effect.andThen(
                 runtime.interruptTurn(input).pipe(
                   Effect.timeoutOrElse({

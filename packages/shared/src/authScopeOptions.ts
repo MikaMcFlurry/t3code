@@ -1,6 +1,7 @@
 import {
   AuthAccessReadScope,
   AuthAccessWriteScope,
+  AuthDesktopOperateScope,
   AuthDiagnosticsReadScope,
   AuthEnvironmentMaintainScope,
   AuthFilesystemReadScope,
@@ -52,6 +53,11 @@ export const AUTH_SCOPE_OPTIONS: ReadonlyArray<{
     scope: AuthPreviewOperateScope,
     title: "Control previews",
     description: "Open browser previews and host browser automation.",
+  },
+  {
+    scope: AuthDesktopOperateScope,
+    title: "Watch and control the desktop",
+    description: "See this machine's whole screen live and take over mouse and keyboard.",
   },
   {
     scope: AuthDiagnosticsReadScope,

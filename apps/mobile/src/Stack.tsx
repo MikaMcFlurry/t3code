@@ -56,6 +56,7 @@ import { ReviewSheet } from "./features/review/ReviewSheet";
 import { ThreadTerminalRouteScreen } from "./features/terminal/ThreadTerminalRouteScreen";
 import { DevicePreviewRouteScreen } from "./features/devices/DevicePreviewRouteScreen";
 import { BrowserPreviewRouteScreen } from "./features/browser/BrowserPreviewRouteScreen";
+import { DesktopLiveViewRouteScreen } from "./features/desktop/DesktopLiveViewRouteScreen";
 import { GitBranchesSheet } from "./features/threads/git/GitBranchesSheet";
 import { GitCommitSheet } from "./features/threads/git/GitCommitSheet";
 import { GitConfirmSheet } from "./features/threads/git/GitConfirmSheet";
@@ -176,6 +177,12 @@ const SETTINGS_SCREENS = {
     screen: SettingsEnvironmentDetailRouteScreen,
     linking: "settings/environments/:environmentId",
     options: settingsPage("Environment"),
+  }),
+  // A push asking for a person can link straight here.
+  EnvironmentDesktopLiveView: createNativeStackScreen({
+    screen: DesktopLiveViewRouteScreen,
+    linking: "settings/environments/:environmentId/desktop",
+    options: { ...modalRoute({ header: "solid" }), title: "Desktop", gestureEnabled: false },
   }),
   // Old links to New threads and Agent behavior open Threads, which absorbed them.
   SettingsEnvironmentNewThreads: createNativeStackScreen({

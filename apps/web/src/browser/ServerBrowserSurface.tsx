@@ -1,6 +1,8 @@
 import {
   createPreviewFramePainter,
   createPreviewStreamClient,
+  type DesktopStreamStatus,
+  desktopStreamControlLabel,
   previewStreamControlLabel,
   previewStreamModifiers,
   type PreviewStreamClient,
@@ -9,6 +11,7 @@ import {
   type PreviewStreamFileChooser,
   uploadPreviewStreamFiles,
   type PreviewStreamInput,
+  type PreviewStreamKind,
   type PreviewStreamMouseButton,
   type PreviewStreamPointer,
   type PreviewStreamViewport,
@@ -122,6 +125,18 @@ async function copyPageText(text: string) {
   }
 }
 
+const DESKTOP_STATUS_MESSAGES: Record<
+  Exclude<DesktopStreamStatus["state"], "streaming">,
+  string
+> = {
+  unverified: "Screen sharing has not worked on this machine yet.",
+  starting: "Starting the screen capture...",
+  consent: "Waiting for someone at the machine to allow screen sharing. This is asked once.",
+  denied: "Screen sharing was declined on the machine.",
+  ended: "Screen sharing was stopped on the machine.",
+  unavailable: "This machine cannot share its screen right now.",
+};
+
 function offerDownload(download: PreviewStreamDownload) {
   const id = toastManager.add({
     type: "info",
@@ -152,6 +167,8 @@ export function ServerBrowserSurface(props: {
   readonly onPopup?: (tabId: string) => void;
   readonly className?: string;
   readonly pdfUrl?: string | null;
+  /** `desktop` shows the machine's whole screen through the desktop live view. */
+  readonly stream?: PreviewStreamKind;
   readonly ref?: Ref<ServerBrowserHandle>;
 }) {
   const {
@@ -167,8 +184,11 @@ export function ServerBrowserSurface(props: {
     onPopup,
     className,
     pdfUrl = null,
+    stream = "preview",
     ref,
   } = props;
+  const desktop = stream === "desktop";
+  const [desktopStatus, setDesktopStatus] = useState<DesktopStreamStatus | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const keySentRef = useRef(false);
@@ -196,7 +216,7 @@ export function ServerBrowserSurface(props: {
   };
   const unauthorizedRef = useRef(0);
   const [accessDenied, setAccessDenied] = useState(false);
-  const access = usePreviewStreamAccess(environmentId, { retry: visible && !accessDenied });
+  const access = usePreviewStreamAccess(environmentId, { retry: visible && !accessDenied, stream });
   const [hostSetup, setHostSetup] = useState<PreviewStreamHostSetup | null>(null);
   const pendingMoveRef = useRef<MouseInput | null>(null);
   const pendingWheelRef = useRef<WheelInput | null>(null);
@@ -430,6 +450,11 @@ export function ServerBrowserSurface(props: {
           clearInput();
         },
         onHostSetup: setHostSetup,
+        onDesktop: setDesktopStatus,
+        onGone: (reason) => {
+          if (desktop)
+            setDesktopStatus({ state: "unavailable", ...(reason ? { detail: reason } : {}) });
+        },
         onUnauthorized: () => {
           const refusals = ++unauthorizedRef.current;
           if (refusals >= MAX_UNAUTHORIZED_REFUSALS) {
@@ -438,7 +463,7 @@ export function ServerBrowserSurface(props: {
             return;
           }
           refreshTimer = setTimeout(
-            () => refreshPreviewStreamAccess(environmentId),
+            () => refreshPreviewStreamAccess(environmentId, stream),
             refusals === 1 ? 0 : 1_000 * 2 ** (refusals - 1),
           );
         },
@@ -460,9 +485,11 @@ export function ServerBrowserSurface(props: {
     accessDenied,
     cap,
     clearInput,
+    desktop,
     environmentId,
     followSize,
     hostSetup,
+    stream,
     tabId,
     threadId,
     visible,
@@ -535,7 +562,8 @@ export function ServerBrowserSurface(props: {
               tapped: false,
             }
           : null;
-        if (point) send({ type: "probe", x: point.x, y: point.y });
+        // The desktop cannot tell an editable spot; its keyboard opens from the control bar.
+        if (point && !desktop) send({ type: "probe", x: point.x, y: point.y });
         return;
       }
       if (!touch || touch.pointerId !== pointerId) return;
@@ -753,8 +781,13 @@ export function ServerBrowserSurface(props: {
         )}
       >
         <span role="status" className="text-xs text-muted-foreground">
-          {previewStreamControlLabel(control)}
+          {desktop ? desktopStreamControlLabel(control) : previewStreamControlLabel(control)}
         </span>
+        {desktop && control?.controller === "you" ? (
+          <Button variant="ghost" size="xs" className="ml-auto" onClick={focusInput}>
+            Keyboard
+          </Button>
+        ) : null}
         {control?.canOperate ? (
           <Button
             variant="outline"
@@ -796,8 +829,12 @@ export function ServerBrowserSurface(props: {
         {/* Pin top-left to avoid focus scrolling; 16px prevents iOS focus zoom. */}
         <textarea
           ref={inputRef}
-          aria-label="Browser page"
-          aria-description="Press Shift+Escape to leave the browser page."
+          aria-label={desktop ? "Desktop" : "Browser page"}
+          aria-description={
+            desktop
+              ? "Press Shift+Escape to leave the desktop."
+              : "Press Shift+Escape to leave the browser page."
+          }
           autoCapitalize="off"
           autoComplete="off"
           autoCorrect="off"
@@ -897,6 +934,25 @@ export function ServerBrowserSurface(props: {
           </div>
         ) : null}
       </div>
+      {visible && desktop && desktopStatus && desktopStatus.state !== "streaming" ? (
+        <div className="visible absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-background p-4 text-center">
+          <p role="status" className="max-w-sm text-sm text-muted-foreground">
+            {desktopStatus.detail ?? DESKTOP_STATUS_MESSAGES[desktopStatus.state]}
+          </p>
+          {desktopStatus.state === "denied" ||
+          desktopStatus.state === "ended" ||
+          (desktopStatus.state === "unavailable" && control !== null) ? (
+            <Button variant="outline" size="sm" onClick={() => send({ type: "reload" })}>
+              Try again
+            </Button>
+          ) : null}
+          {desktopStatus.state === "unverified" && control !== null ? (
+            <Button variant="destructive" size="sm" onClick={() => send({ type: "reload" })}>
+              Start screen sharing anyway
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
       {visible && hostSetup ? (
         <div className="visible absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-background p-4 text-center">
           <p role="alert" className="max-w-sm text-sm text-muted-foreground">
@@ -912,7 +968,9 @@ export function ServerBrowserSurface(props: {
         // The page can be invisible beneath an empty or unreachable state; reconnect must remain reachable.
         <div className="visible absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-background p-3 text-center">
           <p role="alert" className="text-xs text-muted-foreground">
-            Browser connection was refused.
+            {desktop
+              ? "This device may not watch the desktop. Pair it with the 'Watch and control the desktop' permission."
+              : "Browser connection was refused."}
           </p>
           <Button
             variant="outline"
@@ -920,7 +978,7 @@ export function ServerBrowserSurface(props: {
             onClick={() => {
               unauthorizedRef.current = 0;
               setAccessDenied(false);
-              refreshPreviewStreamAccess(environmentId);
+              refreshPreviewStreamAccess(environmentId, stream);
             }}
           >
             Reconnect

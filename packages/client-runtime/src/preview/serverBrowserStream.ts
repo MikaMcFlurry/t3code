@@ -7,6 +7,36 @@ import {
 } from "@t3tools/contracts";
 
 export const PREVIEW_STREAM_BASE_PATH = "/api/preview-stream";
+/** A machine's whole screen, in the same protocol as a preview tab. */
+export const DESKTOP_STREAM_BASE_PATH = "/api/desktop-stream";
+
+export type PreviewStreamKind = "preview" | "desktop";
+
+export const previewStreamBasePath = (stream: PreviewStreamKind): string =>
+  stream === "desktop" ? DESKTOP_STREAM_BASE_PATH : PREVIEW_STREAM_BASE_PATH;
+
+/** The live desktop capture: starting, waiting for consent on the machine, or why it stopped. */
+export interface DesktopStreamStatus {
+  readonly state:
+    | "unverified"
+    | "starting"
+    | "consent"
+    | "streaming"
+    | "denied"
+    | "ended"
+    | "unavailable";
+  readonly detail?: string;
+}
+
+const DESKTOP_STREAM_STATES = new Set<string>([
+  "unverified",
+  "starting",
+  "consent",
+  "streaming",
+  "denied",
+  "ended",
+  "unavailable",
+]);
 
 export interface PreviewStreamViewport {
   readonly width: number;
@@ -25,6 +55,18 @@ export interface PreviewStreamControl {
     readonly defaultValue: string;
   };
 }
+
+/** The desktop live view's wording: only T3's own desktop tools wait for the person. */
+export const desktopStreamControlLabel = (control: PreviewStreamControl | null): string =>
+  !control
+    ? "Connecting..."
+    : control.controller === "you"
+      ? "You have control. T3's desktop tools wait."
+      : control.controller === "another-viewer"
+        ? "Another viewer has control"
+        : control.canOperate
+          ? "Watching. The agent can act."
+          : "Read-only";
 
 export const previewStreamControlLabel = (control: PreviewStreamControl | null): string =>
   !control
@@ -195,8 +237,10 @@ export interface PreviewStreamEvents {
   readonly onConnectedChange: (connected: boolean) => void;
   /** The upgrade was refused; refresh access and start a new client. */
   readonly onUnauthorized: () => void;
-  readonly onGone?: () => void;
+  /** The tab closed, or the server offers no desktop live view; `reason` says why. */
+  readonly onGone?: (reason: string) => void;
   readonly onHostSetup?: (setup: PreviewStreamHostSetup) => void;
+  readonly onDesktop?: (status: DesktopStreamStatus) => void;
 }
 
 export interface PreviewStreamClient {
@@ -278,7 +322,16 @@ export function createPreviewStreamClient(
         phase,
         sequence,
         tabId,
+        state,
+        detail,
       } = message as Record<string, unknown>;
+      if (type === "desktop" && typeof state === "string" && DESKTOP_STREAM_STATES.has(state)) {
+        events.onDesktop?.({
+          state: state as DesktopStreamStatus["state"],
+          ...(typeof detail === "string" ? { detail } : {}),
+        });
+        return;
+      }
       if (
         type === "fileChooser" &&
         typeof id === "string" &&
@@ -358,7 +411,7 @@ export function createPreviewStreamClient(
       if (stopped) return;
       if (event.code === 4404) {
         stopped = true;
-        events.onGone?.();
+        events.onGone?.(event.reason);
         return;
       }
       if (event.code === PREVIEW_STREAM_HOST_SETUP_CLOSE_CODE) {
@@ -383,7 +436,9 @@ export function createPreviewStreamClient(
     send: (input) => {
       if (socket?.readyState !== WebSocket.OPEN) return false;
       if (!control?.canOperate) return false;
-      if (input.type !== "takeControl" && control.controller !== "you") return false;
+      // A reload also restarts a stopped desktop capture, so watchers may ask for it.
+      if (input.type !== "takeControl" && input.type !== "reload" && control.controller !== "you")
+        return false;
       socket.send(JSON.stringify(input));
       return true;
     },

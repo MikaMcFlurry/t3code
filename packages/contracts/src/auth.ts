@@ -46,6 +46,8 @@ export const AuthAccessReadScope = "access:read" as const;
 export const AuthAccessWriteScope = "access:write" as const;
 export const AuthRelayReadScope = "relay:read" as const;
 export const AuthRelayWriteScope = "relay:write" as const;
+/** Watch and drive the machine's whole screen; never part of a standard client grant. */
+export const AuthDesktopOperateScope = "desktop:operate" as const;
 export const AuthEnvironmentScope = Schema.Literals([
   AuthOrchestrationReadScope,
   AuthOrchestrationOperateScope,
@@ -64,6 +66,7 @@ export const AuthEnvironmentScope = Schema.Literals([
   AuthAccessWriteScope,
   AuthRelayReadScope,
   AuthRelayWriteScope,
+  AuthDesktopOperateScope,
 ]);
 export type AuthEnvironmentScope = typeof AuthEnvironmentScope.Type;
 export const AuthEnvironmentScopes = Schema.Array(AuthEnvironmentScope);
@@ -109,10 +112,17 @@ const legacyParents: Partial<Record<AuthEnvironmentScope, AuthEnvironmentScope>>
   [AuthTerminalReadScope]: AuthTerminalOperateScope,
 };
 
+// For denials only: an old client just learns that a permission is missing. Kept apart from
+// `legacyParents`, since no older scope may ever imply whole-screen access.
+const legacyDenialScopes: Partial<Record<AuthEnvironmentScope, AuthEnvironmentScope>> = {
+  ...legacyParents,
+  [AuthDesktopOperateScope]: AuthOrchestrationOperateScope,
+};
+
 /** Keep permission denials decodable by clients with the original scope enum. */
 export function authScopeRequiredResponse(requiredPermission: AuthEnvironmentScope) {
   return {
-    requiredScope: legacyParents[requiredPermission] ?? requiredPermission,
+    requiredScope: legacyDenialScopes[requiredPermission] ?? requiredPermission,
     requiredPermission,
   };
 }

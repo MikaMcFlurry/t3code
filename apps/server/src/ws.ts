@@ -187,6 +187,7 @@ import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as ServerSettings from "./serverSettings.ts";
+import * as ComputerUseLinuxApprovalBroker from "./desktop/ComputerUseLinuxApprovalBroker.ts";
 import { invalidateSettingsSecrets } from "./sourceControl/sourceControlHostSecrets.ts";
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
@@ -1441,6 +1442,10 @@ export const layerWsRpc = (
       const scratchThreadPromotion = yield* ScratchThreadPromotion.ScratchThreadPromotion;
       const eventLoopMonitor = yield* EventLoopMonitor.EventLoopMonitor;
       const threadSearch = yield* ThreadSearch.ThreadSearch;
+      const desktopApprovals = Option.getOrElse(
+        yield* Effect.serviceOption(ComputerUseLinuxApprovalBroker.ComputerUseLinuxApprovalBroker),
+        () => ComputerUseLinuxApprovalBroker.disabled,
+      );
 
       const providerSessionsV2 = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const mcpAppRequests = yield* McpAppRequests.McpAppRequests;
@@ -3502,6 +3507,9 @@ export const layerWsRpc = (
               Stream.concat(Stream.make(latest), changes),
             ),
           ),
+        [WS_METHODS.subscribeDesktopApprovals]: (_input) => desktopApprovals.stream,
+        [WS_METHODS.desktopApprovalRespond]: (input) =>
+          Effect.succeed({ accepted: desktopApprovals.respond(input) }),
       });
       const splitHandlers: Pick<typeof handlers, SplitWsRpc["_tag"]> = handlers;
       const otherHandlers: Pick<typeof handlers, Exclude<ServerWsRpc, SplitWsRpc>["_tag"]> =

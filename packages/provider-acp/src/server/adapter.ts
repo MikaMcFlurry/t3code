@@ -72,6 +72,7 @@ import type * as EffectAcpSchema from "effect-acp/compat";
 import { formatReadToolLabel, formatSearchToolLabel } from "@t3tools/shared/toolActivity";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { makeAcpMcpOverAcpBridge, type AcpMcpOverAcpBridge } from "./mcpOverAcpBridge.ts";
+import { AcpSharedMcpServers } from "./sharedMcpServers.ts";
 import { mcpToolPresentation } from "@t3tools/provider-core/server/mcpToolPresentation";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
@@ -204,6 +205,7 @@ export interface AcpAdapterV2RuntimeInput {
   readonly mcpServers: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly acpMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly httpMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
+  readonly sharedMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly processEnvironment?: NodeJS.ProcessEnv;
   readonly resumeSessionId?: string;
   readonly interruptPromptOnCancel?: boolean;
@@ -884,6 +886,7 @@ interface AcpMcpContext {
   readonly servers: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly acpServers: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly httpServers: ReadonlyArray<EffectAcpSchema.McpServer>;
+  readonly sharedServers: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly processEnvironment?: NodeJS.ProcessEnv;
   readonly endpoint?: string;
   readonly authorization?: string;
@@ -894,9 +897,33 @@ function acpMcpContext(
   self: SelfInvocation,
   mcpOverHttp: boolean | undefined,
   deferMcpTools: boolean | undefined,
+  shared: ReadonlyArray<EffectAcpSchema.McpServer> = [],
+  driver = "acp",
 ): AcpMcpContext {
+  // Tell shared stdio servers which provider and thread they serve; their own env entries win.
+  const sessionEnvironment = Object.entries(
+    McpProviderSession.sharedMcpSessionEnvironment(driver, session),
+  );
+  const sharedServers = shared.map((server) => {
+    if (!("command" in server)) return server;
+    const own: ReadonlyArray<{ readonly name: string; readonly value: string }> = Array.isArray(
+      server.env,
+    )
+      ? server.env
+      : [];
+    const taken = new Set(own.map((entry) => entry.name));
+    return {
+      ...server,
+      env: [
+        ...sessionEnvironment
+          .filter(([name]) => !taken.has(name))
+          .map(([name, value]) => ({ name, value })),
+        ...own,
+      ],
+    };
+  });
   if (session === undefined) {
-    return { servers: [], acpServers: [], httpServers: [] };
+    return { servers: [], acpServers: [], httpServers: [], sharedServers };
   }
   // codex-acp 1.2.0 and pi-acp drop injected HTTP servers, so HTTP is opt-in per flavor.
   return {
@@ -929,6 +956,7 @@ function acpMcpContext(
             },
           ]
         : [],
+    sharedServers,
     endpoint: session.endpoint,
     authorization: session.authorizationHeader,
     processEnvironment: {
@@ -950,6 +978,7 @@ function acpMcpActivation(context: AcpMcpContext) {
     mcpServers: context.servers,
     acpMcpServers: context.acpServers,
     httpMcpServers: context.httpServers,
+    sharedMcpServers: context.sharedServers,
   };
 }
 
@@ -1777,16 +1806,23 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
   const host = yield* ProviderHost.ProviderHost;
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
   const { flavor, selfInvocation: self } = options;
+  const sharedMcpServers = yield* AcpSharedMcpServers;
   const readMcpContext = (threadId: ThreadId | null) =>
-    threadId === null
-      ? Effect.succeed(acpMcpContext(undefined, self, flavor.mcpOverHttp, flavor.deferMcpTools))
-      : mcpSessions
-          .read(threadId)
-          .pipe(
-            Effect.map((session) =>
-              acpMcpContext(session, self, flavor.mcpOverHttp, flavor.deferMcpTools),
-            ),
-          );
+    Effect.zip(
+      threadId === null ? Effect.undefined : mcpSessions.read(threadId),
+      sharedMcpServers.read,
+    ).pipe(
+      Effect.map(([session, shared]) =>
+        acpMcpContext(
+          session,
+          self,
+          flavor.mcpOverHttp,
+          flavor.deferMcpTools,
+          shared,
+          flavor.driver,
+        ),
+      ),
+    );
   const driver = flavor.driver;
   const continuationRequests = options.continuationRequests;
   const postSettleContinuationEnabled =
@@ -2488,6 +2524,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             mcpServers: mcpContext.servers,
             acpMcpServers: mcpContext.acpServers,
             httpMcpServers: mcpContext.httpServers,
+            sharedMcpServers: mcpContext.sharedServers,
             ...(mcpContext.processEnvironment === undefined
               ? {}
               : { processEnvironment: mcpContext.processEnvironment }),

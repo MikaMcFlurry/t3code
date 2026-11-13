@@ -88,6 +88,10 @@ import * as SkillsHandlers from "./toolkits/skills/handlers.ts";
 import { SkillsToolkit } from "./toolkits/skills/tools.ts";
 import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
 import { requestUrl } from "../requestUrl.ts";
+import * as ComputerUseLinuxMcpToolkit from "../desktop/ComputerUseLinuxMcpToolkit.ts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as ComputerUseLinuxServerIntegration from "../desktop/ComputerUseLinuxServerIntegration.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 
 const mcpResourceMetadataUrl = (request: HttpServerRequest.HttpServerRequest) =>
   requestUrl(request).pipe(
@@ -885,6 +889,71 @@ const registerDeviceScreenshot = Effect.fn("McpHttpServer.registerDeviceScreensh
 const isOrchestratorMcpFailure = Schema.is(OrchestratorMcpFailure);
 const isDeviceToolError = Schema.is(DeviceToolError);
 
+/**
+ * The desktop bridge relays another MCP server's result, so it is registered by hand: its text and
+ * image blocks pass through instead of being encoded as one JSON text block.
+ */
+const registerComputerUseLinux = Effect.fn("McpHttpServer.registerComputerUseLinux")(function* () {
+  const server = yield* McpServer.McpServer;
+  const platform = yield* HostProcess.Platform;
+  const services = yield* Effect.context<
+    | ServerSecretStore.ServerSecretStore
+    | ComputerUseLinuxServerIntegration.ComputerUseLinuxApprovalSurfaceService
+    | ComputerUseLinuxServerIntegration.ComputerUseLinuxUpstreamFactoryService
+    | ThreadManagementService.ThreadManagementService
+  >();
+  const built = yield* decodeAsAdvertised(ComputerUseLinuxMcpToolkit.ComputerUseLinuxToolkit);
+  const tool = ComputerUseLinuxMcpToolkit.ComputerUseLinuxTool;
+  yield* server.addTool({
+    tool: new McpSchema.Tool({
+      name: tool.name,
+      description: Tool.getDescription(tool),
+      inputSchema: advertisedJsonSchema(tool),
+      annotations: {
+        ...Context.getOption(tool.annotations, Tool.Title).pipe(
+          Option.map((title) => ({ title })),
+          Option.getOrUndefined,
+        ),
+        readOnlyHint: Context.get(tool.annotations, Tool.Readonly),
+        destructiveHint: Context.get(tool.annotations, Tool.Destructive),
+        idempotentHint: Context.get(tool.annotations, Tool.Idempotent),
+        openWorldHint: Context.get(tool.annotations, Tool.OpenWorld),
+      },
+    }),
+    annotations: tool.annotations,
+    handle: (payload) =>
+      Effect.withFiber((fiber) => {
+        const invocation = Context.getUnsafe(
+          fiber.context,
+          McpInvocationContext.McpInvocationContext,
+        );
+        return built.handle("computer_use_linux", payload).pipe(
+          Stream.unwrap,
+          Stream.run(Sink.last()),
+          Effect.flatMap(Effect.fromOption),
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(HostProcess.Platform, platform),
+          Effect.provide(services),
+          Effect.matchCauseEffect({
+            onFailure: imageToolFailure(tool.name, "desktop", (error) =>
+              typeof error === "object" && error !== null && "message" in error
+                ? String(error.message)
+                : "Desktop operation failed.",
+            ),
+            onSuccess: ({ encodedResult }) =>
+              Effect.succeed(
+                ComputerUseLinuxMcpToolkit.computerUseLinuxToolResult(
+                  encodedResult,
+                  (payload as { readonly includeImage?: boolean } | undefined)?.includeImage !==
+                    false,
+                ),
+              ),
+          }),
+        );
+      }),
+  });
+});
+
 const registerHtmlPreview = Effect.fn("McpHttpServer.registerHtmlPreview")(function* () {
   const htmlRender = yield* HtmlRender.HtmlRender;
   const threads = yield* ThreadManagementService.ThreadManagementService;
@@ -1319,6 +1388,16 @@ export const layerMcpTransport = <RA, RE, RR>(registrations: Layer.Layer<RA, RE,
     allowSessionTermination: true,
     registrations,
   }).pipe(Layer.provide(layerMcpAuthMiddleware));
+
+/**
+ * Opt-in mediated desktop registration. Deliberately excluded from `layerTools`: no deployment
+ * may expose it until the real upstream factory and approval surface are provided and the
+ * authenticated provider session is explicitly issued the `desktop` capability.
+ */
+export const layerComputerUseLinuxToolkit = imageToolRegistration(
+  registerComputerUseLinux(),
+  ComputerUseLinuxMcpToolkit.layer,
+);
 
 /** Every tool the T3 MCP server advertises. AgentContextBudget.test.ts measures this set. */
 export const layerTools = Layer.mergeAll(
