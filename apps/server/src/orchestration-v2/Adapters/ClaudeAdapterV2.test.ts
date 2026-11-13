@@ -3642,6 +3642,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       };
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
+  const describePendingWork = (runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime) =>
+    runtime.describePendingBackgroundWork ??
+    Effect.die("Claude adapter runtime must expose describePendingBackgroundWork.");
 
   it.effect("resumes the session a /clear selected after the Claude process is replaced", () =>
     Effect.gen(function* () {
@@ -13882,6 +13885,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       yield* harness.awaitTerminal(1);
       assert.equal(harness.terminalEvents()[0]?.status, "completed");
       assert.isTrue(yield* harness.hasPendingBackgroundWork);
+      assert.deepEqual(yield* describePendingWork(harness.runtime), [
+        { kind: "background_task", label: WAKE_TASK_DESCRIPTION },
+      ]);
       assert.lengthOf(harness.continuationRequests, 0);
 
       yield* harness.offerAndWait(wakeNotification);
@@ -13894,11 +13900,81 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       assert.equal(harness.continuationRequests[0]?.providerThreadId, harness.providerThread.id);
       assert.equal(harness.continuationRequests[0]?.driver, ClaudeAdapterV2.CLAUDE_PROVIDER);
       assert.equal(harness.continuationRequests[0]?.detail, WAKE_SUMMARY);
+      // The CLI is still producing the wake turn; a detach would cut it off.
+      assert.isTrue(yield* harness.hasPendingBackgroundWork);
+      assert.deepEqual(yield* describePendingWork(harness.runtime), [
+        { kind: "wake_turn", label: WAKE_SUMMARY },
+      ]);
 
       yield* harness.offerAndWait(wakeResult);
       assert.lengthOf(harness.continuationRequests, 1);
       assert.lengthOf(harness.terminalEvents(), 1);
-      assert.isTrue(yield* harness.hasPendingBackgroundWork);
+      // The wake turn ended in a result: its output waits in the buffer, nothing runs.
+      assert.isFalse(yield* harness.hasPendingBackgroundWork);
+      assert.deepEqual(yield* describePendingWork(harness.runtime), []);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
+  // regression: #32296 finished wake output from a killed CLI held every switch and the idle release
+  it.effect("does not count a finished wake buffer as running work once its CLI exits", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      const now = yield* DateTime.now;
+
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("attempt-claude-wake-stale-1"),
+          text: "Run the build in the background.",
+          attachments: [],
+        }),
+      );
+      yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
+      yield* Queue.offer(harness.sdkMessages, turnOneResult);
+      yield* harness.awaitTerminal(1);
+      yield* Queue.offer(harness.sdkMessages, wakeNotification);
+      yield* Queue.offer(harness.sdkMessages, wakeAssistant);
+      yield* harness.offerAndWait(wakeResult);
+      // The single continuation offer went out and was never drained, so the buffer stays.
+      assert.lengthOf(harness.continuationRequests, 1);
+
+      // A user turn only reads the buffer; then the CLI process is killed.
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("attempt-claude-wake-stale-2"),
+          text: "Anything else?",
+          attachments: [],
+          providerTurnOrdinal: 2,
+        }),
+      );
+      yield* harness.until(() => harness.offeredMessages.length === 2);
+      yield* Queue.shutdown(harness.sdkMessages);
+      yield* harness.awaitTerminal(2);
+
+      assert.isFalse(
+        yield* harness.hasPendingBackgroundWork,
+        "a session with no CLI process still reports background work",
+      );
+      assert.deepEqual(yield* describePendingWork(harness.runtime), []);
+      assert.isFalse(
+        yield* harness.runtime.hasPendingBackgroundWorkForThread!(harness.providerThread, {
+          includeSubagents: true,
+        }),
+      );
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
@@ -15117,7 +15193,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
       yield* harness.until(() => harness.offeredMessages.length === 2);
       assert.lengthOf(harness.terminalEvents(), 1);
-      assert.isTrue(yield* harness.hasPendingBackgroundWork);
+      // The buffered wake turn already ended in a result, so it is not running work.
+      assert.isFalse(yield* harness.hasPendingBackgroundWork);
 
       yield* Queue.offer(
         harness.sdkMessages,
@@ -15806,7 +15883,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   );
 
   // A Stop closes the first process, and a turn replaces it before its stream ends.
-  const stopRacedByReplacementTurn = (label: string) =>
+  const stopRacedByReplacementTurn = (
+    label: string,
+    options?: { readonly startOwnAgent?: boolean },
+  ) =>
     Effect.gen(function* () {
       const changes = yield* makeChangeSignal;
       const fileSystem = yield* FileSystem.FileSystem;
@@ -15938,15 +16018,15 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         }),
       );
       assert.lengthOf(processQueues, 2);
-      yield* Queue.offer(
+      const startOwnAgent = Queue.offer(
         processQueues[1]!,
         makeSubagentTaskStartedFrame({
           taskId: "own-agent",
           toolUseId: "toolu-own-agent",
           uuid: "00000000-0000-4000-8000-000000002804",
         }),
-      );
-      yield* changes.until(() => subagentStatus("own-agent") === "running");
+      ).pipe(Effect.andThen(changes.until(() => subagentStatus("own-agent") === "running")));
+      if (options?.startOwnAgent !== false) yield* startOwnAgent;
       const exitProcess = <E>(index: number, stopping: Fiber.Fiber<void, E>) =>
         Queue.shutdown(processQueues[index]!).pipe(Effect.andThen(Fiber.join(stopping)));
       return {
@@ -15960,9 +16040,43 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         subagentStatus,
         exitFirstProcess: exitProcess(0, stop),
         exitProcess,
+        startOwnAgent,
         now,
       };
     });
+
+  // regression: #32296 a subagent an earlier process ran is not work the live process would lose
+  it.effect("counts only the live process's subagents as running work", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { runtime, subagentStatus, startOwnAgent } = yield* stopRacedByReplacementTurn(
+          "earlier-process-subagent",
+          { startOwnAgent: false },
+        );
+        assert.strictEqual(subagentStatus("raced-agent"), "running");
+        assert.isFalse(
+          yield* runtime.hasPendingBackgroundWork!,
+          "a subagent from the stopped process still counts as the live process's work",
+        );
+        assert.deepEqual(yield* describePendingWork(runtime), []);
+
+        yield* startOwnAgent;
+        assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+        const found = yield* describePendingWork(runtime);
+        assert.lengthOf(found, 1);
+        assert.strictEqual(found[0]?.kind, "subagent");
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+    ),
+  );
 
   // regression: #28331 a subagent whose process is gone must not stay running forever
   it.effect("ends a subagent whose process a Stop closed while a new turn replaced it", () =>

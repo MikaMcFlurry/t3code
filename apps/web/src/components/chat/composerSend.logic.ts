@@ -1,5 +1,48 @@
-import type { EnvironmentId, ThreadContextRecord } from "@t3tools/contracts";
+import type { EnvironmentId, ScopedThreadRef, ThreadContextRecord } from "@t3tools/contracts";
+import { isBackgroundWorkRefusal } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { collectInlineContextIds } from "../../lib/composerContextReferences";
+import { stackedThreadToast } from "../ui/toastHelpers";
+
+/**
+ * What the composer shows when the server refuses a send. The message carries the
+ * server's detail ("Still running: …"). A refusal over background work offers Stop,
+ * which also reaches a session whose work no turn shows (no Stop button is visible).
+ */
+export function composerSendRefusal(message: string) {
+  return {
+    title: "Message not sent",
+    description: message,
+    offersBackgroundStop: isBackgroundWorkRefusal(message),
+  };
+}
+
+/**
+ * The toast for a refused send. Its Stop is bound to the refused thread: the toast outlives
+ * navigation, and a Stop that read the open thread at click time would stop another thread.
+ */
+export function composerSendRefusalToast(input: {
+  readonly message: string;
+  readonly threadRef: ScopedThreadRef;
+  readonly isServerThread: boolean;
+  readonly onStopBackgroundWork: (threadRef: ScopedThreadRef) => void;
+}) {
+  const refusal = composerSendRefusal(input.message);
+  const { threadRef } = input;
+  return stackedThreadToast({
+    type: "error",
+    title: refusal.title,
+    description: refusal.description,
+    ...(input.isServerThread ? { data: { threadRef } } : {}),
+    ...(refusal.offersBackgroundStop
+      ? {
+          actionProps: {
+            children: "Stop background work",
+            onClick: () => input.onStopBackgroundWork(threadRef),
+          },
+        }
+      : {}),
+  });
+}
 
 /** Attached threads the prompt still links to; replacing linked text leaves stale records. */
 export function referencedThreadContexts(draft: {

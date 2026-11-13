@@ -16,6 +16,7 @@ import {
   type OrchestrationV2ThreadProjection,
   ProjectId,
   ProviderInstanceId,
+  type ProviderReplayEntry,
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
@@ -23,6 +24,7 @@ import {
   ThreadId,
   TurnItemId,
   ProviderDriverKind,
+  ClaudeSettings,
 } from "@t3tools/contracts";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as DateTime from "effect/DateTime";
@@ -31,6 +33,15 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
@@ -43,11 +54,13 @@ import {
   ClaudeAppendSystemPromptFileError,
   ClaudeBackgroundWorkBlocksQueryReplacementError,
   ClaudeProviderCapabilitiesV2,
+  makeClaudeAdapterV2,
 } from "../Adapters/ClaudeAdapterV2.ts";
 import {
   CodexProviderCapabilitiesV2,
   canReuseCodexContextUsage,
 } from "../Adapters/CodexAdapterV2.ts";
+import { openCode2ReplayAdapter } from "../Adapters/OpenCode2AdapterV2.testkit.ts";
 import { AcpProviderCapabilitiesV2 } from "@t3tools/provider-acp/server/adapter";
 import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
@@ -74,6 +87,7 @@ const threadId = ThreadId.make("thread:provider-switch");
 const projectId = ProjectId.make("project:provider-switch");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_DRIVER = ProviderDriverKind.make("claudeAgent");
+const DEFAULT_CLAUDE_SETTINGS = Schema.decodeSync(ClaudeSettings)({});
 const GROK_DRIVER = ProviderDriverKind.make("acp");
 
 interface CapturedTurn {
@@ -130,7 +144,13 @@ function makeTestAdapter(input: {
   };
   readonly backgroundTasksEndWithProcess?: true;
   readonly backgroundWork?: Ref.Ref<boolean>;
+  /** Replaces `backgroundWork` as the session-wide probe. */
+  readonly backgroundWorkProbe?: Effect.Effect<boolean>;
+  readonly describeBackgroundWork?: ReadonlyArray<ProviderAdapter.ProviderAdapterV2PendingBackgroundWork>;
   readonly closedSessions?: Ref.Ref<ReadonlyArray<string>>;
+  readonly onInterrupt?: (
+    input: ProviderAdapter.ProviderAdapterV2InterruptInput,
+  ) => Effect.Effect<void>;
 }): ProviderAdapter.ProviderAdapterV2["Service"] {
   return {
     instanceId: input.instanceId,
@@ -183,14 +203,18 @@ function makeTestAdapter(input: {
           ...(input.canReuseContextUsage === undefined
             ? {}
             : { canReuseContextUsage: input.canReuseContextUsage }),
-          ...(input.backgroundWork === undefined
+          ...(input.backgroundWork === undefined && input.backgroundWorkProbe === undefined
             ? {}
             : {
                 // Like Claude: native subagents are visible only to the session-wide
                 // probe, never to the per-thread roster probe.
-                hasPendingBackgroundWork: Ref.get(input.backgroundWork),
+                hasPendingBackgroundWork:
+                  input.backgroundWorkProbe ?? Ref.get(input.backgroundWork!),
                 hasPendingBackgroundWorkForThread: () => Effect.succeed(false),
               }),
+          ...(input.describeBackgroundWork === undefined
+            ? {}
+            : { describePendingBackgroundWork: Effect.succeed(input.describeBackgroundWork) }),
           ensureThread: (threadInput) =>
             Effect.gen(function* () {
               const createdAt = yield* DateTime.now;
@@ -444,7 +468,7 @@ function makeTestAdapter(input: {
               }
             }),
           steerTurn: () => Effect.void,
-          interruptTurn: () => Effect.void,
+          interruptTurn: (interrupt) => input.onInterrupt?.(interrupt) ?? Effect.void,
           respondToRuntimeRequest: () => Effect.void,
           readThreadSnapshot: () =>
             unimplemented(input.driver, "readThreadSnapshot unused in provider switch test"),
@@ -485,6 +509,21 @@ const waitForIdle = Effect.fn("ProviderSwitchTest.waitForIdle")(function* (
     );
   }
   return idle;
+});
+
+// A command's effects run after the thread's earlier effects, and the harness worker may still
+// be running one of those: a run's checkpoint capture takes the thread lock again after its
+// finalization to recover delegated tasks, and a command can commit in between. drain() then
+// claims nothing, so wait for the command's own effects to settle instead.
+const settleCommandEffects = Effect.fn("ProviderSwitchTest.settleCommandEffects")(function* (
+  commandId: CommandId,
+) {
+  const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+  const outbox = yield* EffectOutbox.EffectOutboxV2;
+  yield* worker.drain();
+  for (const effect of yield* outbox.listByCommandId(commandId)) {
+    yield* outbox.awaitSettled(effect.id);
+  }
 });
 
 // Same tag as the adapter's unexported error raised when Claude never answers setMcpServers.
@@ -2795,15 +2834,19 @@ describe("orchestration v2 provider switching", () => {
       { background: false, queued: false, sharedHistory: false },
     ],
     [
-      "refuses the hand-off while the previous instance still runs background work",
+      "keeps a busy previous session running when a hand-off starts",
       { background: true, queued: false, sharedHistory: false },
+    ],
+    [
+      "queues an account switch sent while the replaced session still runs background work",
+      { background: true, queued: false, sharedHistory: true },
     ],
     [
       "keeps a busy previous session running when a queued hand-off starts",
       { background: true, queued: true, sharedHistory: false },
     ],
     [
-      "holds a queued account switch while the replaced session still runs background work",
+      "waits with a queued account switch while the replaced session still runs background work",
       { background: true, queued: true, sharedHistory: true },
     ],
   ] as const)("%s", ([, { background, queued, sharedHistory }]) =>
@@ -2904,13 +2947,15 @@ describe("orchestration v2 provider switching", () => {
           const queuedRunId = (yield* orchestrator.getThreadProjection(handoffThreadId)).runs[1]
             ?.id;
           assert.isDefined(queuedRunId);
+          const firstRunId = (yield* orchestrator.getThreadProjection(handoffThreadId)).runs[0]?.id;
           yield* Deferred.succeed(releaseFirst, undefined);
+          // A hand-off starts beside the busy session; an account switch waits for its work.
           yield* orchestrator.streamStoredEvents.pipe(
             Stream.filter(
               ({ event }) =>
                 event.type === "run.updated" &&
-                event.runId === queuedRunId &&
-                (event.payload.queueHeld === true || event.payload.status === "completed"),
+                event.runId === (sharedHistory ? firstRunId : queuedRunId) &&
+                event.payload.status === "completed",
             ),
             Stream.runHead,
           );
@@ -2932,21 +2977,27 @@ describe("orchestration v2 provider switching", () => {
             );
             return;
           }
-          // Resuming the native thread beside the busy session would fork its history.
+          // Resuming the native thread beside the busy session would fork its history, so the
+          // send waits in the queue without a hold.
           assert.deepEqual(
             afterQueue.runs.map((run) => [run.status, run.queueHeld === true]),
             [
               ["completed", false],
-              ["queued", true],
+              ["queued", false],
             ],
           );
           assert.lengthOf(yield* Ref.get(capturedTurns), 1);
+          // Once the work ends, the background-work check starts the queue by itself.
           yield* Ref.set(backgroundWork, false);
-          yield* orchestrator.dispatch({
-            type: "queue.resume",
-            commandId: CommandId.make("command:handoff-releases-session:resume"),
-            threadId: handoffThreadId,
-          });
+          yield* orchestrator.streamStoredEvents.pipe(
+            Stream.filter(
+              ({ event }) =>
+                event.type === "run.updated" &&
+                event.runId === queuedRunId &&
+                event.payload.status !== "queued",
+            ),
+            Stream.runHead,
+          );
           yield* worker.drain();
           const resumed = yield* waitForIdle(handoffThreadId);
           assert.deepEqual(
@@ -2971,17 +3022,62 @@ describe("orchestration v2 provider switching", () => {
           // Native subagents live only in the adapter's roster, so the projection's
           // pendingBackgroundTasks stays empty while the probe still reports work.
           assert.deepEqual(afterFirst.providerThreads[0]?.pendingBackgroundTasks ?? [], []);
-          const refused = yield* send(2, secondSelection, ":refused").pipe(Effect.flip);
-          assert.include(String(refused.cause), "still running background agents or commands");
-          const unchanged = yield* orchestrator.getThreadProjection(handoffThreadId);
-          assert.lengthOf(unchanged.runs, 1);
-          assert.deepEqual(yield* Ref.get(closedSessions), []);
-          assert.equal(unchanged.thread.providerInstanceId, CLAUDE_MODEL_SELECTION.instanceId);
+          yield* send(2, secondSelection);
+          yield* worker.drain();
+          if (sharedHistory) {
+            // Resuming the native thread beside the busy session would fork its history,
+            // so the send waits in the queue, as a queued one does.
+            const held = yield* orchestrator.getThreadProjection(handoffThreadId);
+            assert.deepEqual(
+              held.runs.map((run) => [run.status, run.queueHeld === true]),
+              [
+                ["completed", false],
+                ["queued", false],
+              ],
+            );
+            assert.lengthOf(yield* Ref.get(capturedTurns), 1);
+            assert.deepEqual(yield* Ref.get(closedSessions), []);
+            // Once the work ends, the held send starts by itself.
+            const heldRunId = held.runs[1]!.id;
+            yield* Ref.set(backgroundWork, false);
+            yield* orchestrator.streamStoredEvents.pipe(
+              Stream.filter(
+                ({ event }) =>
+                  event.type === "run.updated" &&
+                  event.runId === heldRunId &&
+                  event.payload.status !== "queued",
+              ),
+              Stream.runHead,
+            );
+            yield* worker.drain();
+            const resumed = yield* waitForIdle(handoffThreadId);
+            assert.deepEqual(
+              resumed.runs.map((run) => [run.providerInstanceId, run.status]),
+              [
+                [CLAUDE_MODEL_SELECTION.instanceId, "completed"],
+                [secondSelection.instanceId, "completed"],
+              ],
+            );
+            assert.deepEqual(yield* Ref.get(closedSessions), [firstSession!.id]);
+            return;
+          }
+          const handedOff = yield* waitForIdle(handoffThreadId);
+          yield* worker.drain();
           assert.deepEqual(
-            unchanged.providerSessions.map((session) => [session.id, session.status]),
-            [[firstSession!.id, "ready"]],
+            handedOff.runs.map((run) => [run.providerInstanceId, run.status]),
+            [
+              [CLAUDE_MODEL_SELECTION.instanceId, "completed"],
+              [secondSelection.instanceId, "completed"],
+            ],
           );
-          yield* Ref.set(backgroundWork, false);
+          assert.lengthOf(handedOff.contextHandoffs, 1);
+          // Detaching would end the background agents, so the busy session stays up.
+          assert.deepEqual(yield* Ref.get(closedSessions), []);
+          assert.equal(
+            handedOff.providerSessions.find((session) => session.id === firstSession!.id)?.status,
+            "ready",
+          );
+          return;
         }
 
         yield* send(2, secondSelection);
@@ -3147,6 +3243,1482 @@ describe("orchestration v2 provider switching", () => {
         ),
       );
     }),
+  );
+
+  it.live("starts queued account switches in turn as each replaced session's work ends", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("held-account-switches");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const firstBusy = yield* Ref.make(true);
+        const secondBusy = yield* Ref.make(false);
+        const secondSelection: ModelSelection = {
+          ...CLAUDE_MODEL_SELECTION,
+          instanceId: ProviderInstanceId.make("claude-second-account"),
+        };
+        const thirdSelection: ModelSelection = {
+          ...CLAUDE_MODEL_SELECTION,
+          instanceId: ProviderInstanceId.make("claude-third-account"),
+        };
+        const adapters = [
+          makeTestAdapter({
+            instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            responseByRunOrdinal: { 1: "First account complete" },
+            capturedTurns,
+            backgroundWork: firstBusy,
+          }),
+          makeTestAdapter({
+            instanceId: secondSelection.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: secondSelection,
+            responseByRunOrdinal: { 2: "Second account complete" },
+            capturedTurns,
+            backgroundWork: secondBusy,
+          }),
+          makeTestAdapter({
+            instanceId: thirdSelection.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: thirdSelection,
+            responseByRunOrdinal: { 3: "Third account complete" },
+            capturedTurns,
+          }),
+        ];
+        // All three accounts continue one native history, so each switch resumes it.
+        const layerRegistry = Layer.succeed(
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+            get: (instanceId) => {
+              const adapter = adapters.find((candidate) => candidate.instanceId === instanceId);
+              return adapter === undefined
+                ? Effect.fail(
+                    new ProviderAdapterRegistry.ProviderAdapterRegistryLookupError({ instanceId }),
+                  )
+                : Effect.succeed(adapter);
+            },
+            list: () => Effect.succeed(adapters.map((adapter) => adapter.instanceId)),
+            getMetadata: () =>
+              Effect.succeed({
+                driver: CLAUDE_DRIVER,
+                continuationKey: "claude:shared-native-account-history",
+                enabled: true,
+                capabilities: ClaudeProviderCapabilitiesV2,
+              }),
+          }),
+        );
+        const threadId = ThreadId.make("thread:held-account-switches");
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const send = (ordinal: number, modelSelection: ModelSelection) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:held-account-switches:${ordinal}`),
+              threadId,
+              messageId: MessageId.make(`message:held-account-switches:${ordinal}`),
+              text: `Prompt ${ordinal}`,
+              attachments: [],
+              modelSelection,
+              dispatchMode: { type: "start_immediately" },
+            });
+          const runStates = (projection: OrchestrationV2ThreadProjection) =>
+            projection.runs.map((run) => [run.status, run.queueHeld === true]);
+          // Projections commit with their events, so each later event is the time to re-read.
+          const waitUntil = (done: (projection: OrchestrationV2ThreadProjection) => boolean) =>
+            orchestrator.streamStoredEvents.pipe(
+              Stream.mapEffect(() => orchestrator.getThreadProjection(threadId)),
+              Stream.filter(done),
+              Stream.runHead,
+            );
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:held-account-switches:create"),
+            threadId,
+            projectId: ProjectId.make("project:held-account-switches"),
+            title: "Held account switches",
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+          });
+          yield* send(1, CLAUDE_MODEL_SELECTION);
+          yield* worker.drain();
+          yield* waitForIdle(threadId);
+
+          yield* send(2, secondSelection);
+          yield* send(3, thirdSelection);
+          yield* worker.drain();
+          assert.deepEqual(runStates(yield* orchestrator.getThreadProjection(threadId)), [
+            ["completed", false],
+            ["queued", false],
+            ["queued", false],
+          ]);
+
+          // The second account ends its turn with work of its own, so the third send waits again.
+          yield* Ref.set(secondBusy, true);
+          yield* Ref.set(firstBusy, false);
+          yield* waitUntil((projection) => projection.runs[1]?.status !== "queued");
+          yield* worker.drain();
+          yield* waitUntil((projection) => projection.runs[1]?.status === "completed");
+          assert.deepEqual(runStates(yield* orchestrator.getThreadProjection(threadId)), [
+            ["completed", false],
+            ["completed", false],
+            ["queued", false],
+          ]);
+
+          yield* Ref.set(secondBusy, false);
+          yield* waitUntil((projection) => projection.runs[2]?.status !== "queued");
+          yield* worker.drain();
+          const done = yield* waitForIdle(threadId);
+          assert.deepEqual(
+            done.runs.map((run) => [run.providerInstanceId, run.status]),
+            [
+              [CLAUDE_MODEL_SELECTION.instanceId, "completed"],
+              [secondSelection.instanceId, "completed"],
+              [thirdSelection.instanceId, "completed"],
+            ],
+          );
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerWithRegistry(
+              {
+                name: "held-account-switches",
+                runtimePolicyOverride: {
+                  cwd,
+                  approvalPolicy: "never",
+                  sandboxPolicy: {
+                    type: "readOnly",
+                    access: { type: "fullAccess" },
+                    networkAccess: false,
+                  },
+                },
+              },
+              layerRegistry,
+            ),
+          ),
+        );
+      }),
+    ),
+  );
+
+  // regression: #32296 a refusal named nothing, so an idle-looking thread could not be unblocked
+  it.live("queues an account switch once when background work starts during its dispatch", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("named-busy-refusal");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        // The work starts between the switch's wait check and its detach check.
+        const armed = yield* Ref.make(false);
+        const probes = yield* Ref.make(0);
+        const backgroundWorkProbe = Effect.gen(function* () {
+          if (!(yield* Ref.get(armed))) return false;
+          return (yield* Ref.getAndUpdate(probes, (count) => count + 1)) > 0;
+        });
+        const secondSelection: ModelSelection = {
+          ...CLAUDE_MODEL_SELECTION,
+          instanceId: ProviderInstanceId.make("claude-second-account"),
+        };
+        const adapters = [
+          makeTestAdapter({
+            instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            responseByRunOrdinal: { 1: "First account complete" },
+            capturedTurns,
+            backgroundWorkProbe,
+            describeBackgroundWork: [
+              { kind: "background_task", label: "npm test" },
+              { kind: "wake_turn", label: null },
+            ],
+          }),
+          makeTestAdapter({
+            instanceId: secondSelection.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: secondSelection,
+            responseByRunOrdinal: { 2: "Second account complete" },
+            capturedTurns,
+          }),
+        ];
+        const layerRegistry = Layer.succeed(
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+            get: (instanceId) => {
+              const adapter = adapters.find((candidate) => candidate.instanceId === instanceId);
+              return adapter === undefined
+                ? Effect.fail(
+                    new ProviderAdapterRegistry.ProviderAdapterRegistryLookupError({ instanceId }),
+                  )
+                : Effect.succeed(adapter);
+            },
+            list: () => Effect.succeed(adapters.map((adapter) => adapter.instanceId)),
+            getMetadata: () =>
+              Effect.succeed({
+                driver: CLAUDE_DRIVER,
+                continuationKey: "claude:shared-native-account-history",
+                enabled: true,
+                capabilities: ClaudeProviderCapabilitiesV2,
+              }),
+          }),
+        );
+        const threadId = ThreadId.make("thread:named-busy-refusal");
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const send = (ordinal: number, modelSelection: ModelSelection) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:named-busy-refusal:${ordinal}`),
+              threadId,
+              messageId: MessageId.make(`message:named-busy-refusal:${ordinal}`),
+              text: `Prompt ${ordinal}`,
+              attachments: [],
+              modelSelection,
+              dispatchMode: { type: "start_immediately" },
+            });
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:named-busy-refusal:create"),
+            threadId,
+            projectId: ProjectId.make("project:named-busy-refusal"),
+            title: "Named busy refusal",
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+          });
+          yield* send(1, CLAUDE_MODEL_SELECTION);
+          yield* worker.drain();
+          yield* waitForIdle(threadId);
+
+          yield* Ref.set(armed, true);
+          // Never bounced: the send is accepted and waits queued, written exactly once.
+          yield* send(2, secondSelection);
+          assert.isAtLeast(yield* Ref.get(probes), 2);
+          yield* worker.drain();
+          const waiting = yield* orchestrator.getThreadProjection(threadId);
+          assert.deepEqual(
+            waiting.runs.map((run) => run.status),
+            ["completed", "queued"],
+          );
+          assert.lengthOf(
+            waiting.messages.filter((message) => message.id === "message:named-busy-refusal:2"),
+            1,
+          );
+          // The work ends; the background-work check starts the queued send.
+          yield* Ref.set(armed, false);
+          const done = yield* waitForIdle(threadId);
+          assert.deepEqual(
+            done.runs.map((run) => run.status),
+            ["completed", "completed"],
+          );
+          assert.strictEqual(done.runs[1]?.providerInstanceId, secondSelection.instanceId);
+          assert.lengthOf(
+            (yield* Ref.get(capturedTurns)).filter((turn) => turn.text.endsWith("Prompt 2")),
+            1,
+          );
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerWithRegistry(
+              {
+                name: "named-busy-refusal",
+                runtimePolicyOverride: {
+                  cwd,
+                  approvalPolicy: "never",
+                  sandboxPolicy: {
+                    type: "readOnly",
+                    access: { type: "fullAccess" },
+                    networkAccess: false,
+                  },
+                },
+              },
+              layerRegistry,
+            ),
+          ),
+        );
+      }),
+    ),
+  );
+
+  // regression: #32296 an idle thread whose session still reports background work had no way
+  // out: Stop found nothing to interrupt, since that work never reaches the projection.
+  it.live("lets Stop release an idle session's background work that only its adapter sees", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("idle-background-release");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const busy = yield* Ref.make(false);
+        const interrupts = yield* Ref.make<
+          ReadonlyArray<ProviderAdapter.ProviderAdapterV2InterruptInput>
+        >([]);
+        const secondSelection: ModelSelection = {
+          ...CLAUDE_MODEL_SELECTION,
+          instanceId: ProviderInstanceId.make("claude-second-account"),
+        };
+        const adapters = [
+          makeTestAdapter({
+            instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            responseByRunOrdinal: { 1: "First account complete" },
+            capturedTurns,
+            backgroundWork: busy,
+            // Like the Claude adapter: a restart interrupt ends what the session still runs.
+            onInterrupt: (interrupt) =>
+              Ref.update(interrupts, (current) => [...current, interrupt]).pipe(
+                Effect.andThen(
+                  interrupt.requestRuntimeRestart === true ? Ref.set(busy, false) : Effect.void,
+                ),
+              ),
+          }),
+          makeTestAdapter({
+            instanceId: secondSelection.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: secondSelection,
+            responseByRunOrdinal: { 2: "Second account complete" },
+            capturedTurns,
+          }),
+        ];
+        const layerRegistry = Layer.succeed(
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+            get: (instanceId) => {
+              const adapter = adapters.find((candidate) => candidate.instanceId === instanceId);
+              return adapter === undefined
+                ? Effect.fail(
+                    new ProviderAdapterRegistry.ProviderAdapterRegistryLookupError({ instanceId }),
+                  )
+                : Effect.succeed(adapter);
+            },
+            list: () => Effect.succeed(adapters.map((adapter) => adapter.instanceId)),
+            getMetadata: () =>
+              Effect.succeed({
+                driver: CLAUDE_DRIVER,
+                continuationKey: "claude:shared-native-account-history",
+                enabled: true,
+                capabilities: ClaudeProviderCapabilitiesV2,
+              }),
+          }),
+        );
+        const threadId = ThreadId.make("thread:idle-background-release");
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const send = (ordinal: number, modelSelection: ModelSelection) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:idle-background-release:${ordinal}`),
+              threadId,
+              messageId: MessageId.make(`message:idle-background-release:${ordinal}`),
+              text: `Prompt ${ordinal}`,
+              attachments: [],
+              modelSelection,
+              dispatchMode: { type: "start_immediately" },
+            });
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:idle-background-release:create"),
+            threadId,
+            projectId: ProjectId.make("project:idle-background-release"),
+            title: "Idle background release",
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+          });
+          yield* send(1, CLAUDE_MODEL_SELECTION);
+          yield* worker.drain();
+          const idle = yield* waitForIdle(threadId);
+          assert.strictEqual(idle.runs[0]?.status, "completed");
+
+          // The session keeps work the projection does not show (a native subagent, a wake).
+          yield* Ref.set(busy, true);
+          const stopCommandId = CommandId.make("command:idle-background-release:stop");
+          yield* orchestrator.dispatch({
+            type: "thread.stop",
+            commandId: stopCommandId,
+            threadId,
+          });
+          yield* settleCommandEffects(stopCommandId);
+          const sent = yield* Ref.get(interrupts);
+          assert.lengthOf(sent, 1, "Stop on the idle thread never reached the busy session");
+          assert.isTrue(sent[0]?.requestRuntimeRestart);
+          assert.isFalse(yield* Ref.get(busy));
+
+          // With the work ended, the account switch starts at once.
+          yield* send(2, secondSelection);
+          yield* worker.drain();
+          const switched = yield* waitForIdle(threadId);
+          assert.strictEqual(switched.runs.at(-1)?.status, "completed");
+          assert.deepStrictEqual(
+            (yield* Ref.get(capturedTurns)).map((turn) => turn.text),
+            ["Prompt 1", "Prompt 2"],
+          );
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerWithRegistry(
+              {
+                name: "idle-background-release",
+                runtimePolicyOverride: {
+                  cwd,
+                  approvalPolicy: "never",
+                  sandboxPolicy: {
+                    type: "readOnly",
+                    access: { type: "fullAccess" },
+                    networkAccess: false,
+                  },
+                },
+              },
+              layerRegistry,
+            ),
+          ),
+        );
+      }),
+    ),
+  );
+
+  // A hand-off keeps a busy older session connected. Stop must reach its work, both after the
+  // newer run completed and while it still runs.
+  it.live.each(["after the newer run completed", "while the newer run runs"] as const)(
+    "Stop reaches an older kept session's background work %s",
+    (scenario) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const key = scenario === "while the newer run runs" ? "running" : "completed";
+          const cwd = yield* checkpointWorkspace(`stop-kept-session-${key}`);
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const busy = yield* Ref.make(false);
+          const interrupts = yield* Ref.make<
+            ReadonlyArray<ProviderAdapter.ProviderAdapterV2InterruptInput>
+          >([]);
+          const started = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const secondSelection: ModelSelection = {
+            ...CLAUDE_MODEL_SELECTION,
+            instanceId: ProviderInstanceId.make("claude-second-account"),
+          };
+          const adapters = [
+            makeTestAdapter({
+              instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+              driver: CLAUDE_DRIVER,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              responseByRunOrdinal: { 1: "First account complete" },
+              capturedTurns,
+              backgroundWork: busy,
+              // Like the Claude adapter: a restart interrupt ends what the session still runs.
+              onInterrupt: (interrupt) =>
+                Ref.update(interrupts, (current) => [...current, interrupt]).pipe(
+                  Effect.andThen(
+                    interrupt.requestRuntimeRestart === true ? Ref.set(busy, false) : Effect.void,
+                  ),
+                ),
+            }),
+            makeTestAdapter({
+              instanceId: secondSelection.instanceId,
+              driver: CLAUDE_DRIVER,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              modelSelection: secondSelection,
+              responseByRunOrdinal: { 2: "Second account complete" },
+              capturedTurns,
+              ...(key === "running"
+                ? { holdFirstTurn: started, releaseFirstTurn: release, holdRunOrdinal: 2 }
+                : {}),
+            }),
+          ];
+          const layerRegistry = ProviderAdapterRegistry.layerFromAdapters(adapters);
+          const threadId = ThreadId.make(`thread:stop-kept-session-${key}`);
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const send = (ordinal: number, modelSelection: ModelSelection) =>
+              orchestrator.dispatch({
+                type: "message.dispatch",
+                createdBy: "user",
+                creationSource: "web",
+                commandId: CommandId.make(`command:stop-kept-session-${key}:${ordinal}`),
+                threadId,
+                messageId: MessageId.make(`message:stop-kept-session-${key}:${ordinal}`),
+                text: `Prompt ${ordinal}`,
+                attachments: [],
+                modelSelection,
+                dispatchMode: { type: "start_immediately" },
+              });
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:stop-kept-session-${key}:create`),
+              threadId,
+              projectId: ProjectId.make(`project:stop-kept-session-${key}`),
+              title: "Stop kept session",
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: cwd,
+            });
+            yield* send(1, CLAUDE_MODEL_SELECTION);
+            yield* worker.drain();
+            const idle = yield* waitForIdle(threadId);
+            assert.strictEqual(idle.runs[0]?.status, "completed");
+
+            // The session keeps work the projection does not show (a native subagent, a wake).
+            yield* Ref.set(busy, true);
+            yield* send(2, secondSelection);
+            if (key === "running") {
+              yield* Deferred.await(started);
+              yield* worker.drain();
+            } else {
+              yield* worker.drain();
+              const handedOff = yield* waitForIdle(threadId);
+              assert.strictEqual(handedOff.runs.at(-1)?.status, "completed");
+            }
+            const kept = yield* orchestrator.getThreadProjection(threadId);
+            assert.isTrue(yield* Ref.get(busy));
+            assert.isTrue(
+              kept.providerSessions.some(
+                (session) =>
+                  session.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId &&
+                  session.status !== "stopped",
+              ),
+            );
+            const stopCommandId = CommandId.make(`command:stop-kept-session-${key}:stop`);
+            yield* orchestrator.dispatch({
+              type: "thread.stop",
+              commandId: stopCommandId,
+              threadId,
+            });
+            yield* Deferred.succeed(release, undefined);
+            yield* settleCommandEffects(stopCommandId);
+            const sent = yield* Ref.get(interrupts);
+            assert.lengthOf(sent, 1, "Stop never reached the older kept session");
+            assert.isTrue(sent[0]?.requestRuntimeRestart);
+            assert.isFalse(yield* Ref.get(busy));
+          }).pipe(
+            Effect.provide(
+              ProviderReplayHarness.layerWithRegistry(
+                {
+                  name: `stop-kept-session-${key}`,
+                  runtimePolicyOverride: {
+                    cwd,
+                    approvalPolicy: "never",
+                    sandboxPolicy: {
+                      type: "readOnly",
+                      access: { type: "fullAccess" },
+                      networkAccess: false,
+                    },
+                  },
+                },
+                layerRegistry,
+              ),
+            ),
+          );
+        }),
+      ),
+  );
+
+  // regression: #32296 an idle Claude session's finished wake output held an account switch until
+  // the idle release. The first account runs the real Claude adapter, so the probe is its own.
+  it.live(
+    "starts an account switch at once when the idle Claude session only buffers a finished wake",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* checkpointWorkspace("stale-wake-account-switch");
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const nativeSessionId = "native-thread-stale-wake";
+          const sdkMessages = yield* Queue.unbounded<SDKMessage>();
+          const wakeOffered = yield* Deferred.make<void>();
+          let frameOrdinal = 0;
+          const frameUuid = () =>
+            `00000000-0000-4000-8000-${String(++frameOrdinal).padStart(12, "0")}`;
+          const assistantFrame = (text: string) =>
+            ({
+              type: "assistant",
+              message: {
+                model: CLAUDE_MODEL_SELECTION.model,
+                id: `msg_${frameUuid()}`,
+                type: "message",
+                role: "assistant",
+                content: [{ type: "text", text }],
+                stop_reason: null,
+                stop_sequence: null,
+                usage: {
+                  input_tokens: 1,
+                  output_tokens: 1,
+                  cache_creation_input_tokens: 0,
+                  cache_read_input_tokens: 0,
+                },
+              },
+              parent_tool_use_id: null,
+              uuid: frameUuid(),
+              session_id: nativeSessionId,
+            }) as unknown as SDKMessage;
+          const resultFrame = (result: string) =>
+            ({
+              type: "result",
+              subtype: "success",
+              duration_ms: 10,
+              duration_api_ms: 10,
+              is_error: false,
+              num_turns: 1,
+              result,
+              stop_reason: "end_turn",
+              total_cost_usd: 0,
+              usage: {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+              },
+              modelUsage: {},
+              permission_denials: [],
+              uuid: frameUuid(),
+              session_id: nativeSessionId,
+            }) as unknown as SDKMessage;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const claudeAdapter = yield* makeClaudeAdapterV2({
+            instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+            settings: DEFAULT_CLAUDE_SETTINGS,
+            environment: {},
+            attachmentsDir: yield* fileSystem.makeTempDirectoryScoped({
+              prefix: "t3-stale-wake-account-switch-",
+            }),
+            fileSystem,
+            path: yield* Path.Path,
+            random: yield* SecureRandom.SecureRandom,
+            idAllocator: yield* IdAllocator.IdAllocatorV2,
+            // The one continuation offer goes nowhere, as when its dispatch fails, so the
+            // finished wake output stays buffered.
+            continuationRequests: { offer: () => Deferred.succeed(wakeOffered, undefined) },
+            queryRunner: {
+              allocateSessionId: Effect.succeed(nativeSessionId),
+              open: () =>
+                Effect.succeed({
+                  messages: Stream.fromQueue(sdkMessages),
+                  offer: () =>
+                    Queue.offerAll(sdkMessages, [
+                      assistantFrame("First account complete"),
+                      resultFrame("First account complete"),
+                    ]).pipe(Effect.asVoid),
+                  setModel: () => Effect.void,
+                  applyFlagSettings: () => Effect.void,
+                  setPermissionMode: () => Effect.void,
+                  backgroundTasks: () => Effect.succeed(false),
+                  mcpServerStatus: Effect.succeed([]),
+                  readMcpResource: () => Effect.die("unexpected MCP resource read"),
+                  callMcpTool: () => Effect.die("unexpected MCP tool call"),
+                  listPermissionRules: Effect.succeed([]),
+                  stopTask: () => Effect.void,
+                  interrupt: Effect.void,
+                  close: Queue.shutdown(sdkMessages),
+                }),
+              forkSession: () => Effect.die("unused forkSession"),
+              subagentLaunchToolUseId: () => Effect.succeed(null),
+              subagentModel: () => Effect.succeed(null),
+              assertComplete: Effect.void,
+            },
+          });
+          const secondSelection: ModelSelection = {
+            ...CLAUDE_MODEL_SELECTION,
+            instanceId: ProviderInstanceId.make("claude-second-account"),
+          };
+          const adapters = [
+            claudeAdapter,
+            makeTestAdapter({
+              instanceId: secondSelection.instanceId,
+              driver: CLAUDE_DRIVER,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              modelSelection: secondSelection,
+              responseByRunOrdinal: { 2: "Second account complete" },
+              capturedTurns,
+            }),
+          ];
+          // Both accounts continue one native history, so the switch resumes it.
+          const layerRegistry = Layer.succeed(
+            ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+            ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+              get: (instanceId) => {
+                const adapter = adapters.find((candidate) => candidate.instanceId === instanceId);
+                return adapter === undefined
+                  ? Effect.fail(
+                      new ProviderAdapterRegistry.ProviderAdapterRegistryLookupError({
+                        instanceId,
+                      }),
+                    )
+                  : Effect.succeed(adapter);
+              },
+              list: () => Effect.succeed(adapters.map((adapter) => adapter.instanceId)),
+              getMetadata: () =>
+                Effect.succeed({
+                  driver: CLAUDE_DRIVER,
+                  continuationKey: "claude:shared-native-account-history",
+                  enabled: true,
+                  capabilities: ClaudeProviderCapabilitiesV2,
+                }),
+            }),
+          );
+          const threadId = ThreadId.make("thread:stale-wake-account-switch");
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const send = (ordinal: number, modelSelection: ModelSelection) =>
+              orchestrator.dispatch({
+                type: "message.dispatch",
+                createdBy: "user",
+                creationSource: "web",
+                commandId: CommandId.make(`command:stale-wake-account-switch:${ordinal}`),
+                threadId,
+                messageId: MessageId.make(`message:stale-wake-account-switch:${ordinal}`),
+                text: `Prompt ${ordinal}`,
+                attachments: [],
+                modelSelection,
+                dispatchMode: { type: "start_immediately" },
+              });
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make("command:stale-wake-account-switch:create"),
+              threadId,
+              projectId: ProjectId.make("project:stale-wake-account-switch"),
+              title: "Stale wake account switch",
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: cwd,
+            });
+            yield* send(1, CLAUDE_MODEL_SELECTION);
+            yield* worker.drain();
+            yield* waitForIdle(threadId);
+
+            // While the session is idle, Claude runs a wake turn to its result.
+            yield* Queue.offerAll(sdkMessages, [
+              assistantFrame("Woke up and finished."),
+              resultFrame("Woke up and finished."),
+            ]);
+            yield* Deferred.await(wakeOffered);
+
+            yield* send(2, secondSelection);
+            yield* worker.drain();
+            const afterSend = yield* orchestrator.getThreadProjection(threadId);
+            assert.notStrictEqual(
+              afterSend.runs[1]?.status,
+              "queued",
+              "the account switch waits on finished wake output as if it were running work",
+            );
+            const done = yield* waitForIdle(threadId);
+            assert.deepEqual(
+              done.runs.map((run) => [run.providerInstanceId, run.status]),
+              [
+                [CLAUDE_MODEL_SELECTION.instanceId, "completed"],
+                [secondSelection.instanceId, "completed"],
+              ],
+            );
+          }).pipe(
+            Effect.provide(
+              ProviderReplayHarness.layerWithRegistry(
+                {
+                  name: "stale-wake-account-switch",
+                  runtimePolicyOverride: {
+                    cwd,
+                    approvalPolicy: "never",
+                    sandboxPolicy: {
+                      type: "readOnly",
+                      access: { type: "fullAccess" },
+                      networkAccess: false,
+                    },
+                  },
+                },
+                layerRegistry,
+              ),
+            ),
+          );
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+              NodeCrypto.layer,
+            ),
+          ),
+        ),
+      ),
+  );
+
+  // regression: #32296 OpenCode kept an idle, failed thread busy on a finished child's report
+  it.live.each(["finished", "running"] as const)(
+    "switches a failed OpenCode thread to Claude and releases it only if its child has %s",
+    (child) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* checkpointWorkspace(`opencode-report-claude-switch-${child}`);
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const SESSION = "ses_f148ca2deffeJcwCnRQtb0YFNX";
+          const CHILD = "ses_f1485c529ffea4URrYruwEg0Ja";
+          const openCodeSelection: ModelSelection = {
+            instanceId: ProviderInstanceId.make("opencode"),
+            model: "opencode/big-pickle",
+          };
+          const out = (type: string, input?: unknown): ProviderReplayEntry => ({
+            type: "expect_outbound",
+            frame: input === undefined ? { type } : { type, input },
+          });
+          const reply = (operation: string, data: unknown): ProviderReplayEntry => ({
+            type: "emit_inbound",
+            frame: { type: "sdk.response", operation, data },
+          });
+          const event = (type: string, data: Record<string, unknown>): ProviderReplayEntry => ({
+            type: "emit_inbound",
+            frame: {
+              type: "sdk.event",
+              event: {
+                id: `evt_${type.replaceAll(".", "")}`,
+                created: 1,
+                type,
+                data,
+                durable: { aggregateID: SESSION, seq: 1, version: 1 },
+              },
+            },
+          });
+          const model = { id: "big-pickle", providerID: "opencode", variant: "default" };
+          const tool = { sessionID: SESSION, assistantMessageID: "msg_assistant", id: "call-bg" };
+          const openCodeAdapter = yield* openCode2ReplayAdapter([
+            out("event.subscribe"),
+            out("model.list", "<any>"),
+            reply("model.list", {
+              location: { directory: cwd },
+              data: [
+                {
+                  id: "big-pickle",
+                  modelID: "big-pickle",
+                  providerID: "opencode",
+                  family: "big-pickle",
+                  name: "Big Pickle",
+                  capabilities: { tools: true, input: ["text"], output: ["text"] },
+                  variants: [],
+                  time: { released: 1760659200000 },
+                  cost: [{ input: 0, output: 0, cache: { read: 0, write: 0 } }],
+                  status: "active",
+                  enabled: true,
+                  limit: { context: 200000, input: 160000, output: 32000 },
+                },
+              ],
+            }),
+            out("session.create", {
+              location: { directory: cwd },
+              model: "<any>",
+              permissions: "<any>",
+              title: "<any>",
+            }),
+            reply("session.create", {
+              data: {
+                id: SESSION,
+                title: "OpenCode report",
+                projectID: "global",
+                model,
+                cost: 0,
+                tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                time: { created: 1790656601394, updated: 1790656601394 },
+                location: { directory: cwd },
+                permissions: [{ action: "*", resource: "*", effect: "allow" }],
+              },
+            }),
+            out("session.instructions.entry.put", {
+              sessionID: SESSION,
+              key: "t3-code",
+              value: "<any>",
+            }),
+            reply("session.instructions.entry.put", null),
+            out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+            reply("session.prompt", {
+              data: {
+                id: "msg_user_first",
+                sessionID: SESSION,
+                time: { created: 1790656601410 },
+                type: "user",
+                payload: { text: "<prompt>" },
+                delivery: "steer",
+              },
+            }),
+            event("session.execution.started", { sessionID: SESSION }),
+            event("session.tool.input.started", { ...tool, name: "subagent" }),
+            event("session.tool.called", {
+              ...tool,
+              name: "subagent",
+              input: { description: "Sleep", prompt: "sleep", background: true },
+              executed: false,
+            }),
+            event("session.created", {
+              sessionID: CHILD,
+              slug: "proud-canyon",
+              version: "2.0.18",
+              projectID: "global",
+              parentID: SESSION,
+              location: { directory: cwd },
+              subpath: "",
+              title: "Sleep",
+              agent: "general",
+              model,
+            }),
+            event("session.tool.progress", {
+              ...tool,
+              metadata: { sessionID: CHILD, status: "running" },
+            }),
+            event("session.tool.success", {
+              ...tool,
+              content: [{ type: "text", text: "The subagent is working in the background." }],
+              metadata: { sessionID: CHILD, status: "running" },
+              executed: true,
+            }),
+            event("session.execution.started", { sessionID: CHILD }),
+            ...(child === "running"
+              ? []
+              : [
+                  event("session.execution.succeeded", { sessionID: CHILD }),
+                  // The child's report reaches the parent's inbox, but the parent runs out
+                  // of credits before OpenCode delivers it.
+                  event("session.inbox.enqueued", {
+                    inboxID: "msg_report",
+                    sessionID: SESSION,
+                    item: {
+                      type: "synthetic",
+                      payload: {
+                        text: `<subagent sessionID="${CHILD}" state="completed" description="Sleep">\nCHILD_OK\n</subagent>`,
+                        description: "Sleep",
+                        metadata: {
+                          source: "subagent",
+                          childID: CHILD,
+                          agent: "General",
+                          state: "completed",
+                        },
+                      },
+                      delivery: "steer",
+                    },
+                  }),
+                ]),
+            event("session.execution.failed", {
+              sessionID: SESSION,
+              error: {
+                type: "provider.quota",
+                message: "This request requires more credits.",
+                status: 402,
+              },
+            }),
+          ]);
+          const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+            openCodeAdapter,
+            makeTestAdapter({
+              instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+              driver: CLAUDE_DRIVER,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              responseByRunOrdinal: { 2: "Claude picked it up" },
+              capturedTurns,
+            }),
+          ]);
+          const switchThreadId = ThreadId.make("thread:opencode-report-claude-switch");
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const send = (ordinal: number, modelSelection: ModelSelection) =>
+              orchestrator.dispatch({
+                type: "message.dispatch",
+                createdBy: "user",
+                creationSource: "web",
+                commandId: CommandId.make(`command:opencode-report-claude-switch:${ordinal}`),
+                threadId: switchThreadId,
+                messageId: MessageId.make(`message:opencode-report-claude-switch:${ordinal}`),
+                text: `Prompt ${ordinal}`,
+                attachments: [],
+                modelSelection,
+                dispatchMode: { type: "start_immediately" },
+              });
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make("command:opencode-report-claude-switch:create"),
+              threadId: switchThreadId,
+              projectId: ProjectId.make("project:opencode-report-claude-switch"),
+              title: "OpenCode report Claude switch",
+              modelSelection: openCodeSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: cwd,
+            });
+            yield* send(1, openCodeSelection);
+            yield* worker.drain();
+            const failed = yield* waitForIdle(switchThreadId);
+            assert.deepEqual(
+              failed.runs.map((run) => run.status),
+              ["failed"],
+            );
+
+            yield* send(2, CLAUDE_MODEL_SELECTION);
+            yield* worker.drain();
+            const afterSend = yield* orchestrator.getThreadProjection(switchThreadId);
+            assert.notStrictEqual(
+              afterSend.runs[1]?.status,
+              "queued",
+              "the switch waits on a finished child's undelivered report as if it were running work",
+            );
+            const done = yield* waitForIdle(switchThreadId);
+            assert.deepEqual(
+              done.runs.map((run) => [run.providerInstanceId, run.status]),
+              [
+                [openCodeSelection.instanceId, "failed"],
+                [CLAUDE_MODEL_SELECTION.instanceId, "completed"],
+              ],
+            );
+            assert.deepEqual(
+              (yield* Ref.get(capturedTurns)).map((turn) => turn.driver),
+              [CLAUDE_DRIVER],
+            );
+            // A session that runs nothing is released; one whose child still runs stays up,
+            // because a detach would end that child.
+            assert.deepEqual(
+              done.providerSessions.map((session) => session.providerInstanceId),
+              child === "running"
+                ? [openCodeSelection.instanceId, CLAUDE_MODEL_SELECTION.instanceId]
+                : [CLAUDE_MODEL_SELECTION.instanceId],
+              "the replaced OpenCode session stays up on a finished child's undelivered report",
+            );
+          }).pipe(
+            Effect.provide(
+              ProviderReplayHarness.layerWithRegistry(
+                {
+                  name: "opencode-report-claude-switch",
+                  runtimePolicyOverride: {
+                    cwd,
+                    approvalPolicy: "never",
+                    sandboxPolicy: {
+                      type: "readOnly",
+                      access: { type: "fullAccess" },
+                      networkAccess: false,
+                    },
+                  },
+                },
+                layerRegistry,
+              ),
+            ),
+          );
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+              NodeCrypto.layer,
+            ),
+          ),
+        ),
+      ),
+  );
+
+  it.live("keeps a later send behind an account switch that waits on background work", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("waiting-switch-order");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const firstBusy = yield* Ref.make(true);
+        const secondSelection: ModelSelection = {
+          ...CLAUDE_MODEL_SELECTION,
+          instanceId: ProviderInstanceId.make("claude-second-account"),
+        };
+        const adapters = [
+          makeTestAdapter({
+            instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            responseByRunOrdinal: { 1: "First account complete", 3: "Wake complete" },
+            capturedTurns,
+            backgroundWork: firstBusy,
+          }),
+          makeTestAdapter({
+            instanceId: secondSelection.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: secondSelection,
+            responseByRunOrdinal: { 2: "Waiting send complete", 4: "Later send complete" },
+            capturedTurns,
+          }),
+        ];
+        // Both accounts continue one native history, so the switch resumes it.
+        const layerRegistry = Layer.succeed(
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+            get: (instanceId) => {
+              const adapter = adapters.find((candidate) => candidate.instanceId === instanceId);
+              return adapter === undefined
+                ? Effect.fail(
+                    new ProviderAdapterRegistry.ProviderAdapterRegistryLookupError({ instanceId }),
+                  )
+                : Effect.succeed(adapter);
+            },
+            list: () => Effect.succeed(adapters.map((adapter) => adapter.instanceId)),
+            getMetadata: () =>
+              Effect.succeed({
+                driver: CLAUDE_DRIVER,
+                continuationKey: "claude:shared-native-account-history",
+                enabled: true,
+                capabilities: ClaudeProviderCapabilitiesV2,
+              }),
+          }),
+        );
+        const threadId = ThreadId.make("thread:waiting-switch-order");
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const send = (ordinal: number, modelSelection: ModelSelection) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:waiting-switch-order:${ordinal}`),
+              threadId,
+              messageId: MessageId.make(`message:waiting-switch-order:${ordinal}`),
+              text: `Prompt ${ordinal}`,
+              attachments: [],
+              modelSelection,
+              dispatchMode: { type: "start_immediately" },
+            });
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:waiting-switch-order:create"),
+            threadId,
+            projectId: ProjectId.make("project:waiting-switch-order"),
+            title: "Waiting switch order",
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+          });
+          yield* send(1, CLAUDE_MODEL_SELECTION);
+          yield* worker.drain();
+          yield* waitForIdle(threadId);
+
+          const runStatus = (index: number) =>
+            orchestrator.streamStoredEvents.pipe(
+              Stream.mapEffect(() => orchestrator.getThreadProjection(threadId)),
+              Stream.map((projection) => projection.runs[index]?.status),
+              Stream.filter((status) => status !== undefined && status !== "queued"),
+              Stream.runHead,
+            );
+          yield* send(2, secondSelection);
+          // A provider wake on the busy session does not queue behind the waiting switch:
+          // running it may be what ends that work.
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            createdBy: "agent",
+            creationSource: "provider",
+            commandId: CommandId.make("command:waiting-switch-order:wake"),
+            threadId,
+            messageId: MessageId.make("message:waiting-switch-order:wake"),
+            text: "Background work finished",
+            attachments: [],
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            dispatchMode: { type: "queue_after_active" },
+          });
+          assert.notEqual(
+            (yield* orchestrator.getThreadProjection(threadId)).runs[2]?.status,
+            "queued",
+          );
+          yield* worker.drain();
+          yield* orchestrator.streamStoredEvents.pipe(
+            Stream.mapEffect(() => orchestrator.getThreadProjection(threadId)),
+            Stream.filter((projection) => projection.runs[2]?.status === "completed"),
+            Stream.runHead,
+          );
+          // The work ends, and a user's send arrives before the queue is retried.
+          yield* Ref.set(firstBusy, false);
+          yield* send(4, secondSelection);
+          assert.deepEqual(
+            (yield* orchestrator.getThreadProjection(threadId)).runs.map((run) => run.status),
+            ["completed", "queued", "completed", "queued"],
+          );
+
+          yield* runStatus(1);
+          yield* worker.drain();
+          yield* runStatus(3);
+          yield* worker.drain();
+          const done = yield* waitForIdle(threadId);
+          assert.deepEqual(
+            done.runs.map((run) => [run.providerInstanceId, run.status]),
+            [
+              [CLAUDE_MODEL_SELECTION.instanceId, "completed"],
+              [CLAUDE_MODEL_SELECTION.instanceId, "completed"],
+              [secondSelection.instanceId, "completed"],
+              [secondSelection.instanceId, "completed"],
+            ],
+          );
+          // The waiting send ran before the later one.
+          assert.deepEqual(
+            (yield* Ref.get(capturedTurns)).map((turn) =>
+              ["Prompt 1", "Background work finished", "Prompt 2", "Prompt 4"].findIndex((text) =>
+                turn.text.includes(text),
+              ),
+            ),
+            [0, 1, 2, 3],
+          );
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerWithRegistry(
+              {
+                name: "waiting-switch-order",
+                runtimePolicyOverride: {
+                  cwd,
+                  approvalPolicy: "never",
+                  sandboxPolicy: {
+                    type: "readOnly",
+                    access: { type: "fullAccess" },
+                    networkAccess: false,
+                  },
+                },
+              },
+              layerRegistry,
+            ),
+          ),
+        );
+      }),
+    ),
+  );
+
+  it.live.each([
+    ["lets a wake for the busy session go ahead of a waiting account switch", false],
+    ["keeps the queue held when the busy session's provider fails before its wake", true],
+  ] as const)("%s", ([, notificationFails]) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("wake-before-waiting-switch");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const firstBusy = yield* Ref.make(true);
+        const notificationStarted = yield* Deferred.make<void>();
+        const releaseNotification = yield* Deferred.make<void>();
+        const secondSelection: ModelSelection = {
+          ...CLAUDE_MODEL_SELECTION,
+          instanceId: ProviderInstanceId.make("claude-second-account"),
+        };
+        const adapters = [
+          makeTestAdapter({
+            instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            responseByRunOrdinal: {
+              1: "First account complete",
+              3: "Notification complete",
+              4: "Wake complete",
+            },
+            capturedTurns,
+            backgroundWork: firstBusy,
+            holdRunOrdinal: 3,
+            ...(notificationFails ? { failedRunOrdinals: new Set([3]) } : {}),
+            holdFirstTurn: notificationStarted,
+            releaseFirstTurn: releaseNotification,
+          }),
+          makeTestAdapter({
+            instanceId: secondSelection.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: secondSelection,
+            responseByRunOrdinal: { 2: "Waiting send complete", 5: "Waiting send complete" },
+            capturedTurns,
+          }),
+        ];
+        // Both accounts continue one native history, so the switch resumes it.
+        const layerRegistry = Layer.succeed(
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+            get: (instanceId) => {
+              const adapter = adapters.find((candidate) => candidate.instanceId === instanceId);
+              return adapter === undefined
+                ? Effect.fail(
+                    new ProviderAdapterRegistry.ProviderAdapterRegistryLookupError({ instanceId }),
+                  )
+                : Effect.succeed(adapter);
+            },
+            list: () => Effect.succeed(adapters.map((adapter) => adapter.instanceId)),
+            getMetadata: () =>
+              Effect.succeed({
+                driver: CLAUDE_DRIVER,
+                continuationKey: "claude:shared-native-account-history",
+                enabled: true,
+                capabilities: ClaudeProviderCapabilitiesV2,
+              }),
+          }),
+        );
+        const threadId = ThreadId.make("thread:wake-before-waiting-switch");
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const sendFromAgent = (key: string, text: string) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "agent",
+              creationSource: "provider",
+              commandId: CommandId.make(`command:wake-before-waiting-switch:${key}`),
+              threadId,
+              messageId: MessageId.make(`message:wake-before-waiting-switch:${key}`),
+              text,
+              attachments: [],
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              dispatchMode: { type: "queue_after_active" },
+            });
+          const sendFromUser = (ordinal: number, modelSelection: ModelSelection) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:wake-before-waiting-switch:${ordinal}`),
+              threadId,
+              messageId: MessageId.make(`message:wake-before-waiting-switch:${ordinal}`),
+              text: `Prompt ${ordinal}`,
+              attachments: [],
+              modelSelection,
+              dispatchMode: { type: "start_immediately" },
+            });
+          const waitUntil = (done: (projection: OrchestrationV2ThreadProjection) => boolean) =>
+            orchestrator.streamStoredEvents.pipe(
+              Stream.mapEffect(() => orchestrator.getThreadProjection(threadId)),
+              Stream.filter(done),
+              Stream.runHead,
+            );
+          const runFor = (projection: OrchestrationV2ThreadProjection, text: string) =>
+            projection.runs.find((run) =>
+              projection.messages.some(
+                (message) => message.id === run.userMessageId && message.text === text,
+              ),
+            );
+          const turnText = (text: string) => (projection: OrchestrationV2ThreadProjection) =>
+            runFor(projection, text)?.status === "completed";
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:wake-before-waiting-switch:create"),
+            threadId,
+            projectId: ProjectId.make("project:wake-before-waiting-switch"),
+            title: "Wake before waiting switch",
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+          });
+          yield* sendFromUser(1, CLAUDE_MODEL_SELECTION);
+          yield* worker.drain();
+          yield* waitForIdle(threadId);
+
+          // The switch waits; a notification then runs on the busy session.
+          yield* sendFromUser(2, secondSelection);
+          yield* sendFromAgent("notification", "Notification");
+          yield* Deferred.await(notificationStarted);
+          // A wake arrives during that run, so it queues behind the waiting switch, and so does a
+          // later user send to the busy session's account.
+          yield* sendFromAgent("wake", "Background work finished");
+          yield* sendFromUser(5, CLAUDE_MODEL_SELECTION);
+          yield* Deferred.succeed(releaseNotification, undefined);
+          if (notificationFails) {
+            // The failed provider holds the queue; the wake must not start on it.
+            yield* waitUntil(
+              (projection) => runFor(projection, "Background work finished")?.queueHeld === true,
+            );
+            assert.equal(
+              runFor(yield* orchestrator.getThreadProjection(threadId), "Background work finished")
+                ?.status,
+              "queued",
+            );
+            return;
+          }
+          // The wake still runs: it keeps the busy session, and it may be what ends the work.
+          yield* waitUntil(turnText("Notification"));
+          yield* waitUntil(
+            (projection) => runFor(projection, "Background work finished")?.status !== "queued",
+          );
+          yield* worker.drain();
+          yield* waitUntil(turnText("Background work finished"));
+          // The user's later send to the busy session's account keeps its place behind the switch,
+          // however often the queue is tried while the work runs.
+          yield* orchestrator.dispatch({
+            type: "queue.resume",
+            commandId: CommandId.make("command:wake-before-waiting-switch:resume"),
+            threadId,
+          });
+          assert.equal(
+            runFor(yield* orchestrator.getThreadProjection(threadId), "Prompt 5")?.status,
+            "queued",
+          );
+          yield* Ref.set(firstBusy, false);
+          yield* waitUntil((projection) => runFor(projection, "Prompt 2")?.status !== "queued");
+          yield* worker.drain();
+          yield* waitUntil((projection) => runFor(projection, "Prompt 5")?.status !== "queued");
+          yield* worker.drain();
+          const done = yield* waitForIdle(threadId);
+          assert.isTrue(done.runs.every((run) => run.status === "completed"));
+          assert.deepEqual(
+            (yield* Ref.get(capturedTurns)).map((turn) =>
+              [
+                "Prompt 1",
+                "Notification",
+                "Background work finished",
+                "Prompt 2",
+                "Prompt 5",
+              ].findIndex((text) => turn.text.includes(text)),
+            ),
+            [0, 1, 2, 3, 4],
+          );
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerWithRegistry(
+              {
+                name: "wake-before-waiting-switch",
+                runtimePolicyOverride: {
+                  cwd,
+                  approvalPolicy: "never",
+                  sandboxPolicy: {
+                    type: "readOnly",
+                    access: { type: "fullAccess" },
+                    networkAccess: false,
+                  },
+                },
+              },
+              layerRegistry,
+            ),
+          ),
+        );
+      }),
+    ),
   );
 
   it.live.each(["immediately", "behind a running turn"] as const)(

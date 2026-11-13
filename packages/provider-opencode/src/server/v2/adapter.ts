@@ -969,6 +969,8 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       }
     >();
 
+    // Published snapshots keep run ingestion open while events can still arrive,
+    // including reports and held wakes OpenCode has yet to deliver.
     const owesWork = (state: ThreadState) =>
       [...shells.values()].some((shell) => shell.state === state && shell.running) ||
       [...state.imageJobs.values()].some((job) => job.status === "running") ||
@@ -978,6 +980,43 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       [...state.calls.values()].some((call) => call.background);
 
     const hasBackground = (thread: ThreadState) => sessionsOf(thread).some(owesWork);
+
+    // Only work a detach would end. A finished child's undelivered report and a
+    // wake whose execution already ended run nothing; after a failed turn they
+    // may never be consumed, so they must not hold a switch or an idle release.
+    const runningWorkOf = (
+      state: ThreadState,
+    ): Array<ProviderAdapter.ProviderAdapterV2PendingBackgroundWork> => {
+      const found: Array<ProviderAdapter.ProviderAdapterV2PendingBackgroundWork> = [];
+      for (const shell of shells.values()) {
+        if (shell.state === state && shell.running) {
+          found.push({ kind: "background_task", label: shell.command });
+        }
+      }
+      for (const job of state.imageJobs.values()) {
+        if (job.status === "running") found.push({ kind: "background_task", label: job.tool.name });
+      }
+      for (const call of state.calls.values()) {
+        if (call.background) found.push({ kind: "subagent", label: call.title });
+      }
+      if (state.subagent !== undefined && busy.has(state.sessionId)) {
+        found.push({ kind: "subagent", label: state.subagent.call.title });
+      }
+      for (const wake of state.wakes) {
+        if (wake.running && busy.has(state.sessionId)) {
+          found.push({
+            kind: "wake_turn",
+            label: backgroundWorkNotification(wake.reports)?.summary ?? null,
+          });
+        }
+        // Children a held wake started have no thread state until it is replayed.
+        if ([...wake.children].some((childId) => busy.has(childId))) {
+          found.push({ kind: "subagent", label: null });
+        }
+      }
+      return found;
+    };
+    const runsWork = (state: ThreadState) => runningWorkOf(state).length > 0;
 
     const emitProviderThread = Effect.fnUntraced(function* (state: ThreadState) {
       const pendingBackgroundWork = hasBackground(state);
@@ -4528,13 +4567,16 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         return session;
       },
       events: Stream.fromQueue(events),
-      // Idle release must wait for background children and held wakes after parent settlement.
-      hasPendingBackgroundWork: Effect.sync(() => [...threads.values()].some(owesWork)),
+      // Idle release and switches wait for running background children and wake executions.
+      hasPendingBackgroundWork: Effect.sync(() => [...threads.values()].some(runsWork)),
+      describePendingBackgroundWork: Effect.sync(() =>
+        [...threads.values()].flatMap(runningWorkOf),
+      ),
       hasPendingBackgroundWorkForThread: (providerThread) =>
         Effect.sync(() => {
           const nativeId = providerThread.nativeThreadRef?.nativeId;
           const state = nativeId == null ? undefined : threads.get(nativeId);
-          return state !== undefined && hasBackground(state);
+          return state !== undefined && sessionsOf(state).some(runsWork);
         }),
       getModelContextWindow: (selection, cwd) =>
         selection.instanceId === instanceId

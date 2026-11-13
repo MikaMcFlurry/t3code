@@ -99,6 +99,7 @@ import { useClientSettingsHydrated } from "../../hooks/useSettings";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import { environmentPresentations } from "../../state/presentation";
 import {
+  composerSendRefusalToast,
   approvalRedirectNotice,
   loadBalancingSendWarning,
   multipleModelSendBlock,
@@ -240,6 +241,8 @@ interface ComposerSendInput {
     SetStateAction<Record<string, ReadonlyArray<CodexFeedbackSubmission>>>
   >;
   readonly setThreadError: ReturnType<typeof makeThreadErrorSetter>;
+  /** Stops the given thread, including background work of its idle session. */
+  readonly onStopBackgroundWork: (threadRef: ScopedThreadRef) => Promise<void>;
   readonly setKeepFullHistory: (threadKey: string, keep: boolean) => void;
   readonly anchorNewTurn: TimelineFollow["anchorNewTurn"];
   readonly acknowledgeActiveThreadWoke: () => void;
@@ -330,6 +333,7 @@ export function useComposerSend(input: ComposerSendInput) {
     optimisticBlobPreviews,
     setFeedbackSubmissionsByThreadKey,
     setThreadError,
+    onStopBackgroundWork,
     setKeepFullHistory,
     anchorNewTurn,
     acknowledgeActiveThreadWoke,
@@ -1454,10 +1458,8 @@ export function useComposerSend(input: ComposerSendInput) {
       }
       if (!isAtomCommandInterrupted(failure)) {
         const error = squashAtomCommandFailure(failure);
-        setThreadError(
-          threadIdForSend,
-          error instanceof Error ? error.message : "Failed to send message.",
-        );
+        const errorMessage = error instanceof Error ? error.message : "Failed to send message.";
+        setThreadError(threadIdForSend, errorMessage);
         if (
           draftId &&
           (backgroundDraftOpened || currentRouteThreadKeyRef.current !== routeThreadKey)
@@ -1475,6 +1477,19 @@ export function useComposerSend(input: ComposerSendInput) {
                 onClick: () => {
                   void navigate({ to: "/draft/$draftId", params: { draftId } });
                 },
+              },
+            }),
+          );
+        } else if (currentRouteThreadKeyRef.current === routeThreadKey) {
+          // The banner sits above the timeline, far from the restored draft, and stays
+          // hidden once dismissed: the refusal also shows where the user just pressed Send.
+          toastManager.add(
+            composerSendRefusalToast({
+              message: errorMessage,
+              threadRef: scopeThreadRef(environmentId, threadIdForSend),
+              isServerThread,
+              onStopBackgroundWork: (threadRef) => {
+                void onStopBackgroundWork(threadRef);
               },
             }),
           );
