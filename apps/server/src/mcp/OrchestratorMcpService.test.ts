@@ -2202,6 +2202,187 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
   );
 
+  it.effect("a worktree task resolves baseRef once, and a retry keeps that base", () =>
+    Effect.gen(function* () {
+      const dispatched = yield* Ref.make<ReadonlyArray<{ readonly workspaceStrategy?: unknown }>>(
+        [],
+      );
+      const accepted = yield* Ref.make(false);
+      const resolutions = yield* Ref.make<ReadonlyArray<unknown>>([]);
+      const heads = ["a".repeat(40), "b".repeat(40)];
+      const task = {
+        id: taskId,
+        threadId: parentThreadId,
+        runId: parentRunId,
+        parentNodeId,
+        origin: "app_owned",
+        createdBy: "agent",
+        driver: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        providerThreadId: null,
+        childThreadId,
+        nativeTaskRef: null,
+        prompt: "Summarize the diff.",
+        title: null,
+        model: "gpt-5.4",
+        status: "running",
+        result: null,
+        startedAt: null,
+        completedAt: null,
+      };
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        NodeCrypto.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: (threadId) =>
+            Ref.get(accepted).pipe(
+              Effect.map((isAccepted) =>
+                threadId === parentThreadId
+                  ? parentProjection(isAccepted ? [task] : [])
+                  : childProjection,
+              ),
+            ),
+          hasReceipt: () => Ref.get(accepted),
+          isProviderInstanceEnabledForProject: () => Effect.succeed(true),
+          assertProviderInstanceEnabled: () => Effect.void,
+          dispatch: (command) =>
+            Ref.update(dispatched, (commands) => [
+              ...commands,
+              command as { readonly workspaceStrategy?: unknown },
+            ]).pipe(
+              Effect.andThen(Ref.set(accepted, true)),
+              Effect.as({
+                sequence: 1,
+                storedEvents: [
+                  {
+                    sequence: 1,
+                    commandId: null,
+                    event: { type: "subagent.updated", payload: task },
+                  },
+                ],
+              } as never),
+            ),
+        }),
+        providerRegistryLayer([
+          providerSnapshot({
+            instanceId: codexInstanceId,
+            driver: ProviderDriverKind.make("codex"),
+            model: "gpt-5.4",
+          }),
+        ]),
+        adapterRegistryLayer([codexInstanceId]),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        ServerSettings.layerTest(),
+      );
+      // The project's HEAD moves between the first call and the retry.
+      const layerService = OrchestratorMcpService.layer.pipe(
+        Layer.provide(
+          Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+            resolveWorktreeBase: (input) =>
+              Ref.modify(resolutions, (seen) => [seen.length, [...seen, input]]).pipe(
+                Effect.map((index) => ({ ...input.workspaceStrategy, baseCommit: heads[index]! })),
+              ),
+          }),
+        ),
+        Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+      );
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const request = {
+          task: "Summarize the diff.",
+          isolation: "worktree",
+          baseRef: "HEAD",
+          mode: "async",
+          clientRequestId: "delegate-pinned-base-1",
+        } as const;
+        yield* service.delegateTask(scope, request);
+        yield* service.delegateTask(scope, request);
+        assert.deepEqual(yield* Ref.get(resolutions), [
+          {
+            projectId,
+            workspaceStrategy: { type: "worktree", baseRef: "HEAD", startFromOrigin: false },
+          },
+        ]);
+        const commands = yield* Ref.get(dispatched);
+        assert.equal(commands.length, 2);
+        assert.deepEqual(commands[0]!.workspaceStrategy, {
+          type: "worktree",
+          baseRef: "HEAD",
+          startFromOrigin: false,
+          baseCommit: heads[0],
+        });
+        // The retry replays the accepted command, whose receipt keeps the first base.
+        assert.equal(commands[1]!.workspaceStrategy, undefined);
+      }).pipe(Effect.provide(layerService.pipe(Layer.provide(layerDependencies))));
+    }),
+  );
+
+  it.effect.each([
+    { name: "startFromOrigin without baseRef", input: { startFromOrigin: true } },
+    { name: "baseRef with shared isolation", input: { isolation: "shared", baseRef: "HEAD" } },
+    { name: "baseRef without isolation", input: { baseRef: "origin/main" } },
+    {
+      name: "an unavailable base",
+      input: { isolation: "worktree", baseRef: "gone" },
+      code: "base_unavailable",
+    },
+  ] as const)("a worktree task refuses $name without creating anything", ({ input, ...rest }) =>
+    Effect.gen(function* () {
+      const dispatched = yield* Ref.make(0);
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        NodeCrypto.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: (threadId) =>
+            Effect.succeed(threadId === parentThreadId ? parentProjection([]) : childProjection),
+          hasReceipt: () => Effect.succeed(false),
+          isProviderInstanceEnabledForProject: () => Effect.succeed(true),
+          assertProviderInstanceEnabled: () => Effect.void,
+          dispatch: () => Ref.update(dispatched, (count) => count + 1).pipe(Effect.as({} as never)),
+        }),
+        providerRegistryLayer([
+          providerSnapshot({
+            instanceId: codexInstanceId,
+            driver: ProviderDriverKind.make("codex"),
+            model: "gpt-5.4",
+          }),
+        ]),
+        adapterRegistryLayer([codexInstanceId]),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        ServerSettings.layerTest(),
+      );
+      const layerService = OrchestratorMcpService.layer.pipe(
+        Layer.provide(
+          Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+            resolveWorktreeBase: (request) =>
+              Effect.fail(
+                new ThreadLaunchService.ThreadLaunchBaseUnavailableError({
+                  projectId,
+                  baseRef: request.workspaceStrategy.baseRef,
+                }),
+              ),
+          }),
+        ),
+        Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const refused = yield* service
+          .delegateTask(scope, { task: "Summarize the diff.", mode: "async", ...input })
+          .pipe(Effect.flip);
+        assert.equal(refused.code, "code" in rest ? rest.code : "invalid_request");
+        assert.equal(yield* Ref.get(dispatched), 0);
+      }).pipe(Effect.provide(layerService.pipe(Layer.provide(layerDependencies))));
+    }),
+  );
+
   it.effect.each([
     { name: "parent instance", parentEnabled: true, model: "gpt-5.4" },
     { name: "alternate instance", parentEnabled: false, model: "gpt-5.5" },

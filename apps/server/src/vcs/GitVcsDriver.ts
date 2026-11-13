@@ -418,6 +418,19 @@ export class GitVcsDriver extends Context.Service<
       input: GitFetchWorktreeBaseCommitInput,
     ) => Effect.Effect<GitWorktreeBaseRemote | null, GitCommandError>;
     /**
+     * The repository `remoteName`'s URL names, as the canonical key every spelling of it
+     * shares; null when there is no such remote.
+     */
+    readonly remoteRepositoryKey: (input: {
+      readonly cwd: string;
+      readonly remoteName: string;
+    }) => Effect.Effect<string | null, GitCommandError>;
+    /** The remotes here whose URL names `repository` (a key from `remoteRepositoryKey`). */
+    readonly findRemotesForRepository: (input: {
+      readonly cwd: string;
+      readonly repository: string;
+    }) => Effect.Effect<ReadonlyArray<string>, GitCommandError>;
+    /**
      * Fetches the configured upstream, explicit remote ref, or origin; null uses the local base.
      * A caller that already ran `resolveWorktreeBaseRemote` passes its result as `remote`.
      */

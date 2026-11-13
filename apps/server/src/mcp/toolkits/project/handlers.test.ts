@@ -57,6 +57,7 @@ const clientLaunchHarness = (input: {
   readonly launched: Array<ThreadLaunch.ThreadLaunchInput>;
   readonly workspaceRoot?: string;
   readonly checkWorktreeBase?: ThreadLaunch.ThreadLaunchService["Service"]["checkWorktreeBase"];
+  readonly resolveWorktreeBase?: ThreadLaunch.ThreadLaunchService["Service"]["resolveWorktreeBase"];
   readonly hostedAppUrl?: string;
   /** The orchestrator refuses the new thread's mode, as under a managed ceiling. */
   readonly refusedByCeiling?: true;
@@ -119,6 +120,9 @@ const clientLaunchHarness = (input: {
     }),
     Layer.mock(ThreadLaunch.ThreadLaunchService)({
       checkWorktreeBase: input.checkWorktreeBase ?? (() => Effect.void),
+      ...(input.resolveWorktreeBase === undefined
+        ? {}
+        : { resolveWorktreeBase: input.resolveWorktreeBase }),
       launch: (launch) => {
         input.launched.push(launch);
         if (input.refusedByCeiling) {
@@ -638,6 +642,57 @@ it.effect("a launch into a new worktree creates nothing when its branch collides
       message:
         'Branch "werkstatt/baseline" cannot be created in project "Client target": branch "werkstatt" exists. No thread was created. Use a name that does not nest under or contain an existing branch, such as "werkstatt-baseline".',
     });
+    expect(launched).toHaveLength(0);
+  }),
+);
+
+it.effect("a launch onto a pinned base still refuses a branch an existing branch blocks", () =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const pinnedCommit = "0123456789abcdef0123456789abcdef01234567";
+    const checked: Array<ThreadLaunch.ThreadLaunchInput["workspaceStrategy"]> = [];
+    const { projectId, dependencies } = clientLaunchHarness({
+      runtimeModeCeiling: "auto",
+      launched,
+      resolveWorktreeBase: ({ workspaceStrategy }) =>
+        Effect.succeed({ ...workspaceStrategy, baseCommit: pinnedCommit }),
+      checkWorktreeBase: ({ projectId, workspaceStrategy }) => {
+        checked.push(workspaceStrategy);
+        return Effect.fail(
+          new ThreadLaunch.ThreadLaunchBranchConflictError({
+            projectId,
+            projectTitle: "Client target",
+            branch: workspaceStrategy?.type === "worktree" ? (workspaceStrategy.branch ?? "") : "",
+            conflictingBranch: "werkstatt",
+          }),
+        );
+      },
+    });
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const refused = (yield* toolkit
+      .handle("t3_thread_launch", {
+        title: "Fix",
+        projectId,
+        workspaceStrategy: { type: "worktree", baseRef: "main", branch: "werkstatt/baseline" },
+        pinBase: {},
+      })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies))).at(-1)?.result;
+
+    expect(refused).toMatchObject({ code: "invalid_request" });
+    // The branch is checked against the commit the base was pinned to, not the moving ref.
+    expect(checked).toEqual([
+      {
+        type: "worktree",
+        baseRef: pinnedCommit,
+        baseCommit: pinnedCommit,
+        branch: "werkstatt/baseline",
+        startFromOrigin: false,
+      },
+    ]);
     expect(launched).toHaveLength(0);
   }),
 );
