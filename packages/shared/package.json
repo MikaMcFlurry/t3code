@@ -399,6 +399,10 @@
       "types": "./src/resetPlanner.ts",
       "import": "./src/resetPlanner.ts"
     },
+    "./environmentSchedule": {
+      "types": "./src/environmentSchedule.ts",
+      "import": "./src/environmentSchedule.ts"
+    },
     "./usageLimits": {
       "types": "./src/usageLimits.ts",
       "import": "./src/usageLimits.ts"
