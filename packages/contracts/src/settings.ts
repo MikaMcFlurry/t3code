@@ -842,9 +842,25 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    shareProjectMemory: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({
+        title: "Share project memory across Claude accounts",
+        description:
+          "Keep Claude's auto memory for each project in one T3 folder that every Claude instance with this option uses. An autoMemoryDirectory in your own Claude settings wins.",
+        providerSettingsForm: { control: "switch" },
+      }),
+    ),
   },
   {
-    order: ["binaryPath", "homePath", "autoCompactWindow", "idleCompaction", "launchArgs"],
+    order: [
+      "binaryPath",
+      "homePath",
+      "autoCompactWindow",
+      "idleCompaction",
+      "shareProjectMemory",
+      "launchArgs",
+    ],
   },
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;
