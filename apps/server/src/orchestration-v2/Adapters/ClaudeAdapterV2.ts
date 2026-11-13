@@ -1950,6 +1950,8 @@ export function makeClaudeQueryOptions(input: {
   readonly resumeSessionAt?: string;
   readonly cwd: string | null;
   readonly attachmentsDir?: string;
+  /** Claude loads <dir>/.claude/skills from every additional directory. */
+  readonly centralSkillsDirectory?: string;
   readonly settings?: ClaudeSettings;
   readonly promptSuggestions?: boolean;
   readonly sdkSettings?: string | ClaudeSdkSettings;
@@ -2122,6 +2124,7 @@ export function makeClaudeQueryOptions(input: {
   const additionalDirectories = [
     ...(input.cwd === null ? [] : [input.cwd]),
     ...(input.attachmentsDir === undefined ? [] : [input.attachmentsDir]),
+    ...(input.centralSkillsDirectory === undefined ? [] : [input.centralSkillsDirectory]),
     ...claudeLaunchArgDirectories(input.settings?.launchArgs),
   ];
   const withDirectories =
@@ -5218,6 +5221,8 @@ export interface ClaudeAdapterV2Options {
   readonly modelCatalog?: Effect.Effect<ClaudeModelCatalog>;
   readonly environment: NodeJS.ProcessEnv;
   readonly attachmentsDir: string;
+  /** The central skill library every Claude session loads; see skills/CentralSkills.ts. */
+  readonly centralSkillsDirectory?: string;
   readonly fileSystem: FileSystem.FileSystem;
   readonly path: Path.Path;
   readonly random: SecureRandom.SecureRandom["Service"];
@@ -5469,6 +5474,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
       adapterOptions.settings,
       cwd ?? undefined,
       adapterOptions.environment,
+      adapterOptions.centralSkillsDirectory === undefined
+        ? []
+        : [adapterOptions.centralSkillsDirectory],
     ).pipe(
       Effect.map(
         (skills) =>
@@ -12125,6 +12133,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ...(resumeSessionAt === undefined ? {} : { resumeSessionAt }),
             cwd: turnInput.runtimePolicy.cwd,
             attachmentsDir,
+            ...(adapterOptions.centralSkillsDirectory === undefined
+              ? {}
+              : { centralSkillsDirectory: adapterOptions.centralSkillsDirectory }),
             settings: adapterOptions.settings,
             // Delegated threads have no one typing, so they never ask for suggestions.
             promptSuggestions:
@@ -13719,6 +13730,7 @@ export const createClaudeAdapterV2 = Effect.fn("ClaudeAdapterV2Driver.create")(
       settings: { ...config, enabled, binaryPath },
       environment: claudeEnvironment,
       attachmentsDir: serverConfig.attachmentsDir,
+      centralSkillsDirectory: serverConfig.skillsDir,
       fileSystem,
       path,
       random,

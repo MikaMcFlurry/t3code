@@ -29,6 +29,10 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   // Listing models spends the stored API key, so only those who can choose a model may.
   [WS_METHODS.serverListTextGeneratorModels]: AuthSettingsWriteScope,
   [WS_METHODS.serverRefreshProviders]: AuthOrchestrationReadScope,
+  // The shared skill library reaches every provider account's sessions.
+  [WS_METHODS.centralSkillsInstall]: AuthSettingsWriteScope,
+  [WS_METHODS.centralSkillsRemove]: AuthSettingsWriteScope,
+  [WS_METHODS.centralSkillsSetEnabled]: AuthSettingsWriteScope,
   [WS_METHODS.pullRequestsRunAction]: AuthSourceControlWriteScope,
   [WS_METHODS.pullRequestsUpdate]: AuthSourceControlWriteScope,
   [WS_METHODS.pullRequestsComment]: AuthSourceControlWriteScope,

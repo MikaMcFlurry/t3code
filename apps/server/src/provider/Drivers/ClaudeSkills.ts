@@ -58,7 +58,7 @@ function parseFrontmatterBoolean(value: unknown): boolean | undefined {
   }
 }
 
-function parseSkillFrontmatter(contents: string): SkillFrontmatter {
+export function parseSkillFrontmatter(contents: string): SkillFrontmatter {
   const match = FRONTMATTER_PATTERN.exec(contents);
   if (!match) {
     return { kind: "missing" };
@@ -632,6 +632,8 @@ export const discoverClaudeSkills = Effect.fn("discoverClaudeSkills")(function* 
   config: Pick<ClaudeSettings, "homePath"> & Partial<Pick<ClaudeSettings, "launchArgs">>,
   cwd?: string,
   environment?: NodeJS.ProcessEnv,
+  /** Directories T3 passes as additionalDirectories, such as the central skill library. */
+  extraDirectories: ReadonlyArray<string> = [],
 ): Effect.fn.Return<ReadonlyArray<ServerProviderSkill>, never, FileSystem.FileSystem | Path.Path> {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -655,7 +657,7 @@ export const discoverClaudeSkills = Effect.fn("discoverClaudeSkills")(function* 
   const roots: ReadonlyArray<ClaudeSkillRoot> = [
     { directory: path.join(configDirPath, "skills"), scope: "user" },
     ...(cwd ? [{ directory: path.join(cwd, ".claude", "skills"), scope: "project" as const }] : []),
-    ...claudeLaunchArgDirectories(config.launchArgs)
+    ...[...claudeLaunchArgDirectories(config.launchArgs), ...extraDirectories]
       .filter((directory) => directory && (cwd || path.isAbsolute(directory)))
       .map((directory) => ({
         directory: path.join(path.resolve(cwd ?? ".", directory), ".claude", "skills"),

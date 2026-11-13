@@ -54,6 +54,8 @@ export interface ServerDerivedPaths {
   readonly environmentIdPath: string;
   readonly serverRuntimeStatePath: string;
   readonly secretsDir: string;
+  /** Central skill library shared by every provider instance; see skills/CentralSkills.ts. */
+  readonly skillsDir: string;
 }
 
 export interface DeriveServerPathsOptions {
@@ -172,6 +174,7 @@ export const deriveServerPaths = Effect.fn(function* (
     environmentIdPath: join(stateDir, "environment-id"),
     serverRuntimeStatePath: join(stateDir, "server-runtime.json"),
     secretsDir: join(stateDir, "secrets"),
+    skillsDir: join(stateDir, "skills"),
   };
 });
 
@@ -187,6 +190,7 @@ export const ensureServerDirectories = Effect.fn(function* (derivedPaths: Server
       fs.makeDirectory(derivedPaths.terminalLogsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.attachmentsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.worktreesDir, { recursive: true }),
+      fs.makeDirectory(path.join(derivedPaths.skillsDir, ".claude", "skills"), { recursive: true }),
       fs.makeDirectory(path.dirname(derivedPaths.keybindingsConfigPath), { recursive: true }),
       fs.makeDirectory(path.dirname(derivedPaths.settingsPath), { recursive: true }),
       fs.makeDirectory(derivedPaths.providerStatusCacheDir, { recursive: true }),
