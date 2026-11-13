@@ -102,6 +102,7 @@ import type {
 } from "../orchestration-v2/ProjectionStore.ts";
 import { delegatedTaskResultRun, runOutcome } from "../orchestration-v2/RestartBackgroundNote.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ThreadMessageIntake from "../orchestration-v2/ThreadMessageIntake.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
@@ -3258,28 +3259,39 @@ const make = Effect.gen(function* () {
         requestKey: key,
         operation: "thread-send",
       });
+      // Picked under the thread's dispatch lock, like every other send; an agent keeps its model.
+      const accountChoice = yield* ThreadMessageIntake.messageAccountChoice({
+        sameModelOnly: true,
+      }).pipe(
+        Effect.provideService(ServerSettings.ServerSettingsService, serverSettings),
+        Effect.provideService(ProviderRegistry.ProviderRegistry, providerRegistry),
+        Effect.provideService(ThreadManagementService.ThreadManagementService, threadManagement),
+      );
       const result = yield* threadManagement
-        .sendToThread({
-          projectId: target.thread.projectId,
-          commandId: stableCommandId({
-            scope,
-            requestKey: key,
-            operation: "thread-send",
-          }),
-          threadId: input.threadId,
-          ...(parent === undefined ? {} : { senderThreadId: parent.thread.id }),
-          // A linked environment's agent has no thread here; the link names it.
-          ...(parent === undefined && scope.client?.senderThread !== undefined
-            ? { linkedSender: scope.client.senderThread }
-            : {}),
-          messageId,
-          text: input.message,
-          attachments: [],
-          mode,
-          ...(input.freshContext ? { freshContext: true } : {}),
-          createdBy: "agent",
-          creationSource: "mcp",
-        })
+        .sendToThread(
+          {
+            projectId: target.thread.projectId,
+            commandId: stableCommandId({
+              scope,
+              requestKey: key,
+              operation: "thread-send",
+            }),
+            threadId: input.threadId,
+            ...(parent === undefined ? {} : { senderThreadId: parent.thread.id }),
+            // A linked environment's agent has no thread here; the link names it.
+            ...(parent === undefined && scope.client?.senderThread !== undefined
+              ? { linkedSender: scope.client.senderThread }
+              : {}),
+            messageId,
+            text: input.message,
+            attachments: [],
+            mode,
+            ...(input.freshContext ? { freshContext: true } : {}),
+            createdBy: "agent",
+            creationSource: "mcp",
+          },
+          accountChoice,
+        )
         .pipe(
           Effect.mapError((error) =>
             isThreadManagementError(error)

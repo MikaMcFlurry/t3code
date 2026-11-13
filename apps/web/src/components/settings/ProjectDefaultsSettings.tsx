@@ -117,6 +117,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
   const mixedWorkspace = useScopedSettingsMixed(["defaultThreadEnvMode"]);
   const mixedAutoPull = useScopedSettingsMixed(["defaultAutoPull"]);
   const mixedAgentCredits = useScopedSettingsMixed(["removeAgentCreditsOnMerge"]);
+  const mixedAvailableAccounts = useScopedSettingsMixed(["fallbackToAvailableAccounts"]);
   const mixedMergeMethod = useScopedSettingsMixed(["pullRequestMergeMethod"]);
   const modelSource = useScopedSettingSource(["defaultModelSelection"]);
   const isProjectScope = scope.kind === "project" || scope.kind === "checkout";
@@ -331,6 +332,31 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
       }
     />
   ) : null;
+  const availableAccountsRow = !isProjectScope ? (
+    <SettingsRow
+      serverScoped
+      settingKeys={["fallbackToAvailableAccounts"]}
+      mixed={mixedAvailableAccounts}
+      {...searchableSetting("fallback-available-accounts")}
+      description="When an account runs out of usage, threads that hit a limit continue with the same model on another account of that provider, then on another provider. New threads try the fallback model first."
+      resetAction={
+        settings.fallbackToAvailableAccounts ? (
+          <SettingResetButton
+            label="switching to available accounts"
+            onClick={() => updateSettings({ fallbackToAvailableAccounts: false })}
+          />
+        ) : null
+      }
+      control={
+        <Switch
+          aria-label="Switch to an account with usage left"
+          mixed={mixedAvailableAccounts}
+          checked={mixedAvailableAccounts ? false : settings.fallbackToAvailableAccounts}
+          onCheckedChange={(enabled) => updateSettings({ fallbackToAvailableAccounts: enabled })}
+        />
+      }
+    />
+  ) : null;
 
   const autoModelRow = !isProjectScope ? (
     <SettingsRow
@@ -387,6 +413,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
           {autoModelRow}
           {autoModelRow ? <AutoRoutingAllowedRow /> : null}
           {autoModelRow ? <ResetPlannerRows providers={providers} /> : null}
+          {availableAccountsRow}
           {workspaceRow}
         </>
       ) : category === "general" ? (
@@ -396,6 +423,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
           {autoModelRow}
           {autoModelRow ? <AutoRoutingAllowedRow /> : null}
           {autoModelRow ? <ResetPlannerRows providers={providers} /> : null}
+          {availableAccountsRow}
           <SettingsRow
             serverScoped
             settingKeys={["defaultRuntimeMode"]}

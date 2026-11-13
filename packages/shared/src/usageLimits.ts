@@ -28,10 +28,20 @@ export function exhaustedUsageWindow(
   now: number,
   model?: string,
 ) {
+  return blockingUsageWindow(provider, now, model, (used) => used >= 100);
+}
+
+/** The current window that keeps `model` from running, with `blocks` deciding by percent used. */
+function blockingUsageWindow(
+  provider: ServerProvider | undefined,
+  now: number,
+  model: string | undefined,
+  blocks: (usedPercent: number) => boolean,
+) {
   const windows = provider?.usageLimits?.windows ?? [];
   const exhausted = windows.filter(
     (window) =>
-      (window.usedPercent ?? 0) >= 100 &&
+      blocks(window.usedPercent ?? 0) &&
       (model === undefined || window.modelIds === undefined || window.modelIds.includes(model)) &&
       (model === undefined ||
         window.providerIds === undefined ||
@@ -75,43 +85,221 @@ export function exhaustedUsageWindow(
   }
 }
 
-export function resolveNewThreadModelSelection(input: {
-  readonly defaultSelection: ModelSelection | null;
-  readonly explicitSelection?: ModelSelection | null;
-  readonly fallbackSelection: ModelSelection | null;
+interface AccountChoiceInput {
   readonly providers: readonly ServerProvider[];
   readonly now: number;
   readonly settings?: ServerSettings;
   readonly projectId?: ProjectId | null;
-}) {
-  const selection = input.explicitSelection ?? input.defaultSelection;
-  const unchanged = { selection, fallback: null };
-  if (input.explicitSelection || !selection || !input.fallbackSelection) return unchanged;
-  const provider = input.providers.find((entry) => entry.instanceId === selection.instanceId);
-  const window = exhaustedUsageWindow(provider, input.now, selection.model);
-  const fallback = input.providers.find(
-    (entry) => entry.instanceId === input.fallbackSelection?.instanceId,
-  );
-  if (
-    !provider ||
-    !window ||
-    !fallback?.enabled ||
-    !fallback.installed ||
-    fallback.auth.status === "unauthenticated" ||
-    !isProviderAvailable(fallback) ||
-    exhaustedUsageWindow(fallback, input.now, input.fallbackSelection.model) ||
-    (input.settings &&
-      !resolveProjectProviderInstanceEnabled(
+}
+
+function isUsableSelection(candidate: ModelSelection, input: AccountChoiceInput) {
+  const entry = input.providers.find((item) => item.instanceId === candidate.instanceId);
+  return (
+    entry !== undefined &&
+    entry.enabled &&
+    entry.installed &&
+    entry.auth.status !== "unauthenticated" &&
+    isProviderAvailable(entry) &&
+    !exhaustedUsageWindow(entry, input.now, candidate.model) &&
+    (!input.settings ||
+      resolveProjectProviderInstanceEnabled(
         input.settings,
         input.projectId ?? null,
-        fallback.instanceId,
+        entry.instanceId,
       ))
-  )
-    return unchanged;
+  );
+}
+
+/**
+ * With `fallbackToAvailableAccounts` on and the selection's account out of usage (`exhausted`
+ * when a turn just said so), the same model on another account with usage left, else another
+ * provider's default model. `sameModelOnly` keeps a model an agent asked for by name: only
+ * another account with that model counts.
+ */
+export function availableAccountSelection(
+  input: AccountChoiceInput & {
+    readonly selection: ModelSelection;
+    readonly exhausted?: boolean;
+    readonly sameModelOnly?: boolean;
+    /** Accounts a turn found out of usage, until when, ahead of their usage bars. */
+    readonly limitedUntil?: ReadonlyMap<ProviderInstanceId, number>;
+  },
+): ModelSelection | null {
+  if (!input.settings?.fallbackToAvailableAccounts) return null;
+  const provider = input.providers.find((entry) => entry.instanceId === input.selection.instanceId);
+  if (!provider) return null;
+  const limited = (instanceId: ProviderInstanceId) =>
+    (input.limitedUntil?.get(instanceId) ?? 0) > input.now;
+  if (
+    !input.exhausted &&
+    !limited(provider.instanceId) &&
+    !exhaustedUsageWindow(provider, input.now, input.selection.model)
+  ) {
+    return null;
+  }
+  return (
+    automaticFallbackSelections(input.selection, provider, input.providers, input.now).find(
+      (candidate) =>
+        !limited(candidate.instanceId) &&
+        (!input.sameModelOnly ||
+          (candidate.model === input.selection.model &&
+            input.providers.find((entry) => entry.instanceId === candidate.instanceId)?.driver ===
+              provider.driver)) &&
+        isUsableSelection(candidate, input),
+    ) ?? null
+  );
+}
+
+/** Same account, model and options, whatever order the options came in. */
+export function sameModelSelection(left: ModelSelection, right: ModelSelection): boolean {
+  const options = (selection: ModelSelection) =>
+    JSON.stringify(
+      (selection.options ?? [])
+        .map((option) => [option.id, option.value] as const)
+        .sort(([a], [b]) => a.localeCompare(b)),
+    );
+  return (
+    left.instanceId === right.instanceId &&
+    left.model === right.model &&
+    options(left) === options(right)
+  );
+}
+
+/** Below this headroom the account a thread left is not worth going back to yet. */
+const RETURN_MIN_HEADROOM = 10;
+
+/**
+ * The selection a usage-limit switch moved a thread away from, once the limit that caused it
+ * has reset and its account reports at least `RETURN_MIN_HEADROOM` percent left in every window.
+ * Null unless the thread still runs the model the switch picked, so a later manual change wins.
+ */
+export function limitSwitchReturnSelection(
+  input: AccountChoiceInput & {
+    readonly origin: ModelSelection;
+    readonly originResetAt: string | null;
+    readonly originLimitedAt: string | null;
+    readonly switchedTo: ModelSelection;
+    readonly current: ModelSelection;
+  },
+): ModelSelection | null {
+  if (!input.settings?.fallbackToAvailableAccounts) return null;
+  const resetMs = input.originResetAt === null ? Number.NaN : Date.parse(input.originResetAt);
+  if (
+    !sameModelSelection(input.current, input.switchedTo) ||
+    input.origin.instanceId === input.current.instanceId ||
+    // The failure's own reset time beats a usage snapshot that may predate the limit.
+    (Number.isFinite(resetMs) && resetMs > input.now) ||
+    !isUsableSelection(input.origin, input)
+  ) {
+    return null;
+  }
+  const origin = input.providers.find((entry) => entry.instanceId === input.origin.instanceId);
+  // Without a reading there is no evidence the account recovered; with an unknown reset time,
+  // only a reading taken after the limit counts.
+  if ((origin?.usageLimits?.windows ?? []).length === 0) return null;
+  if (!Number.isFinite(resetMs)) {
+    const checkedMs = Date.parse(origin?.usageLimits?.checkedAt ?? "");
+    const limitedMs =
+      input.originLimitedAt === null ? Number.NaN : Date.parse(input.originLimitedAt);
+    if (!Number.isFinite(checkedMs) || !(checkedMs > limitedMs)) return null;
+  }
+  // Only windows that apply to the model count, as when deciding the account was exhausted.
+  const tooLittleLeft = (used: number) => 100 - used < RETURN_MIN_HEADROOM;
+  return blockingUsageWindow(origin, input.now, input.origin.model, tooLittleLeft)
+    ? null
+    : input.origin;
+}
+
+export function resolveNewThreadModelSelection(
+  input: AccountChoiceInput & {
+    readonly defaultSelection: ModelSelection | null;
+    readonly explicitSelection?: ModelSelection | null;
+    readonly fallbackSelection: ModelSelection | null;
+  },
+) {
+  const selection = input.explicitSelection ?? input.defaultSelection;
+  const unchanged = { selection, fallback: null };
+  if (input.explicitSelection || !selection) return unchanged;
+  const provider = input.providers.find((entry) => entry.instanceId === selection.instanceId);
+  const window = exhaustedUsageWindow(provider, input.now, selection.model);
+  if (!provider || !window) return unchanged;
+  const replacement =
+    (input.fallbackSelection && isUsableSelection(input.fallbackSelection, input)
+      ? input.fallbackSelection
+      : null) ?? availableAccountSelection({ ...input, selection, exhausted: true });
+  if (!replacement) return unchanged;
   return {
-    selection: input.fallbackSelection,
+    selection: replacement,
     fallback: { provider, resetsAt: window.resetsAt ?? null },
   };
+}
+
+/** Other accounts of the exhausted provider first, then other providers, most headroom first. */
+/** Weekly quota that resets within this window is lost unless it is used first. */
+const EXPIRING_QUOTA_WINDOW = DAY;
+/** Below this headroom an account is not worth moving work to just because it resets soon. */
+const EXPIRING_QUOTA_MIN_HEADROOM = 25;
+
+/**
+ * Other accounts of the exhausted provider first, then other providers. Within each, an account
+ * with real headroom whose weekly window resets within a day goes first (soonest reset first):
+ * its remaining quota is lost at the reset, while other accounts keep theirs. The rest follow by
+ * headroom.
+ */
+function automaticFallbackSelections(
+  selection: ModelSelection,
+  exhausted: ServerProvider,
+  providers: readonly ServerProvider[],
+  now: number,
+): ModelSelection[] {
+  const weeklyResetSoon = (entry: ServerProvider) => {
+    let soonest: number | null = null;
+    for (const window of entry.usageLimits?.windows ?? []) {
+      if (window.kind !== "weekly" || !window.resetsAt) continue;
+      const at = Date.parse(window.resetsAt);
+      if (Number.isFinite(at) && at > now && (soonest === null || at < soonest)) soonest = at;
+    }
+    return soonest !== null && soonest - now <= EXPIRING_QUOTA_WINDOW ? soonest : null;
+  };
+  // Only accounts that report limits: an unknown balance could be pay-per-use or already spent.
+  const headroom = (entry: ServerProvider) => {
+    const windows = entry.usageLimits?.unavailable ? [] : (entry.usageLimits?.windows ?? []);
+    return windows.length === 0 ? null : Math.min(...windows.map(remainingPercent));
+  };
+  const exhaustedLogin = exhausted.usageLimits?.credentialFingerprint;
+  return providers
+    .flatMap((entry) => {
+      const left = headroom(entry);
+      if (
+        entry.instanceId === exhausted.instanceId ||
+        left === null ||
+        // Two instances signed in to the same login share one quota.
+        (exhaustedLogin !== undefined &&
+          entry.usageLimits?.credentialFingerprint === exhaustedLogin)
+      ) {
+        return [];
+      }
+      const sameDriver = entry.driver === exhausted.driver;
+      const model =
+        (sameDriver ? entry.models.find((item) => item.slug === selection.model) : undefined) ??
+        entry.models.find((item) => item.isDefault) ??
+        entry.models[0];
+      if (!model) return [];
+      const candidate: ModelSelection =
+        sameDriver && model.slug === selection.model
+          ? { ...selection, instanceId: entry.instanceId }
+          : { instanceId: entry.instanceId, model: model.slug };
+      const expiresAt = left >= EXPIRING_QUOTA_MIN_HEADROOM ? weeklyResetSoon(entry) : null;
+      return [{ candidate, sameDriver, left, expiresAt }];
+    })
+    .sort(
+      (a, b) =>
+        Number(b.sameDriver) - Number(a.sameDriver) ||
+        Number(b.expiresAt !== null) - Number(a.expiresAt !== null) ||
+        (a.expiresAt ?? 0) - (b.expiresAt ?? 0) ||
+        b.left - a.left,
+    )
+    .map(({ candidate }) => candidate);
 }
 
 export const CHATGPT_USAGE_URL = "https://chatgpt.com/#settings/Usage";

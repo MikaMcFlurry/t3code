@@ -1,4 +1,12 @@
-import { CommandId, MessageId, type OrchestrationV2Command } from "@t3tools/contracts";
+import {
+  CommandId,
+  MessageId,
+  type OrchestrationV2Command,
+  type ProviderInstanceId,
+  type ServerProvider,
+  type ServerSettings as ServerSettingsValue,
+} from "@t3tools/contracts";
+import { availableAccountSelection } from "@t3tools/shared/usageLimits";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -6,13 +14,76 @@ import * as Stream from "effect/Stream";
 import type { OrchestrationV2DomainEvent } from "@t3tools/contracts";
 import * as DueHint from "../scheduling/DueHint.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as AccountLimits from "./AccountLimits.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
 export const MAX_OVERDUE_ARM_MS = 24 * 60 * 60 * 1000;
+// Only limits hit this recently move accounts, so turning the setting on never wakes old threads.
+const ACCOUNT_SWITCH_WINDOW_MS = 10 * 60 * 1000;
+// A limit without a reset time (a workspace out of credits) keeps its account aside this long.
+const UNKNOWN_RESET_HOLD_MS = 60 * 60 * 1000;
+
+// The turn stopped at the limit, maybe mid-command; the new account must not blindly repeat it.
+export const LIMIT_SWITCH_PROMPT =
+  "Continue where you left off. Your last turn stopped at a usage limit, so this turn continues on another account with usage left. A command or other action the last turn started may have finished or may still be running. Before you repeat one that changes state, confirm it did not take effect and is not still running; if you cannot tell, say so instead of repeating it.";
+
+/** Continues a thread that just hit a usage limit on another account with usage left. */
+export function limitSwitchCommand(
+  thread: ProjectionStore.ProjectionLimitRecoveryCandidate,
+  input: {
+    readonly providers: ReadonlyArray<ServerProvider>;
+    readonly settings: ServerSettingsValue;
+    readonly nowMs: number;
+    /** Accounts that hit a limit here until the given reset, whatever their stale bars say. */
+    readonly limitedUntil: ReadonlyMap<ProviderInstanceId, number>;
+  },
+): OrchestrationV2Command | null {
+  if (
+    thread.status !== "failed" ||
+    thread.lastErrorClass !== "usage_limit" ||
+    !thread.latestRunId ||
+    thread.archivedAt !== null ||
+    thread.settledOverride === "settled" ||
+    thread.pendingRuntimeRequest !== null ||
+    input.nowMs - DateTime.toEpochMillis(thread.latestRunCompletedAt ?? thread.updatedAt) >
+      ACCOUNT_SWITCH_WINDOW_MS ||
+    (thread.snoozedUntil != null && DateTime.toEpochMillis(thread.snoozedUntil) > input.nowMs)
+  )
+    return null;
+  const selection = thread.modelSelection;
+  const next = availableAccountSelection({
+    selection,
+    providers: input.providers,
+    limitedUntil: input.limitedUntil,
+    now: input.nowMs,
+    settings: input.settings,
+    projectId: thread.projectId,
+    exhausted: true,
+    // An agent's thread runs the model it asked for; it would not know why another one answers.
+    sameModelOnly: thread.createdBy === "agent",
+  });
+  if (next === null) return null;
+  const identity = `${thread.id}:${thread.latestRunId}`;
+  return {
+    type: "message.dispatch",
+    commandId: CommandId.make(`limit-switch:${identity}`),
+    messageId: MessageId.make(`limit-switch:${identity}`),
+    threadId: thread.id,
+    manualContinuationOfRunId: thread.latestRunId,
+    modelSelection: next,
+    text: LIMIT_SWITCH_PROMPT,
+    attachments: [],
+    dispatchMode: { type: "start_immediately" },
+    // Shown as a T3 Code notice, not as something the user typed.
+    createdBy: "agent",
+    creationSource: "server",
+  };
+}
 
 export function limitRecoveryCommand(
   thread: ProjectionStore.ProjectionLimitRecoveryCandidate,
@@ -92,6 +163,10 @@ const makeSweep = Effect.gen(function* () {
   const threads = yield* ThreadManagement.ThreadManagementService;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const settings = yield* ServerSettings.ServerSettingsService;
+  const registry = yield* ProviderRegistry.ProviderRegistry;
+  const limitedUntil = AccountLimits.accountLimits();
+  // A rejected switch is not retried every tick; the thread falls back to waiting for the reset.
+  const attemptedSwitches = new Set<string>();
   const due = DueHint.make();
   yield* forkParked(
     Stream.runForEach(orchestrator.streamDomainEvents, (event) =>
@@ -109,9 +184,37 @@ const makeSweep = Effect.gen(function* () {
       now,
       autoResume: preferences.autoResumeLimitedThreads,
       snooze: preferences.snoozeLimitedThreads,
+      ...(preferences.fallbackToAvailableAccounts
+        ? { switchAccountsSince: DateTime.makeUnsafe(nowMs - ACCOUNT_SWITCH_WINDOW_MS) }
+        : {}),
     });
+    const providers = preferences.fallbackToAvailableAccounts ? yield* registry.getProviders : [];
     let acted = false;
     for (const thread of candidates) {
+      // Every recent limit marks its account, so sends and launches stop picking it at once.
+      if (thread.lastErrorClass === "usage_limit") {
+        const resetMs = Date.parse(thread.usageLimitResetAt ?? "");
+        AccountLimits.recordAccountLimit(
+          thread.modelSelection.instanceId,
+          Number.isFinite(resetMs) ? resetMs : nowMs + UNKNOWN_RESET_HOLD_MS,
+        );
+      }
+      const switchCommand = preferences.fallbackToAvailableAccounts
+        ? limitSwitchCommand(thread, { providers, settings: preferences, nowMs, limitedUntil })
+        : null;
+      if (switchCommand !== null && !attemptedSwitches.has(switchCommand.commandId)) {
+        attemptedSwitches.add(switchCommand.commandId);
+        acted = true;
+        yield* threads.dispatch(switchCommand).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("orchestration-v2.limit-recovery.account-switch-failed", {
+              threadId: thread.id,
+              cause,
+            }),
+          ),
+        );
+        continue;
+      }
       const command = limitRecoveryCommand(
         thread,
         preferences.autoResumeLimitedThreads,

@@ -3,9 +3,11 @@ import {
   EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ModelSelection,
   type ServerProvider,
   UsageLimitSourceId,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -25,6 +27,8 @@ import {
   paceRemainingPercent,
   usesChatGptSharing,
   resolveNewThreadModelSelection,
+  availableAccountSelection,
+  limitSwitchReturnSelection,
 } from "./usageLimits.ts";
 
 const now = Date.parse("2026-09-03T12:00:00.000Z");
@@ -111,6 +115,132 @@ describe("new thread model fallback", () => {
         providers: [limited, { ...available, ...overrides }],
       }).selection,
     ).toEqual(selection);
+  });
+  describe("without a usable configured fallback", () => {
+    const limits = (usedPercent: number) => ({
+      checkedAt: limited.checkedAt,
+      windows: [{ ...window, usedPercent }],
+    });
+    const model = (slug: string, isDefault = false) => ({
+      slug,
+      name: slug,
+      isCustom: false,
+      isDefault,
+      capabilities: null,
+    });
+    const codexAccount = (id: string, usedPercent: number) =>
+      provider({
+        instanceId: ProviderInstanceId.make(id),
+        models: [model("gpt-6.1-luna", true), model(selection.model)],
+        usageLimits: limits(usedPercent),
+      });
+    const claude = provider({
+      instanceId: fallback.instanceId,
+      driver: ProviderDriverKind.make("claudeAgent"),
+      models: [model("claude-sonnet-5-5"), model("claude-opus-5-5", true)],
+      usageLimits: limits(0),
+    });
+    const resolve = (providers: ServerProvider[], fallbackToAvailableAccounts = true) =>
+      resolveNewThreadModelSelection({
+        defaultSelection: { ...selection, options: [{ id: "reasoningEffort", value: "high" }] },
+        fallbackSelection: null,
+        providers: [limited, ...providers],
+        settings: {
+          ...DEFAULT_SERVER_SETTINGS,
+          fallbackToAvailableAccounts,
+          providerInstances: Object.fromEntries(
+            providers.map((entry) => [
+              entry.instanceId,
+              { driver: entry.driver, enabled: true, config: {} },
+            ]),
+          ),
+        },
+        now,
+      }).selection;
+
+    it.each([
+      [
+        "another account of the same provider with the most headroom, keeping model and options",
+        [claude, codexAccount("codex_a", 90), codexAccount("codex_b", 20)],
+        {
+          instanceId: ProviderInstanceId.make("codex_b"),
+          model: selection.model,
+          options: [{ id: "reasoningEffort", value: "high" }],
+        },
+      ],
+      [
+        "another provider's default model when every same-provider account is spent",
+        [codexAccount("codex_a", 100), claude],
+        { instanceId: claude.instanceId, model: "claude-opus-5-5" },
+      ],
+      [
+        "nothing when no other account reports limits",
+        [{ ...claude, usageLimits: undefined }],
+        selection,
+      ],
+    ] as const)("switches to %s", (_name, providers, expected) => {
+      expect(resolve([...providers])).toMatchObject(expected);
+    });
+    it("stays on the default while the setting is off", () => {
+      expect(resolve([codexAccount("codex_a", 0), claude], false)).toMatchObject(selection);
+    });
+    it.each([
+      ["another account with the same model", [claude, codexAccount("codex_a", 20)], "codex_a"],
+      [
+        "nothing when only another provider has usage",
+        [codexAccount("codex_a", 100), claude],
+        null,
+      ],
+    ] as const)("keeps an agent's model: %s", (_name, providers, expected) => {
+      const next = availableAccountSelection({
+        selection,
+        providers: [limited, ...providers],
+        now,
+        settings: {
+          ...DEFAULT_SERVER_SETTINGS,
+          fallbackToAvailableAccounts: true,
+          providerInstances: Object.fromEntries(
+            providers.map((entry) => [
+              entry.instanceId,
+              { driver: entry.driver, enabled: true, config: {} },
+            ]),
+          ),
+        },
+        sameModelOnly: true,
+      });
+      expect(next?.instanceId ?? null).toBe(expected);
+      if (next) expect(next.model).toBe(selection.model);
+    });
+    it("moves off an account a turn just found spent, before its bars show it", () => {
+      const fresh = { ...limited, usageLimits: limits(10) };
+      const settings = {
+        ...DEFAULT_SERVER_SETTINGS,
+        fallbackToAvailableAccounts: true,
+        providerInstances: {
+          codex_a: { driver: limited.driver, enabled: true, config: {} },
+          codex_b: { driver: limited.driver, enabled: true, config: {} },
+        },
+      };
+      const choose = (limitedUntil: ReadonlyMap<ProviderInstanceId, number>) =>
+        availableAccountSelection({
+          selection,
+          providers: [fresh, codexAccount("codex_a", 20), codexAccount("codex_b", 10)],
+          now,
+          settings,
+          limitedUntil,
+        })?.instanceId ?? null;
+      expect(choose(new Map())).toBeNull();
+      expect(choose(new Map([[fresh.instanceId, now + 60_000]]))).toBe("codex_b");
+      expect(
+        choose(
+          new Map([
+            [fresh.instanceId, now + 60_000],
+            [ProviderInstanceId.make("codex_b"), now + 60_000],
+          ]),
+        ),
+      ).toBe("codex_a");
+      expect(choose(new Map([[fresh.instanceId, now - 1]]))).toBeNull();
+    });
   });
   it.each([undefined, "invalid"])("treats an unknown reset as exhausted: %s", (resetsAt) => {
     expect(
@@ -1715,5 +1845,216 @@ describe("ChatGPT sharing presentation", () => {
         auth: { status: "unauthenticated", subscriptionSharing: true },
       }),
     ).toBe(false);
+  });
+});
+
+describe("account choice when the quota of another account is about to reset", () => {
+  const HOUR_MS = 3_600_000;
+  const at = (offset: number) => DateTime.formatIso(DateTime.makeUnsafe(now + offset));
+  const model = {
+    slug: "claude-opus-5-5",
+    name: "Opus",
+    isCustom: false,
+    isDefault: true,
+    capabilities: null,
+  };
+  const claude = (id: string, sessionUsed: number, weeklyUsed: number, weeklyResetIn: number) =>
+    provider({
+      instanceId: ProviderInstanceId.make(id),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      models: [model],
+      usageLimits: {
+        checkedAt: at(-HOUR_MS),
+        windows: [
+          { ...window, id: "five_hour", usedPercent: sessionUsed, resetsAt: at(HOUR_MS) },
+          {
+            id: "seven_day",
+            kind: "weekly",
+            label: "Weekly",
+            usedPercent: weeklyUsed,
+            windowDurationMins: 7 * 24 * 60,
+            resetsAt: at(weeklyResetIn),
+          },
+        ],
+      },
+    });
+  // Real snapshot: Gmail spent, Support 78%/73% left resetting in 3 days, Web 65%/43% in 18 hours.
+  const choose = (web: ServerProvider) => {
+    const providers = [
+      claude("gmail", 100, 93, 56 * HOUR_MS),
+      claude("support", 22, 27, 75 * HOUR_MS),
+      web,
+    ];
+    return availableAccountSelection({
+      selection: { instanceId: ProviderInstanceId.make("gmail"), model: model.slug },
+      providers,
+      now,
+      settings: {
+        ...DEFAULT_SERVER_SETTINGS,
+        fallbackToAvailableAccounts: true,
+        providerInstances: Object.fromEntries(
+          providers.map((entry) => [
+            entry.instanceId,
+            { driver: entry.driver, enabled: true, config: {} },
+          ]),
+        ),
+      },
+    })?.instanceId;
+  };
+
+  it("uses the account whose weekly quota resets within a day before the one with most headroom", () => {
+    expect(choose(claude("web", 35, 57, 18 * HOUR_MS))).toBe("web");
+  });
+
+  it("falls back to most headroom when nothing resets soon or the soon-resetting account is low", () => {
+    expect(choose(claude("web", 35, 57, 72 * HOUR_MS))).toBe("support");
+    expect(choose(claude("web", 35, 90, 18 * HOUR_MS))).toBe("support");
+  });
+});
+
+describe("going back to the account a usage-limit switch left", () => {
+  const HOUR_MS = 3_600_000;
+  const at = (offset: number) => DateTime.formatIso(DateTime.makeUnsafe(now + offset));
+  const model = "claude-opus-5-5";
+  const claude = (id: string, sessionUsed: number, sessionResetIn: number, weeklyUsed = 50) =>
+    provider({
+      instanceId: ProviderInstanceId.make(id),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      models: [{ slug: model, name: "Opus", isCustom: false, isDefault: true, capabilities: null }],
+      usageLimits: {
+        checkedAt: at(-HOUR_MS),
+        windows: [
+          { ...window, id: "five_hour", usedPercent: sessionUsed, resetsAt: at(sessionResetIn) },
+          {
+            id: "seven_day",
+            kind: "weekly",
+            label: "Weekly",
+            usedPercent: weeklyUsed,
+            windowDurationMins: 7 * 24 * 60,
+            resetsAt: at(19 * HOUR_MS),
+          },
+        ],
+      },
+    });
+  const web = { instanceId: ProviderInstanceId.make("web"), model };
+  const support = { instanceId: ProviderInstanceId.make("support"), model };
+  const back = (
+    providers: ServerProvider[],
+    options: {
+      current?: ModelSelection;
+      originResetAt?: string | null;
+      enabled?: boolean;
+    } = {},
+  ) =>
+    limitSwitchReturnSelection({
+      origin: web,
+      originResetAt: options.originResetAt === undefined ? at(-HOUR_MS) : options.originResetAt,
+      originLimitedAt: at(-2 * HOUR_MS),
+      switchedTo: support,
+      current: options.current ?? support,
+      providers,
+      now,
+      settings: {
+        ...DEFAULT_SERVER_SETTINGS,
+        fallbackToAvailableAccounts: options.enabled ?? true,
+        providerInstances: Object.fromEntries(
+          providers.map((entry) => [
+            entry.instanceId,
+            { driver: entry.driver, enabled: true, config: {} },
+          ]),
+        ),
+      },
+    });
+
+  it("goes back once the 5-hour window of the account it left has reset", () => {
+    // The stale bar still says 100%, but its reset time has passed.
+    expect(back([claude("web", 100, -HOUR_MS), claude("support", 40, HOUR_MS)])).toEqual(web);
+  });
+
+  it("stays while the account it left is still out of usage", () => {
+    expect(back([claude("web", 100, HOUR_MS), claude("support", 40, HOUR_MS)])).toBeNull();
+  });
+
+  it("trusts the limit's own reset time over a usage reading taken before the limit", () => {
+    expect(
+      back([claude("web", 20, HOUR_MS), claude("support", 40, HOUR_MS)], {
+        originResetAt: at(HOUR_MS),
+      }),
+    ).toBeNull();
+  });
+
+  it("stays while the account it left has almost no headroom or reports no limits", () => {
+    expect(back([claude("web", 0, HOUR_MS, 95), claude("support", 40, HOUR_MS)])).toBeNull();
+    const unreported = provider({
+      instanceId: ProviderInstanceId.make("web"),
+      driver: ProviderDriverKind.make("claudeAgent"),
+    });
+    expect(back([unreported, claude("support", 40, HOUR_MS)])).toBeNull();
+  });
+
+  it("leaves a thread alone whose account or model the user changed since", () => {
+    const providers = [
+      claude("web", 0, HOUR_MS),
+      claude("support", 40, HOUR_MS),
+      claude("gmail", 0, HOUR_MS),
+    ];
+    const gmail = { instanceId: ProviderInstanceId.make("gmail"), model };
+    expect(back(providers, { current: gmail })).toBeNull();
+    expect(back(providers, { current: { ...support, model: "claude-sonnet-5-5" } })).toBeNull();
+  });
+
+  it("counts only the usage windows that apply to the model it goes back to", () => {
+    // Found by an independent test pass: an Antigravity account whose Gemini pool is spent
+    // still runs Claude models from its third-party pool.
+    const antigravity = (geminiUsed: number, thirdPartyUsed: number) =>
+      provider({
+        instanceId: ProviderInstanceId.make("web"),
+        driver: ProviderDriverKind.make("antigravity"),
+        usageLimits: {
+          checkedAt: at(-HOUR_MS),
+          windows: [
+            { ...window, id: "gemini-weekly", usedPercent: geminiUsed, resetsAt: at(HOUR_MS) },
+            { ...window, id: "3p-weekly", usedPercent: thirdPartyUsed, resetsAt: at(HOUR_MS) },
+          ],
+        },
+      });
+    expect(back([antigravity(100, 20), claude("support", 40, HOUR_MS)])).toEqual(web);
+    expect(back([antigravity(10, 95), claude("support", 40, HOUR_MS)])).toBeNull();
+  });
+
+  it("goes back at exactly 10% left, not below", () => {
+    expect(back([claude("web", 0, HOUR_MS, 90), claude("support", 40, HOUR_MS)])).toEqual(web);
+    expect(back([claude("web", 0, HOUR_MS, 91), claude("support", 40, HOUR_MS)])).toBeNull();
+  });
+
+  it("leaves a thread alone whose model options the user changed since", () => {
+    expect(
+      back([claude("web", 0, HOUR_MS), claude("support", 40, HOUR_MS)], {
+        current: { ...support, options: [{ id: "effort", value: "max" }] },
+      }),
+    ).toBeNull();
+  });
+
+  it("needs a usage reading taken after the limit when the limit's reset time is unknown", () => {
+    const providers = [claude("web", 0, HOUR_MS), claude("support", 40, HOUR_MS)];
+    // The reading (an hour ago) is newer than the limit (two hours ago).
+    expect(back(providers, { originResetAt: null })).toEqual(web);
+    const stale = [
+      provider({
+        ...claude("web", 0, HOUR_MS),
+        usageLimits: {
+          ...claude("web", 0, HOUR_MS).usageLimits!,
+          checkedAt: at(-3 * HOUR_MS),
+        },
+      }),
+      claude("support", 40, HOUR_MS),
+    ];
+    expect(back(stale, { originResetAt: null })).toBeNull();
+  });
+
+  it("does nothing when switching accounts is off", () => {
+    expect(
+      back([claude("web", 0, -HOUR_MS), claude("support", 40, HOUR_MS)], { enabled: false }),
+    ).toBeNull();
   });
 });

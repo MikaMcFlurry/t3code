@@ -8015,6 +8015,102 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
     }),
   );
 
+  it.effect("finds where a chain of usage-limit account switches started", () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = yield* addRolledBackRecoveryCandidate("limit-switch-origin");
+      assert.isNull(yield* store.getLatestLimitSwitch(threadId));
+      const original = (yield* store.getThreadProjection(threadId)).runs[0]!;
+      const now = yield* DateTime.now;
+      const on = (id: string) => ({
+        ...original.modelSelection,
+        instanceId: ProviderInstanceId.make(id),
+      });
+      const addRun = (
+        ordinal: number,
+        account: string,
+        userMessageId: string,
+        status: typeof original.status = "completed",
+      ) =>
+        store
+          .apply({
+            id: EventId.make(`event:limit-switch-origin:run:${ordinal}:${status}`),
+            type: ordinal === original.ordinal ? "run.updated" : "run.created",
+            threadId,
+            occurredAt: now,
+            payload: {
+              ...original,
+              id: RunId.make(`${original.id}:${ordinal}`),
+              ordinal,
+              providerInstanceId: ProviderInstanceId.make(account),
+              modelSelection: on(account),
+              userMessageId: MessageId.make(userMessageId),
+              status,
+            },
+          })
+          .pipe(Effect.as(RunId.make(`${original.id}:${ordinal}`)));
+      const limitHit = (runId: RunId, resetAt: string) =>
+        store.apply({
+          id: EventId.make(`event:limit-switch-origin:limit:${runId}`),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make(`${runId}:limit`),
+            threadId,
+            runId,
+            nodeId: original.rootNodeId,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            status: "failed",
+            title: "Usage limit reached",
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            type: "error",
+            failure: {
+              class: "usage_limit",
+              message: "Limit reached.",
+              resetAt,
+              code: null,
+              retryable: null,
+            },
+          },
+        });
+      const base = original.ordinal * 10;
+      // An ordinary run on web hits its limit; the thread moves to support.
+      const onWeb = yield* addRun(base + 1, "web", "limit-switch-origin:ordinary", "failed");
+      yield* limitHit(onWeb, "2099-01-01T05:00:00.000Z");
+      yield* addRun(base + 2, "support", `limit-switch:${threadId}:${onWeb}`);
+      assert.deepInclude(yield* store.getLatestLimitSwitch(threadId), {
+        origin: on("web"),
+        originResetAt: "2099-01-01T05:00:00.000Z",
+        switchedTo: on("support"),
+        busy: false,
+      });
+      // Support runs out too and the thread moves on to gmail: web is still where it started.
+      const supportLimited = yield* addRun(
+        base + 3,
+        "support",
+        "limit-switch-origin:next",
+        "failed",
+      );
+      yield* limitHit(supportLimited, "2099-01-01T06:00:00.000Z");
+      yield* addRun(base + 4, "gmail", `limit-switch:${threadId}:${supportLimited}`);
+      assert.deepInclude(yield* store.getLatestLimitSwitch(threadId), {
+        origin: on("web"),
+        originResetAt: "2099-01-01T05:00:00.000Z",
+        switchedTo: on("gmail"),
+      });
+      // A queued turn keeps the thread where it is.
+      yield* addRun(base + 5, "gmail", "limit-switch-origin:queued", "queued");
+      assert.deepInclude(yield* store.getLatestLimitSwitch(threadId), { busy: true });
+    }),
+  );
+
   it.effect("projects only the latest failed root turn's limit into SQL and memory shells", () =>
     Effect.gen(function* () {
       const store = yield* ProjectionStore.ProjectionStoreV2;
@@ -8080,6 +8176,8 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         if (lastErrorClass === "usage_limit") {
           assert.deepEqual(candidate, {
             id: sqlShell.id,
+            projectId: sqlShell.projectId,
+            modelSelection: sqlShell.modelSelection,
             status: sqlShell.status,
             lastErrorClass: sqlShell.lastErrorClass,
             usageLimitResetAt: sqlShell.usageLimitResetAt,
@@ -8091,6 +8189,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             pendingRuntimeRequest: null,
             limitRecovery: sqlShell.limitRecovery,
             snoozedUntil: sqlShell.snoozedUntil,
+            createdBy: sqlShell.createdBy,
           });
         } else assert.isUndefined(candidate);
         assert.isUndefined(candidates.find((row) => row.id === otherThreadId));
@@ -8248,6 +8347,36 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           (row) => row.id === threadId,
         ),
       );
+      for (const [since, found] of [
+        [DateTime.subtract(now, { minutes: 1 }), true],
+        [DateTime.add(now, { minutes: 1 }), false],
+      ] as const) {
+        assert.strictEqual(
+          (yield* store.getLimitRecoveryCandidates({
+            ...recoveryOptions,
+            switchAccountsSince: since,
+          })).some((row) => row.id === threadId),
+          found,
+        );
+      }
+      // A spent workspace names no reset: another account may take over, nothing resumes here.
+      yield* sql`UPDATE orchestration_v2_projection_turn_items
+        SET payload_json = json_remove(payload_json, '$.failure.resetAt')
+        WHERE thread_id = ${threadId} AND type = 'error'`;
+      assert.isTrue(
+        (yield* store.getLimitRecoveryCandidates({
+          ...recoveryOptions,
+          switchAccountsSince: DateTime.subtract(now, { minutes: 1 }),
+        })).some((row) => row.id === threadId),
+      );
+      assert.isUndefined(
+        (yield* store.getLimitRecoveryCandidates({ ...recoveryOptions, autoResume: true })).find(
+          (row) => row.id === threadId,
+        ),
+      );
+      yield* sql`UPDATE orchestration_v2_projection_turn_items
+        SET payload_json = json_set(payload_json, '$.failure.resetAt', ${limitItem.failure.resetAt})
+        WHERE thread_id = ${threadId} AND type = 'error'`;
       const reset = DateTime.makeUnsafe(limitItem.failure.resetAt);
       const recovery = {
         runId: original.id,

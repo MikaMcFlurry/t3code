@@ -1,14 +1,26 @@
 import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
 import { appendUserInputAttachmentPaths } from "../provider/userInputAttachments.ts";
-import type { ChatAttachment, OrchestrationV2Command } from "@t3tools/contracts";
+import type {
+  ChatAttachment,
+  ModelSelection,
+  OrchestrationV2Command,
+  ProjectId,
+  ServerProvider,
+  ServerSettings as ServerSettingsValue,
+} from "@t3tools/contracts";
+import { availableAccountSelection, limitSwitchReturnSelection } from "@t3tools/shared/usageLimits";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 
 import * as AttachmentClaims from "./AttachmentClaims.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
+import * as AccountLimits from "./AccountLimits.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
 // These failures precede commitCommand; generic dispatch errors can follow commits and remain ambiguous.
@@ -81,6 +93,127 @@ const withGuestAttachments = Effect.fn("ThreadMessageIntake.withGuestAttachments
     (candidate) => candidate.id === command.guestMessageId && candidate.status === "pending",
   );
   return { ...command, attachments: message?.attachments ?? [] };
+});
+
+/** Null unless the user lets sends move off an account that is out of usage. */
+const readAccountChoice = Effect.fn("ThreadMessageIntake.readAccountChoice")(function* () {
+  const settings = yield* ServerSettings.ServerSettingsService.pipe(
+    Effect.flatMap((service) => service.getSettings),
+    Effect.orElseSucceed(() => null),
+  );
+  if (!settings?.fallbackToAvailableAccounts) return null;
+  const providers = yield* ProviderRegistry.ProviderRegistry.pipe(
+    Effect.flatMap((registry) => registry.getProviders),
+  );
+  const now = DateTime.toEpochMillis(yield* DateTime.now);
+  // A model an agent picked stays that model: only another account of it may take over.
+  const choose = (selection: ModelSelection, projectId: ProjectId, sameModelOnly = false) =>
+    availableAccountSelection({
+      selection,
+      providers,
+      now,
+      settings,
+      projectId,
+      sameModelOnly,
+      limitedUntil: AccountLimits.accountLimits(),
+    }) ?? selection;
+  return Object.assign(choose, { providers, now, settings });
+});
+
+type MessageDispatchCommand = Extract<
+  OrchestrationV2Command,
+  { readonly type: "message.dispatch" }
+>;
+
+/**
+ * The account a new turn on an existing thread starts on, or undefined to keep the one it
+ * names (or the thread's). Null-safe when the setting is off or the thread cannot be read.
+ */
+const availableThreadAccount = Effect.fn("ThreadMessageIntake.availableThreadAccount")(function* (
+  input: Pick<MessageDispatchCommand, "threadId" | "modelSelection" | "deliveryIntent">,
+  sameModelOnly = false,
+) {
+  const choose = yield* readAccountChoice();
+  if (choose === null) return undefined;
+  const threads = yield* ThreadManagement.ThreadManagementService;
+  const window = yield* threads
+    .getThreadSnapshotWindow(input.threadId, { rowLimit: 1 })
+    .pipe(Effect.orElseSucceed(() => null));
+  if (window === null) return undefined;
+  const { thread } = window.projection;
+  const selection = input.modelSelection ?? thread.modelSelection;
+  const returned = yield* returnAfterLimitSwitch(input, selection, thread.projectId, choose);
+  const next = choose(
+    returned ?? selection,
+    thread.projectId,
+    sameModelOnly || thread.createdBy === "agent",
+  );
+  return next === selection ? undefined : next;
+});
+
+/**
+ * The account a message's turn starts on, picked under the thread's dispatch lock: a send
+ * that commits first (and so may have started or queued a run) is always seen, never raced.
+ * Steering stays on the active run's account; server continuations validate their own. An
+ * agent's send keeps its model.
+ */
+export const messageAccountChoice = Effect.fn("ThreadMessageIntake.messageAccountChoice")(
+  function* (options: { readonly sameModelOnly: boolean }) {
+    const context = yield* Effect.context<
+      | ServerSettings.ServerSettingsService
+      | ProviderRegistry.ProviderRegistry
+      | ThreadManagement.ThreadManagementService
+    >();
+    const resolveModelSelection = (command: MessageDispatchCommand) =>
+      command.dispatchMode.type === "steer_active" ||
+      command.dispatchMode.type === "restart_active" ||
+      command.usageLimitContinuationOfRunId !== undefined ||
+      command.restartContinuationOfRunId !== undefined
+        ? Effect.undefined
+        : availableThreadAccount(command, options.sameModelOnly).pipe(Effect.provide(context));
+    return { resolveModelSelection } satisfies ThreadManagement.ThreadManagementDispatchOptions;
+  },
+);
+
+/** A new thread starts on an account with usage left; a model an agent picked stays. */
+export const withAvailableLaunchAccount = Effect.fn(
+  "ThreadMessageIntake.withAvailableLaunchAccount",
+)(function* (input: ThreadLaunch.ThreadLaunchInput) {
+  const choose = yield* readAccountChoice();
+  if (choose === null) return input;
+  const modelSelection = choose(input.modelSelection, input.projectId, input.createdBy === "agent");
+  return modelSelection === input.modelSelection ? input : { ...input, modelSelection };
+});
+
+/**
+ * The account a usage-limit switch moved this thread away from, once it has usage again. Only
+ * for a turn that starts now: never while a run is active or queued, so no turn is cut off.
+ */
+const returnAfterLimitSwitch = Effect.fn("ThreadMessageIntake.returnAfterLimitSwitch")(function* (
+  command: Pick<MessageDispatchCommand, "threadId" | "deliveryIntent">,
+  current: ModelSelection,
+  projectId: ProjectId,
+  choice: {
+    readonly providers: ReadonlyArray<ServerProvider>;
+    readonly now: number;
+    readonly settings: ServerSettingsValue;
+  },
+) {
+  if (command.deliveryIntent === "steer" || command.deliveryIntent === "restart") return null;
+  const threads = yield* ThreadManagement.ThreadManagementService;
+  const latest = yield* threads
+    .getLatestLimitSwitch(command.threadId)
+    .pipe(Effect.orElseSucceed(() => null));
+  if (latest === null || latest.busy) return null;
+  return limitSwitchReturnSelection({
+    ...choice,
+    projectId,
+    origin: latest.origin,
+    originResetAt: latest.originResetAt,
+    originLimitedAt: latest.originLimitedAt,
+    switchedTo: latest.switchedTo,
+    current,
+  });
 });
 
 export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(function* (
@@ -158,24 +291,31 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
     (command.type !== "queued-run.edit" || command.attachments === undefined)
   )
     return yield* threads.dispatch(command);
+  const accountChoice =
+    command.type === "message.dispatch"
+      ? yield* messageAccountChoice({ sameModelOnly: false })
+      : undefined;
   const claimed = yield* AttachmentClaims.claimPendingAttachments({
     threadId: command.threadId,
     attachments: command.attachments ?? [],
   });
   return yield* threads
-    .dispatch({
-      ...command,
-      attachments: claimed.attachments,
-      ...(command.context
-        ? {
-            context: remapComposerContextAttachments(
-              command.context,
-              command.attachments ?? [],
-              claimed.attachments,
-            ),
-          }
-        : {}),
-    })
+    .dispatch(
+      {
+        ...command,
+        attachments: claimed.attachments,
+        ...(command.context
+          ? {
+              context: remapComposerContextAttachments(
+                command.context,
+                command.attachments ?? [],
+                claimed.attachments,
+              ),
+            }
+          : {}),
+      },
+      accountChoice,
+    )
     .pipe(
       Effect.tap((result) =>
         releaseUnusedClaims(
@@ -197,21 +337,25 @@ export const sendToThread = Effect.fn("ThreadMessageIntake.sendToThread")(functi
   input: ThreadManagement.ThreadManagementSendInput,
 ) {
   const threads = yield* ThreadManagement.ThreadManagementService;
+  const accountChoice = yield* messageAccountChoice({ sameModelOnly: input.createdBy === "agent" });
   const claimed = yield* AttachmentClaims.claimPendingAttachments(input);
-  return yield* threads.sendToThread({ ...input, attachments: claimed.attachments }).pipe(
-    Effect.tap((result) => releaseUnusedClaims(claimed.claimedPaths, result.message.attachments)),
-    Effect.tapError((error) =>
-      dispatchWasNotAccepted(error)
-        ? AttachmentClaims.releaseClaimedAttachments(claimed.claimedPaths)
-        : Effect.void,
-    ),
-  );
+  return yield* threads
+    .sendToThread({ ...input, attachments: claimed.attachments }, accountChoice)
+    .pipe(
+      Effect.tap((result) => releaseUnusedClaims(claimed.claimedPaths, result.message.attachments)),
+      Effect.tapError((error) =>
+        dispatchWasNotAccepted(error)
+          ? AttachmentClaims.releaseClaimedAttachments(claimed.claimedPaths)
+          : Effect.void,
+      ),
+    );
 });
 
 export const launchThread = Effect.fn("ThreadMessageIntake.launchThread")(function* (
-  input: ThreadLaunch.ThreadLaunchInput,
+  requested: ThreadLaunch.ThreadLaunchInput,
 ) {
   const launches = yield* ThreadLaunch.ThreadLaunchService;
+  const input = yield* withAvailableLaunchAccount(requested);
   yield* AttachmentClaims.validateAttachmentLimits(input.initialMessage?.attachments ?? []);
   if (!input.initialMessage?.attachments.some(AttachmentClaims.attachmentIsPendingUpload)) {
     return yield* launches.launch(input);

@@ -1,4 +1,5 @@
 import type { ProjectThreadAwarenessV2Input } from "@t3tools/shared/agentAwareness";
+import { sameModelSelection } from "@t3tools/shared/usageLimits";
 import { pendingGuestMessageCount } from "@t3tools/contracts";
 import { applyThreadPullRequestLinkUpdate } from "../sourceControl/threadPullRequests.ts";
 import { projectTurnItemForWire } from "./WireProjection.ts";
@@ -178,9 +179,21 @@ export type ProjectionRecoveryKind =
   | "subagent-results"
   | "delegated-completions";
 
+export interface ProjectionLimitSwitch {
+  readonly origin: OrchestrationV2Run["modelSelection"];
+  /** When the origin account's limit resets, from the failure that started the chain. */
+  readonly originResetAt: string | null;
+  /** When that failure ended the run; a usage reading must be newer when the reset is unknown. */
+  readonly originLimitedAt: string | null;
+  readonly switchedTo: OrchestrationV2Run["modelSelection"];
+  readonly busy: boolean;
+}
+
 export type ProjectionLimitRecoveryCandidate = Pick<
   OrchestrationV2ThreadShell,
   | "id"
+  | "projectId"
+  | "modelSelection"
   | "status"
   | "lastErrorClass"
   | "latestRunId"
@@ -192,7 +205,8 @@ export type ProjectionLimitRecoveryCandidate = Pick<
   | "updatedAt"
   | "limitRecovery"
   | "snoozedUntil"
->;
+> &
+  Partial<Pick<OrchestrationV2ThreadShell, "createdBy">>;
 
 export type ProjectionThreadPullRequests = Pick<
   OrchestrationV2AppThread,
@@ -596,7 +610,17 @@ export interface ProjectionStoreV2Shape {
     readonly now: DateTime.Utc;
     readonly autoResume: boolean;
     readonly snooze: boolean;
+    /** Also returns limits hit since then whose window has not reset, to move to another account. */
+    readonly switchAccountsSince?: DateTime.Utc;
   }) => Effect.Effect<ReadonlyArray<ProjectionLimitRecoveryCandidate>, ProjectionStoreV2Error>;
+  /**
+   * Where the thread's latest chain of usage-limit account switches started (A in A→B→C) and
+   * the selection it runs on now, with A's limit reset and whether a run is active or queued.
+   * Null when the thread never switched.
+   */
+  readonly getLatestLimitSwitch: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ProjectionLimitSwitch | null, ProjectionStoreV2Error>;
   /** Epoch ms of the next armed reset or snooze end after `now`, when a waiting thread becomes a candidate. */
   readonly getLimitRecoveryWakeAt: (
     now: DateTime.Utc,
@@ -4580,10 +4604,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             AND json_extract(t.payload_json, '$.archivedAt') IS NULL
             AND json_extract(t.payload_json, '$.settledOverride') IS NOT 'settled'
             AND json_extract(item.payload_json, '$.failure.class') = 'usage_limit'
-            AND json_extract(item.payload_json, '$.failure.resetAt') IS NOT NULL
-            AND julianday(json_extract(item.payload_json, '$.failure.resetAt')) > julianday(COALESCE(r.completed_at, json_extract(t.payload_json, '$.updatedAt')))
             AND (
+              -- A spent workspace ("out of credits") names no reset time, but another account
+              -- can still take over; only resuming on this account needs one.
               (
+                ${booleanInt(options.switchAccountsSince !== undefined)}
+                AND julianday(COALESCE(r.completed_at, json_extract(t.payload_json, '$.updatedAt'))) >= julianday(${DateTime.formatIso(options.switchAccountsSince ?? options.now)})
+                AND (
+                  json_extract(item.payload_json, '$.failure.resetAt') IS NULL
+                  OR julianday(json_extract(item.payload_json, '$.failure.resetAt')) > julianday(${DateTime.formatIso(options.now)})
+                )
+              )
+              OR (
+              json_extract(item.payload_json, '$.failure.resetAt') IS NOT NULL
+              AND julianday(json_extract(item.payload_json, '$.failure.resetAt')) > julianday(COALESCE(r.completed_at, json_extract(t.payload_json, '$.updatedAt')))
+              AND ((
                 json_extract(t.payload_json, '$.limitRecovery.runId') IS r.run_id
                 AND json_extract(t.payload_json, '$.limitRecovery.resetAt') IS json_extract(item.payload_json, '$.failure.resetAt')
                 AND json_extract(t.payload_json, '$.limitRecovery.autoResume') = 1
@@ -4613,6 +4648,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                       OR parent.deleted_at IS NOT NULL
                     )
                 )
+              ))
               )
             )
             AND NOT EXISTS (
@@ -4632,6 +4668,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           if (summary.lastErrorClass !== "usage_limit") continue;
           candidates.push({
             id: thread.id,
+            projectId: thread.projectId,
+            modelSelection: thread.modelSelection,
             status: "failed",
             lastErrorClass: summary.lastErrorClass,
             usageLimitResetAt: summary.usageLimitResetAt,
@@ -4644,6 +4682,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             pendingRuntimeRequest: null,
             limitRecovery: thread.limitRecovery ?? null,
             snoozedUntil: thread.snoozedUntil ?? null,
+            createdBy: thread.createdBy,
           });
         }
         return candidates;
@@ -4675,6 +4714,75 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           (value): value is number => value != null,
         );
         return wakes.length === 0 ? null : Math.round(Math.min(...wakes));
+      },
+      Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+    );
+
+    const getLatestLimitSwitch = Effect.fn("ProjectionStore.getLatestLimitSwitch")(
+      function* (threadId: ThreadId) {
+        // A switch run starts with message `limit-switch:<thread>:<run that hit the limit>`.
+        const prefix = `limit-switch:${threadId}:`;
+        const rows = yield* sql<{
+          readonly switched_payload: string;
+          readonly origin_payload: string;
+          readonly origin_reset_at: string | null;
+          readonly busy: number;
+        }>`
+          SELECT
+            switched.payload_json AS switched_payload,
+            origin.payload_json AS origin_payload,
+            (
+              -- The root turn's latest failure is the one that moved the thread.
+              SELECT json_extract(item.payload_json, '$.failure.resetAt')
+              FROM orchestration_v2_projection_turn_items AS item
+              WHERE item.run_id = origin.run_id
+                AND item.node_id IS json_extract(origin.payload_json, '$.rootNodeId')
+                AND item.type = 'error'
+                AND json_extract(item.payload_json, '$.failure.class') = 'usage_limit'
+              ORDER BY item.ordinal DESC
+              LIMIT 1
+            ) AS origin_reset_at,
+            EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_runs AS active
+              WHERE active.thread_id = ${threadId}
+                AND active.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+            ) AS busy
+          FROM orchestration_v2_projection_runs AS switched
+          JOIN orchestration_v2_projection_runs AS origin
+            ON origin.thread_id = switched.thread_id
+            AND origin.run_id = substr(json_extract(switched.payload_json, '$.userMessageId'), ${prefix.length + 1})
+          WHERE switched.thread_id = ${threadId}
+            AND substr(json_extract(switched.payload_json, '$.userMessageId'), 1, ${prefix.length}) = ${prefix}
+          ORDER BY switched.ordinal DESC
+        `;
+        if (rows.length === 0) return null;
+        const switches = yield* Effect.forEach(rows, (row) =>
+          Effect.all([
+            decodeRunPayload(row.switched_payload),
+            decodeRunPayload(row.origin_payload),
+          ]),
+        );
+        // Walk back while each switch left exactly the selection the previous one picked: A→B,
+        // B→C. A manual account or model change in between ends the chain.
+        let start = 0;
+        while (
+          start + 1 < switches.length &&
+          sameModelSelection(
+            switches[start]![1].modelSelection,
+            switches[start + 1]![0].modelSelection,
+          )
+        ) {
+          start += 1;
+        }
+        const origin = switches[start]![1];
+        return {
+          origin: origin.modelSelection,
+          originResetAt: rows[start]!.origin_reset_at,
+          originLimitedAt:
+            origin.completedAt === null ? null : DateTime.formatIso(origin.completedAt),
+          switchedTo: switches[0]![0].modelSelection,
+          busy: rows[0]!.busy === 1,
+        } satisfies ProjectionLimitSwitch;
       },
       Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
     );
@@ -9001,6 +9109,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getPlan: readOnReader(getPlan),
       getProviderControlContext: readOnReader(getProviderControlContext),
       getLimitRecoveryCandidates: readOnReader(getLimitRecoveryCandidates),
+      getLatestLimitSwitch: readOnReader(getLatestLimitSwitch),
       getLimitRecoveryWakeAt: readOnReader(getLimitRecoveryWakeAt),
       getRecoveryThreadIds: readOnReader(getRecoveryThreadIds),
       getUnreadableThreadIds: readOnReader(getUnreadableThreadIds),

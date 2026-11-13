@@ -162,6 +162,7 @@ import {
   applyToProjection,
   emptyProjection,
   threadShellFromProjection,
+  type ProjectionLimitSwitch,
   ProjectionStoreV2,
   type ProjectionRecordField,
   type ProjectionTimelinePage,
@@ -381,6 +382,22 @@ export interface OrchestratorV2DispatchResult {
   readonly replayed?: true;
 }
 
+type MessageDispatchServerCommand = Extract<
+  OrchestrationV2ServerCommand,
+  { readonly type: "message.dispatch" }
+>;
+
+export interface OrchestratorV2DispatchOptions<E = never> {
+  /**
+   * Picks a message's model selection under the thread's dispatch lock, right before the
+   * command is decided, so it sees every send that committed first. Undefined keeps the
+   * command's own. Other command types ignore it.
+   */
+  readonly resolveModelSelection?:
+    | ((command: MessageDispatchServerCommand) => Effect.Effect<ModelSelection | undefined, E>)
+    | undefined;
+}
+
 export interface OrchestratorV2Shape {
   readonly resumeQueuedRuns: Effect.Effect<number, OrchestratorV2Error>;
   readonly recoverDelegatedTasks: Effect.Effect<void>;
@@ -404,9 +421,10 @@ export interface OrchestratorV2Shape {
   readonly restartContinuationPending: (run: OrchestrationV2Run) => Effect.Effect<boolean>;
   /** Declined continuations emit no thread event; this still wakes waiters. */
   readonly awaitRestartContinuation: (run: OrchestrationV2Run) => Effect.Effect<void>;
-  readonly dispatch: (
+  readonly dispatch: <E = never>(
     command: OrchestrationV2ServerCommand,
-  ) => Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>;
+    options?: OrchestratorV2DispatchOptions<E>,
+  ) => Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error | E>;
   readonly autoArmLimitRecovery: (input: {
     readonly commandId: CommandId;
     readonly threadId: ThreadId;
@@ -443,6 +461,9 @@ export interface OrchestratorV2Shape {
     fields: ReadonlyArray<K>,
     filter?: ProjectionRecordFilter,
   ) => Effect.Effect<ProjectionRecords<K>, OrchestratorV2Error>;
+  readonly getLatestLimitSwitch: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ProjectionLimitSwitch | null, OrchestratorV2Error>;
   readonly listAppOwnedChildThreadIds: (
     threadId: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ThreadId>, OrchestratorV2Error>;
@@ -749,6 +770,10 @@ function cancelledAppOwnedTask(
   };
 }
 
+/** Appended to the failed result of a child the usage-limit account switch will continue. */
+const LIMIT_SWITCH_TASK_NOTE =
+  'T3 Code: this child stopped at a usage limit, not because the task failed. With "switch to an account with usage left" on, T3 continues it on another account with usage left if there is one, and that run reports back to you as a follow-up task. Do not restart it: read the child thread or wait for that follow-up first.';
+
 // Provider wakes can start follow-up work; monitor updates only report progress.
 // Dispatch takes the parent's lock for follow-ups because intake writes the parent.
 function mayStartSubagentFollowup(
@@ -760,7 +785,8 @@ function mayStartSubagentFollowup(
   return (
     command.createdBy === "user" ||
     command.creationSource === "mcp" ||
-    command.usageLimitContinuationOfRunId !== undefined
+    command.usageLimitContinuationOfRunId !== undefined ||
+    command.manualContinuationOfRunId !== undefined
   );
 }
 
@@ -9303,6 +9329,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       (command.notification === undefined &&
         command.createdBy !== "user" &&
         command.usageLimitContinuationOfRunId === undefined &&
+        command.manualContinuationOfRunId === undefined &&
         command.senderThreadId !== undefined &&
         command.senderThreadId !== parentThreadId)
     )
@@ -13968,7 +13995,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
 
       const now = yield* DateTime.now;
-      const result = subagentResultForRun(childProjection, { ...childRun, status: outcome });
+      const reported = subagentResultForRun(childProjection, { ...childRun, status: outcome });
+      // A child stopped by a usage limit is continued on another account by the limit switch,
+      // whose run reports back as a follow-up task. Say so, or the parent restarts it and two
+      // agents end up writing the same checkout.
+      const switchesAccount =
+        latestRootProviderFailure(childRun, childResult.turnItems)?.class === "usage_limit" &&
+        (yield* serverSettings.getSettings.pipe(
+          Effect.map((settings) => settings.fallbackToAvailableAccounts === true),
+          Effect.orElseSucceed(() => false),
+        ));
+      const result = switchesAccount
+        ? { ...reported, text: `${reported.text}\n\n${LIMIT_SWITCH_TASK_NOTE}`.trim() }
+        : reported;
       const parentRun =
         task.runId === null
           ? undefined
@@ -15133,10 +15172,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
 
   // dispatchWithReceiptEffect owns the dispatch span; this wrapper selects the thread locks.
-  const dispatchWithReceipt = Effect.fnUntraced(function* (command: OrchestrationV2ServerCommand) {
+  const dispatchWithReceipt = Effect.fnUntraced(function* <E = never>(
+    command: OrchestrationV2ServerCommand,
+    options?: OrchestratorV2DispatchOptions<E>,
+  ) {
+    const resolveModelSelection = options?.resolveModelSelection;
     const dispatch = threadDispatch.withLock(
       commandThreadId(command),
-      dispatchWithReceiptEffect(command),
+      command.type !== "message.dispatch" || resolveModelSelection === undefined
+        ? dispatchWithReceiptEffect(command)
+        : resolveModelSelection(command).pipe(
+            Effect.flatMap((modelSelection) =>
+              dispatchWithReceiptEffect(
+                modelSelection === undefined ? command : { ...command, modelSelection },
+              ),
+            ),
+          ),
     );
     // A parent's lock comes before its side chats' locks, so a delete cascade and a side chat
     // fork or command never interleave. A fork from a side chat or onto an existing thread would
@@ -15714,6 +15765,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
       },
     ),
+    getLatestLimitSwitch: Effect.fn("OrchestratorV2.getLatestLimitSwitch")(function (threadId) {
+      return projectionStore
+        .getLatestLimitSwitch(threadId)
+        .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
+    }),
     listAppOwnedChildThreadIds: Effect.fn("OrchestratorV2.listAppOwnedChildThreadIds")(
       function (threadId) {
         return projectionStore
