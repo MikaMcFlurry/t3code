@@ -31,3 +31,5 @@ mika/queue-busy-switch
 # Picking another provider while only subagents or background work keep a run open; kept busy
 # sessions are not closed (upstream #32296, gate from #22755).
 mika/selection-waiting-run
+# Fork-only: option to share a project's Claude auto memory across Claude accounts.
+mika/upstream-claude-shared-memory
