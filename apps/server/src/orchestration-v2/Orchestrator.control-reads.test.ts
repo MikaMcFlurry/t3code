@@ -72,6 +72,9 @@ it.effect.each(
       { active: false, selectionChange: "instance" },
       { active: true, selectionChange: "next-turn" },
       { active: true, selectionChange: "restart" },
+      // A waiting run has ended its turn; only the work it left remains.
+      { active: "waiting", selectionChange: "instance" },
+      { active: "waiting", selectionChange: "restart" },
     ].map((scenario) => ({ type, ...scenario })),
   ),
 )("$type $selectionChange ($active)", ({ type, active, selectionChange }) =>
@@ -161,7 +164,7 @@ it.effect.each(
           userMessageId: MessageId.make("message:instance-switch"),
           rootNodeId: nodeId,
           activeAttemptId: attemptId,
-          status: "running",
+          status: active === "waiting" ? "waiting" : "running",
           requestedAt: now,
           startedAt: now,
           completedAt: null,
@@ -182,9 +185,9 @@ it.effect.each(
           runAttemptId: attemptId,
           nativeTurnRef: { driver: adapter.driver, nativeId: "native:turn", strength: "strong" },
           ordinal: 1,
-          status: "running",
+          status: active === "waiting" ? "completed" : "running",
           startedAt: now,
-          completedAt: null,
+          completedAt: active === "waiting" ? now : null,
         },
       });
     }
@@ -205,7 +208,7 @@ it.effect.each(
       })
       .pipe(Effect.result);
     const after = yield* projections.getThreadProjection(threadId);
-    if (active && selectionChange !== "next-turn") {
+    if (active === true && selectionChange !== "next-turn") {
       assert.deepEqual(
         after,
         before,
