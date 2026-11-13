@@ -1,0 +1,7 @@
+[Unit]
+Description=T3 Mika: neuesten mika/main bauen und im Leerlauf umschalten
+
+[Service]
+Type=oneshot
+ExecStart=%h/T3-Mika/bin/t3mika-update
+Nice=10

@@ -1,0 +1,35 @@
+# Branches merged into mika/main, in order. Each one starts from upstream main.
+# Branches meant for upstream pull requests should touch one thing each.
+# Stacked branches: list only the tip; Update-T3Mika rebases the ones below it too.
+#   mika/reset-planner > mika/routine-routing > mika/routine-auto > mika/auto-launch > mika/auto-model.
+#   mika/desktop-live-view > mika/linux-computer-use > mika/central-mcp.
+mika/tooling
+mika/side-by-side
+mika/usage-rings
+# mika/dictation-locale: replaced by upstream #29689 (iPhone dictation language); not merged.
+mika/central-skills
+# Linux desktop control for agents (opt-in, per-action approval), on top of mika/central-mcp,
+# with the desktop live view on top (opt-in): watch and take over the screen from any T3 client.
+# Upstream idea #32487 (https://github.com/pingdotgg/t3code/discussions/32487).
+mika/desktop-live-view
+# mika/desktop-dictation: replaced by upstream #30624/#30625 (composer dictation on web and desktop,
+#   Settings -> Voice); not merged.
+mika/reset-planner
+mika/environment-load
+# Upstream PR #28390 (BluePhi09), take a photo from the attachment menu; waits for approval in #7931.
+mika/mobile-camera
+# Upstream PR #28595 (account switch at the usage limit) plus our follow-ups: going back to the
+# original account, a clearer switch notice. Keep until #28595 is merged upstream.
+mika/limit-switch-back
+# delegate_task isolation "worktree" for linked environments (upstream discussion #31920).
+mika/remote-delegate-isolation
+# Upstream PR #32109 (juliusmarminge), Grok runs complete with a background dev server; keep until merged upstream.
+mika/pr-32109
+# A send that would end a session's background work waits or hands off instead of bouncing
+# (upstream issue #32296).
+mika/queue-busy-switch
+# Picking another provider while only subagents or background work keep a run open; kept busy
+# sessions are not closed (upstream #32296, gate from #22755).
+mika/selection-waiting-run
+# Fork-only: option to share a project's Claude auto memory across Claude accounts.
+mika/upstream-claude-shared-memory
