@@ -46,19 +46,27 @@ remembers a project separately. To give accounts one memory per project, turn on
 account's user or local Claude settings, still takes precedence.
 
 The first shared session of each account copies that account's existing memory for the
-project into the shared folder; the account's own directory is only read and stays as it
-was, so turning the option off goes back to it. A file the shared folder already holds in a
-different version is not replaced: the account's copy is kept beside it as
-`<name>.conflict-<instance>.md` and listed in `MEMORY.md` as a conflict, for the next session
-or you to merge. Identical files are skipped, and subfolders are copied with their files. Until
-every file has been copied and checked, sessions of that account keep using the account's own
-memory, and the next session start tries again; the server log says why. A shared folder, or a
-file in it, that links into an account's own memory is never written through.
+project into the shared folder. The copy only adds files: the account's own directory is only
+read and stays as it was, so turning the option off goes back to it, and nothing already in the
+shared folder is replaced or changed, `MEMORY.md` included. A file the shared folder already holds
+in a different version is kept beside it as `<name>.conflict-<instance>.md`. Identical files are
+skipped, and subfolders are copied with their files.
 
-Two sessions open on the same project at once share one `MEMORY.md`, so one can drop the
-other's new index line. A session start whose folder changed since the last check adds a line
-for every memory file the index does not link to, from the file's `name` and `description`; it
-never removes a line and replaces `MEMORY.md` only if nothing changed it in the meantime.
+If the shared folder has no `MEMORY.md` yet, the copy creates one that lists the copied files and
+conflicts. If it already has one, that file is left alone and the copy lists what it does not link
+to in a new `SEEDED-FILES.md` and `SEED-CONFLICTS.md` (or `SEEDED-FILES-2.md` and so on when such a
+note exists already). Claude does not read these notes by itself: ask it to merge them into
+`MEMORY.md`, or do it yourself, then delete them.
+
+Files are published by hard link so that a file another session writes at the same moment is
+never replaced. On a file system without hard links (FAT32, exFAT, some network or sync folders)
+nothing is copied and sessions keep the account's own memory. Until every file has been copied and
+checked, sessions of that account keep using the account's own memory, and the next session start
+tries again; the server log says why. A shared folder, a file in it, or a folder for T3's seed
+records that links into an account's own memory is never written through.
+
+Two sessions open on the same project at once share one `MEMORY.md`, so one can drop the other's
+new index line, just as two sessions of one account can.
 
 For presets that differ only in API keys or endpoints, use the instance's
 **Environment variables**. Variable assignments do not belong in **Launch arguments**.

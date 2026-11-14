@@ -9,7 +9,6 @@ import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTa
 import {
   claudeAccountMemoryDirectories,
   claudeMemoryProjectPaths,
-  repairClaudeMemoryIndex,
   seedSharedClaudeMemory,
 } from "./claudeSharedMemory.ts";
 import {
@@ -357,9 +356,8 @@ const CLAUDE_SCRIPT_EXTENSIONS = [".js", ".mjs", ".tsx", ".ts", ".jsx"];
 // The SDK has no control-request deadline; the CLI waits up to 30 s per MCP server.
 const CLAUDE_MCP_REGISTRATION_TIMEOUT = "90 seconds";
 const CLAUDE_BOOT_TIMEOUT = "5 minutes";
-// Bounds on shared memory upkeep at a session start; past them the session starts anyway.
+// Bound on seeding shared memory at a session start; past it the session starts anyway.
 const CLAUDE_SHARED_MEMORY_SEED_TIMEOUT = "30 seconds";
-const CLAUDE_SHARED_MEMORY_REPAIR_TIMEOUT = "5 seconds";
 // Claude can consume a subagent result before the launching turn ends, leaving
 // its notification with no native wake turn to answer the continuation.
 const CLAUDE_WAKE_TURN_START_DEADLINE = "2 minutes";
@@ -5521,13 +5519,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         ),
       );
       if (!created) return undefined;
-      // Seed from this account's own project memory once. Until a seed has copied and verified every
+      // Seed from this account's own project memory once, only adding files: nothing in the
+      // shared folder is replaced, MEMORY.md included. Until a seed has copied and verified every
       // file, this session keeps the account's own memory, so nothing it knew goes missing; the
-      // next session start tries again. Then add index lines a concurrent rewrite of MEMORY.md may
-      // have lost. Neither step can fail or hold up the session start.
+      // next session start tries again. A failing or slow seed never holds up the session start.
       const memoryFs = { fileSystem, path };
-      const account = adapterOptions.instanceId.replace(/[^a-zA-Z0-9_-]/g, "-");
-      const accountDirectories = yield* Effect.gen(function* () {
+      const seeded = yield* Effect.gen(function* () {
         const directories =
           cwd === null
             ? []
@@ -5539,32 +5536,19 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         yield* seedSharedClaudeMemory(memoryFs, {
           sharedDirectory: directory,
           sourceDirectories: directories,
-          account,
-          marker: path.join(root, ".seeded", folder, account),
+          account: adapterOptions.instanceId,
         });
-        return directories;
+        return true;
       }).pipe(
         Effect.timeout(CLAUDE_SHARED_MEMORY_SEED_TIMEOUT),
         Effect.catchCause((cause) =>
           Effect.logWarning(
             "Claude shared project memory could not be seeded; this session keeps the account's own memory",
             { directory, cause },
-          ).pipe(Effect.as(undefined)),
+          ).pipe(Effect.as(false)),
         ),
       );
-      if (accountDirectories === undefined) return undefined;
-      yield* repairClaudeMemoryIndex(memoryFs, directory, {
-        protectedDirectories: accountDirectories,
-        stateFile: path.join(root, ".index-state", folder),
-      }).pipe(
-        Effect.timeout(CLAUDE_SHARED_MEMORY_REPAIR_TIMEOUT),
-        Effect.catchCause((cause) =>
-          Effect.logWarning("Claude shared project memory index could not be repaired", {
-            directory,
-            cause,
-          }),
-        ),
-      );
+      if (!seeded) return undefined;
       return directory;
     },
   );

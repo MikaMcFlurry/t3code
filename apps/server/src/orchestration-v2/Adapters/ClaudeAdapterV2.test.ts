@@ -4951,11 +4951,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* fileSystem.writeFileString(path.join(state, "outside.md"), memoryFile("outside"));
         yield* fileSystem.symlink(path.join(state, "outside.md"), path.join(linkedMemory, "c.md"));
         // Every harness here is the same instance and thread: forget its seed, as for a new account.
-        yield* fileSystem.remove(path.join(root, ".seeded"), { recursive: true });
+        yield* fileSystem.remove(path.join(root, ".seeded-v2"), { recursive: true });
         const unseeded = yield* openedMemory({ shareProjectMemory: true, cwd: linkedProject });
         assert.isUndefined(unseeded.directory);
         assert.isFalse(yield* fileSystem.exists(path.join(unseeded.projectFolder, "c.md")));
-        assert.isFalse(yield* fileSystem.exists(path.join(root, ".seeded")));
+        assert.isFalse(yield* fileSystem.exists(path.join(root, ".seeded-v2")));
         yield* fileSystem.remove(path.join(linkedMemory, "c.md"));
         yield* fileSystem.writeFileString(path.join(linkedMemory, "c.md"), memoryFile("c"));
         const retried = yield* openedMemory({ shareProjectMemory: true, cwd: linkedProject });

@@ -9,7 +9,6 @@ import {
   claudeAccountMemoryDirectories,
   claudeMemoryProjectPaths,
   memoryFrontmatter,
-  repairClaudeMemoryIndex,
   seedSharedClaudeMemory,
 } from "./claudeSharedMemory.ts";
 
@@ -36,7 +35,6 @@ const setup = Effect.gen(function* () {
       sharedDirectory: shared,
       sourceDirectories: [source],
       account,
-      marker: path.join(root, "claude-memory", ".seeded", "project-1", account),
     });
   const files = Effect.map(fileSystem.readDirectory(shared), (names) => names.sort());
   return { fileSystem, path, root, shared, gmail, work, memoryFs, read, write, seed, files };
@@ -60,17 +58,22 @@ describe("seedSharedClaudeMemory", () => {
         yield* fileSystem.utimes(path.join(gmail, "deploy.md"), 1, 1);
         yield* fileSystem.utimes(path.join(work, "deploy.md"), 2_000_000_000, 2_000_000_000);
 
-        yield* seed(gmail, "gmail");
-        yield* seed(work, "work");
-        yield* repairClaudeMemoryIndex({ fileSystem, path }, shared);
+        assert.isTrue(yield* seed(gmail, "gmail"));
+        assert.isTrue(yield* seed(work, "work"));
 
-        assert.deepEqual(yield* files, ["MEMORY.md", "deploy.conflict-work.md", "deploy.md"]);
+        assert.deepEqual(yield* files, [
+          "MEMORY.md",
+          "SEED-CONFLICTS.md",
+          "deploy.conflict-work.md",
+          "deploy.md",
+        ]);
         assert.equal(yield* read(shared, "deploy.md"), older);
         assert.equal(yield* read(shared, "deploy.conflict-work.md"), newer);
-        assert.equal(
-          yield* read(shared, "MEMORY.md"),
-          "- [Deploy](deploy.md) — how deploys run\n" +
-            "- [Conflict: deploy.md](deploy.conflict-work.md): another account's different version of deploy.md. Merge the two and delete one.\n",
+        // The first account created the index; the second left it alone and wrote a note.
+        assert.equal(yield* read(shared, "MEMORY.md"), "- [Deploy](deploy.md) — how deploys run\n");
+        assert.include(
+          yield* read(shared, "SEED-CONFLICTS.md"),
+          "- [Conflict: deploy.md](deploy.conflict-work.md): account work's different version of deploy.md. Merge the two and delete one.\n",
         );
         // The accounts' own folders are only read.
         assert.equal(yield* read(work, "deploy.md"), newer);
@@ -87,14 +90,17 @@ describe("seedSharedClaudeMemory", () => {
         yield* write(gmail, "style.md", same);
         yield* write(work, "style.md", same);
         yield* seed(gmail, "gmail");
+        const index = yield* read(shared, "MEMORY.md");
+        assert.equal(index, "- [style](style.md): Code style\n");
         yield* seed(work, "work");
-        assert.deepEqual(yield* files, ["style.md"]);
+        assert.deepEqual(yield* files, ["MEMORY.md", "style.md"]);
         assert.equal(yield* read(shared, "style.md"), same);
+        assert.equal(yield* read(shared, "MEMORY.md"), index);
       }),
     ),
   );
 
-  it.effect("merges the accounts' index lines and seeds each account only once", () =>
+  it.effect("lists a later account's files in a note and seeds each account only once", () =>
     run(
       Effect.gen(function* () {
         const { shared, gmail, work, read, write, seed, files } = yield* setup;
@@ -104,12 +110,15 @@ describe("seedSharedClaudeMemory", () => {
         yield* write(work, "MEMORY.md", "- [B](b.md) — B\n- [A](a.md) — A\n");
         yield* seed(gmail, "gmail");
         yield* seed(work, "work");
-        assert.equal(yield* read(shared, "MEMORY.md"), "- [A](a.md) — A\n- [B](b.md) — B\n");
+        assert.equal(yield* read(shared, "MEMORY.md"), "- [A](a.md) — A\n");
+        const note = yield* read(shared, "SEEDED-FILES.md");
+        assert.include(note, "\n- [B](b.md) — B\n");
+        assert.notInclude(note, "a.md");
 
         // A file the account adds later is not copied again; the shared folder is the memory now.
         yield* write(gmail, "late.md", memoryFile("late", "Late", "late"));
-        yield* seed(gmail, "gmail");
-        assert.deepEqual(yield* files, ["MEMORY.md", "a.md", "b.md"]);
+        assert.isFalse(yield* seed(gmail, "gmail"));
+        assert.deepEqual(yield* files, ["MEMORY.md", "SEEDED-FILES.md", "a.md", "b.md"]);
       }),
     ),
   );
@@ -138,39 +147,24 @@ describe("seedSharedClaudeMemory", () => {
       }),
     ),
   );
-});
 
-describe("repairClaudeMemoryIndex", () => {
-  it.effect("adds memory files the index lost and keeps every line it has", () =>
+  it.effect("keeps no state in the memory root but the versioned seed markers", () =>
     run(
       Effect.gen(function* () {
-        const { fileSystem, path, shared, read, write } = yield* setup;
-        // Two sessions rewrote MEMORY.md at once; the second dropped the first one's entry.
-        yield* write(shared, "kept.md", memoryFile("kept", "Kept entry", "k"));
-        yield* write(shared, "lost.md", memoryFile("lost", "Lost entry", "l"));
-        yield* write(shared, "notes.md", "No frontmatter, not a memory file.\n");
-        yield* write(shared, "MEMORY.md", "# Memory\n- [Kept](kept.md) — kept entry");
-
-        const added = yield* repairClaudeMemoryIndex({ fileSystem, path }, shared);
-        assert.equal(added, 1);
-        const repaired =
-          "# Memory\n- [Kept](kept.md) — kept entry\n- [lost](lost.md): Lost entry\n";
-        assert.equal(yield* read(shared, "MEMORY.md"), repaired);
-
-        // Idempotent.
-        assert.equal(yield* repairClaudeMemoryIndex({ fileSystem, path }, shared), 0);
-        assert.equal(yield* read(shared, "MEMORY.md"), repaired);
-      }),
-    ),
-  );
-
-  it.effect("creates the index when it is missing", () =>
-    run(
-      Effect.gen(function* () {
-        const { fileSystem, path, shared, read, write } = yield* setup;
-        yield* write(shared, "only.md", memoryFile("only", "Only one", "o"));
-        yield* repairClaudeMemoryIndex({ fileSystem, path }, shared);
-        assert.equal(yield* read(shared, "MEMORY.md"), "- [only](only.md): Only one\n");
+        const { fileSystem, path, root, shared, gmail, write, seed, files } = yield* setup;
+        yield* write(gmail, "a.md", memoryFile("a", "A", "a"));
+        yield* seed(gmail, "gmail");
+        const memoryRoot = path.join(root, "claude-memory");
+        assert.deepEqual((yield* fileSystem.readDirectory(memoryRoot)).sort(), [
+          ".seeded-v2",
+          "project-1",
+        ]);
+        assert.deepEqual(
+          yield* fileSystem.readDirectory(path.join(memoryRoot, ".seeded-v2", "project-1")),
+          ["gmail"],
+        );
+        assert.isTrue((yield* files).every((name) => !name.startsWith(".")));
+        assert.isFalse(yield* fileSystem.exists(path.join(shared, ".index-state")));
       }),
     ),
   );

@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeCrypto from "node:crypto";
 
-import * as DateTime from "effect/DateTime";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -10,13 +10,26 @@ import type { PlatformError } from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
-/**
- * Shared Claude auto memory (`shareProjectMemory`): seeding and index repair. Account folders are
- * only read; links that could reach them are never written through. Files publish via hard link,
- * so nothing is replaced; MEMORY.md is replaced whole by rename only while unchanged since read.
- */
+// Shared Claude auto memory: a one-time, additive seed from each account's own memory, which is
+// only read. Nothing existing in the shared folder is changed, MEMORY.md included, except own crash
+// leftovers. New files are verified, then hard-linked into place, which never replaces a file;
+// without hard links nothing is published and the session keeps the account's own memory.
 
 const MEMORY_INDEX = "MEMORY.md";
+/** Notes for files a seed copied while `MEMORY.md` already existed and was left alone. */
+const SEEDED_FILES_NOTE = "SEEDED-FILES";
+const SEED_CONFLICTS_NOTE = "SEED-CONFLICTS";
+/**
+ * Seed markers live in `<memory root>/.seeded-v2/<project>/<account>`. Markers of the earlier
+ * `.seeded/` layout are ignored on purpose: some were written after incomplete seeds.
+ */
+const MARKER_FOLDER = ".seeded-v2";
+const MARKER_TEXT = "seeded v2\n";
+
+const TEMPORARY_PREFIX = ".t3-memory-";
+const temporaryPattern = /^\.t3-memory-[0-9a-f-]{36}\.tmp$/;
+/** Temporary files older than this are left from a crash and are removed at a session start. */
+const STALE_TEMPORARY_MS = 60 * 60 * 1000;
 
 /** Bounds on the work one session start may do. Beyond them seeding stops without its marker. */
 const sharedMemoryLimits = {
@@ -28,14 +41,12 @@ const sharedMemoryLimits = {
   maxFileBytes: 32 * 1024 * 1024,
   /** All files of one account together. */
   maxTotalBytes: 256 * 1024 * 1024,
-  /** `MEMORY.md` itself; Claude reads only its start anyway. */
+  /** How much of the shared `MEMORY.md` is read to see which files it links to. */
   maxIndexBytes: 4 * 1024 * 1024,
   /** How much of a memory file is read for its frontmatter. */
   frontmatterBytes: 64 * 1024,
-  /** Files the index repair looks at. */
-  maxRepairFiles: 5_000,
-  /** Rereads of `MEMORY.md` when it changes while an update is prepared. */
-  indexUpdateAttempts: 5,
+  /** Names tried for one file: itself, then conflict copies; likewise for the notes. */
+  maxNames: 100,
 } as const;
 
 /** Longest file name, in UTF-8 bytes, that common file systems accept. */
@@ -46,7 +57,7 @@ class ClaudeSharedMemoryError extends Schema.TaggedError<ClaudeSharedMemoryError
   {
     reason: Schema.String,
     path: Schema.String,
-    /** The path is a symbolic or hard link: writing it could change a file outside the folder. */
+    /** The path is a link or resolves elsewhere: writing it could change a file outside the folder. */
     alias: Schema.Boolean,
   },
 ) {
@@ -55,16 +66,12 @@ class ClaudeSharedMemoryError extends Schema.TaggedError<ClaudeSharedMemoryError
   }
 }
 
-const isClaudeSharedMemoryError = Schema.is(ClaudeSharedMemoryError);
-const isAlias = (error: unknown) => isClaudeSharedMemoryError(error) && error.alias;
-
 interface MemoryFs {
   readonly fileSystem: FileSystem.FileSystem;
   readonly path: Path.Path;
 }
 
-// One writer at a time per shared folder in this server. Claude itself is coordinated with by
-// comparing MEMORY.md before replacing it, not by this.
+// One seed at a time per shared folder in this server.
 const folderPermits = new Map<string, Semaphore.Semaphore>();
 const withFolderPermit = <A, E, R>(folder: string, effect: Effect.Effect<A, E, R>) => {
   let permit = folderPermits.get(folder);
@@ -142,118 +149,133 @@ export const claudeAccountMemoryDirectories = Effect.fn("claudeSharedMemory.acco
   },
 );
 
+/** Where the seed of `account` into `sharedDirectory` is recorded. */
+export function claudeSharedMemoryMarker(
+  path: Path.Path,
+  sharedDirectory: string,
+  account: string,
+): string {
+  return path.join(
+    path.dirname(sharedDirectory),
+    MARKER_FOLDER,
+    path.basename(sharedDirectory),
+    sanitizeAccount(account),
+  );
+}
+
+const sanitizeAccount = (account: string) => account.replace(/[^A-Za-z0-9_-]/g, "-");
+
 const sameBytes = (left: Uint8Array, right: Uint8Array) =>
   left.length === right.length && left.every((byte, index) => byte === right[index]);
 
-const conflictPattern = /^(.+)\.conflict-[A-Za-z0-9_-]+\.md$/;
-
 const inside = (path: Path.Path, root: string, candidate: string) =>
   candidate === root || candidate.startsWith(root.endsWith(path.sep) ? root : `${root}${path.sep}`);
-const overlaps = (path: Path.Path, left: string, right: string) =>
-  inside(path, left, right) || inside(path, right, left);
 
 const aliasError = (target: string, message: string) =>
   new ClaudeSharedMemoryError({ reason: message, path: target, alias: true });
 
-interface SharedGuard {
-  /** The shared folder as given. */
-  readonly directory: string;
-  /** Its real path; every written path must resolve inside it. */
+/** A folder this module writes below, and the account folders nothing it writes may reach. */
+interface Guard {
+  /** The folder's real path; every written path must resolve inside it. */
   readonly real: string;
+  /** Real paths of the accounts' memory folders. */
+  readonly accounts: readonly string[];
 }
 
 /**
- * Checks that the shared folder is a real folder of its own: not a symbolic link, and neither in,
- * nor holding, nor the same as one of the accounts' memory folders.
+ * Checks that `directory` is a plain folder, not a link, and returns its guard. With `exclusive`,
+ * it may neither lie in, nor hold, nor be one of the accounts' memory folders; otherwise only
+ * paths inside it that resolve into an account folder are refused, by `checkedFolder`.
  */
-const guardSharedDirectory = Effect.fn("claudeSharedMemory.guard")(function* (
+const guardDirectory = Effect.fn("claudeSharedMemory.guard")(function* (
   memoryFs: MemoryFs,
   directory: string,
-  protectedDirectories: readonly string[],
+  accountDirectories: readonly string[],
+  exclusive: boolean,
 ) {
   const { fileSystem, path } = memoryFs;
   const info = yield* fileSystem.lstat(directory);
   if (info.type !== "Directory") {
-    return yield* aliasError(directory, "The shared memory folder is not a plain folder");
+    return yield* aliasError(directory, "A shared memory folder is not a plain folder");
   }
   const real = yield* fileSystem.realPath(directory);
-  for (const account of protectedDirectories) {
+  const accounts: string[] = [];
+  for (const account of accountDirectories) {
     const accountReal = yield* unlessMissing(fileSystem.realPath(account));
-    if (accountReal !== undefined && overlaps(path, real, accountReal)) {
+    if (accountReal === undefined) continue;
+    accounts.push(accountReal);
+    if (inside(path, accountReal, real) || (exclusive && inside(path, real, accountReal))) {
       return yield* aliasError(
         directory,
-        `The shared memory folder overlaps the account memory folder ${account}`,
+        `A shared memory folder overlaps the account memory folder ${account}`,
       );
     }
   }
-  return { directory, real } satisfies SharedGuard;
+  return { real, accounts } satisfies Guard;
 });
 
-interface Snapshot {
-  readonly dev: bigint;
-  readonly ino: bigint | undefined;
-  readonly size: bigint;
-  readonly mtime: number | undefined;
-  readonly mode: number;
-}
-
-const snapshotOf = (info: FileSystem.File.Info): Snapshot => ({
-  dev: info.dev,
-  ino: Option.getOrUndefined(info.ino),
-  size: BigInt(info.size),
-  mtime: Option.getOrUndefined(info.mtime)?.getTime(),
-  mode: info.mode,
-});
-
-const sameSnapshot = (left: Snapshot | undefined, right: Snapshot | undefined) =>
-  left === undefined || right === undefined
-    ? left === right
-    : left.dev === right.dev &&
-      left.ino === right.ino &&
-      left.size === right.size &&
-      left.mtime === right.mtime;
+/** Refuses a real path outside the guarded folder or inside an account folder. */
+const checkReal = (path: Path.Path, guard: Guard, real: string, at: string) =>
+  !inside(path, guard.real, real) || guard.accounts.some((account) => inside(path, account, real))
+    ? Effect.fail(aliasError(at, "A shared memory path resolves outside the shared folder"))
+    : Effect.void;
 
 /**
- * Checks a path this module may write: absent with its folder inside the shared folder, or a plain
- * file with one link whose real path is inside it. Returns its state for a later comparison.
+ * A folder below the guarded one: checked to be a plain folder (not a link or junction) that
+ * resolves inside it, and, with `create`, created first when missing. Returns whether it exists.
  */
-const writableTarget = Effect.fn("claudeSharedMemory.writableTarget")(function* (
+const checkedFolder = Effect.fn("claudeSharedMemory.checkedFolder")(function* (
   memoryFs: MemoryFs,
-  guard: SharedGuard,
+  guard: Guard,
   target: string,
+  create: boolean,
 ) {
   const { fileSystem, path } = memoryFs;
-  const parent = yield* fileSystem.realPath(path.dirname(target));
-  if (!inside(path, guard.real, parent)) {
-    return yield* aliasError(target, "The memory file's folder resolves outside the shared folder");
+  yield* checkReal(path, guard, yield* fileSystem.realPath(path.dirname(target)), target);
+  let info = yield* unlessMissing(fileSystem.lstat(target));
+  if (info === undefined) {
+    if (!create) return false;
+    yield* fileSystem
+      .makeDirectory(target)
+      .pipe(Effect.catchIf(isAlreadyExists, () => Effect.void));
+    info = yield* fileSystem.lstat(target);
   }
-  const info = yield* unlessMissing(fileSystem.lstat(target));
-  if (info === undefined) return undefined;
-  if (info.type !== "File") {
-    return yield* aliasError(target, "The memory file is a symbolic link or not a plain file");
+  if (info.type !== "Directory") {
+    return yield* aliasError(target, "A memory folder's name is taken by a link or a file");
   }
-  if (Option.getOrElse(info.nlink, () => 1n) > 1n) {
-    return yield* aliasError(target, "The memory file is hard-linked to another file");
-  }
-  return snapshotOf(info);
+  yield* checkReal(path, guard, yield* fileSystem.realPath(target), target);
+  return true;
 });
 
-const temporaryPath = (path: Path.Path, target: string) =>
-  path.join(path.dirname(target), `.t3-memory-${NodeCrypto.randomUUID()}.tmp`);
-
 /**
- * Writes `bytes` to a new file beside `target` and reads it back. The caller publishes it; the
- * temporary file is removed when anything fails.
+ * Publishes `bytes` under `target` only if nothing has that name: written to a new file beside it
+ * (`wx`, so never through a planted link), read back, then hard-linked into place, which fails
+ * rather than replace what another writer created meanwhile. Any other link failure, as on a file
+ * system without hard links, fails the publication; there is deliberately no rename fallback.
  */
-const writeTemporary = (memoryFs: MemoryFs, target: string, bytes: Uint8Array, mode?: number) => {
+const publishNew = Effect.fn("claudeSharedMemory.publishNew")(function* (
+  memoryFs: MemoryFs,
+  guard: Guard,
+  target: string,
+  bytes: Uint8Array,
+) {
   const { fileSystem, path } = memoryFs;
-  const temporary = temporaryPath(path, target);
-  return Effect.gen(function* () {
-    // `wx` creates a new file and never follows a link planted at that name.
-    yield* fileSystem.writeFile(temporary, bytes, {
-      flag: "wx",
-      ...(mode === undefined ? {} : { mode: mode & 0o777 }),
-    });
+  yield* checkReal(path, guard, yield* fileSystem.realPath(path.dirname(target)), target);
+  const temporary = path.join(
+    path.dirname(target),
+    `${TEMPORARY_PREFIX}${NodeCrypto.randomUUID()}.tmp`,
+  );
+  // Removed afterwards only if this call created it: a `wx` that found the name taken did not.
+  let created = false;
+  return yield* Effect.gen(function* () {
+    yield* fileSystem.writeFile(temporary, bytes, { flag: "wx" }).pipe(
+      Effect.tapError((error) =>
+        Effect.sync(() => {
+          created = !isAlreadyExists(error);
+        }),
+      ),
+    );
+    created = true;
     const written = yield* fileSystem.readFile(temporary);
     if (!sameBytes(written, bytes)) {
       return yield* new ClaudeSharedMemoryError({
@@ -262,47 +284,56 @@ const writeTemporary = (memoryFs: MemoryFs, target: string, bytes: Uint8Array, m
         path: temporary,
       });
     }
-    return temporary;
-  }).pipe(Effect.onError(() => fileSystem.remove(temporary).pipe(Effect.ignore)));
-};
+    return yield* fileSystem.link(temporary, target).pipe(
+      Effect.as("published" as const),
+      Effect.catchIf(isAlreadyExists, () => Effect.succeed("exists" as const)),
+      Effect.mapError(
+        (cause) =>
+          new ClaudeSharedMemoryError({
+            alias: false,
+            reason: `This file system cannot publish a file without risking replacing another (no hard link: ${cause.message}); nothing was published`,
+            path: target,
+          }),
+      ),
+    );
+  }).pipe(
+    Effect.ensuring(
+      Effect.suspend(() =>
+        created ? fileSystem.remove(temporary).pipe(Effect.ignore) : Effect.void,
+      ),
+    ),
+  );
+});
 
 /**
- * Publishes `bytes` under `target` only if nothing has that name: written and verified beside it,
- * then hard-linked into place, which fails rather than replace a file another writer created.
+ * Publishes `bytes` under the first of `names(1)`, `names(2)`, … that is free, unless one of them
+ * already holds exactly these bytes. Existing files are only read; a link or folder there counts
+ * as taken. Returns the path that holds the bytes.
  */
-const publishNew = Effect.fn("claudeSharedMemory.publishNew")(function* (
+const publishUnique = Effect.fn("claudeSharedMemory.publishUnique")(function* (
   memoryFs: MemoryFs,
-  target: string,
+  guard: Guard,
+  names: (attempt: number) => string,
   bytes: Uint8Array,
 ) {
   const { fileSystem } = memoryFs;
-  const temporary = yield* writeTemporary(memoryFs, target, bytes);
-  const outcome = yield* Effect.gen(function* () {
-    const linked = yield* fileSystem.link(temporary, target).pipe(
-      Effect.as("published" as const),
-      Effect.catchIf(isAlreadyExists, () => Effect.succeed("exists" as const)),
-      // A file system without hard links: rename, after one more look that the name is free.
-      Effect.catch((error) =>
-        Effect.gen(function* () {
-          if ((yield* unlessMissing(fileSystem.lstat(target))) !== undefined) return "exists";
-          yield* Effect.logDebug("Claude shared memory publishes by rename", { target, error });
-          yield* fileSystem.rename(temporary, target);
-          return "published" as const;
-        }),
-      ),
-    );
-    return linked;
-  }).pipe(Effect.ensuring(fileSystem.remove(temporary).pipe(Effect.ignore)));
-  if (outcome === "exists") return false;
-  const published = yield* fileSystem.readFile(target);
-  if (!sameBytes(published, bytes)) {
-    return yield* new ClaudeSharedMemoryError({
-      alias: false,
-      reason: "A copied memory file does not match its source",
-      path: target,
-    });
+  for (let attempt = 1; attempt <= sharedMemoryLimits.maxNames; attempt++) {
+    const candidate = names(attempt);
+    let info = yield* unlessMissing(fileSystem.lstat(candidate));
+    if (info === undefined) {
+      if ((yield* publishNew(memoryFs, guard, candidate, bytes)) === "published") return candidate;
+      // Another writer took the name meanwhile.
+      info = yield* unlessMissing(fileSystem.lstat(candidate));
+    }
+    if (info?.type !== "File" || info.size !== BigInt(bytes.length)) continue;
+    const existing = yield* unlessMissing(fileSystem.readFile(candidate));
+    if (existing !== undefined && sameBytes(existing, bytes)) return candidate;
   }
-  return true;
+  return yield* new ClaudeSharedMemoryError({
+    alias: false,
+    reason: "No free name for a copy of a memory file",
+    path: names(1),
+  });
 });
 
 /** Cuts a string to at most `bytes` UTF-8 bytes without splitting a character. */
@@ -326,65 +357,6 @@ function conflictName(name: string, account: string, number: number): string {
   const hash = NodeCrypto.createHash("sha256").update(name).digest("hex").slice(0, 8);
   return `${truncateUtf8(stem, NAME_MAX_BYTES - Buffer.byteLength(suffix) - 9)}~${hash}${suffix}`;
 }
-
-/**
- * Copies one file into the shared folder, or keeps it beside a different version as a conflict
- * copy. An existing name is never written; a link there is treated as a different version.
- */
-const seedFile = Effect.fn("claudeSharedMemory.seedFile")(function* (
-  memoryFs: MemoryFs,
-  guard: SharedGuard,
-  input: { readonly source: string; readonly target: string; readonly account: string },
-) {
-  const { fileSystem, path } = memoryFs;
-  const bytes = yield* fileSystem.readFile(input.source);
-  const name = path.basename(input.target);
-  for (let attempt = 1; attempt < 100; attempt++) {
-    const candidate =
-      attempt === 1
-        ? input.target
-        : path.join(path.dirname(input.target), conflictName(name, input.account, attempt - 1));
-    const existing = yield* writableTarget(memoryFs, guard, candidate).pipe(
-      Effect.catchIf(isAlias, () => Effect.succeed("alias" as const)),
-    );
-    if (existing === "alias") continue;
-    if (existing !== undefined) {
-      if (sameBytes(yield* fileSystem.readFile(candidate), bytes)) return candidate;
-      continue;
-    }
-    if (yield* publishNew(memoryFs, candidate, bytes)) return candidate;
-    // Another writer took the name meanwhile: the same file is fine, another goes on.
-    const raced = yield* unlessMissing(fileSystem.readFile(candidate));
-    if (raced !== undefined && sameBytes(raced, bytes)) return candidate;
-  }
-  return yield* new ClaudeSharedMemoryError({
-    alias: false,
-    reason: "No free name for a conflicting copy of a memory file",
-    path: input.target,
-  });
-});
-
-/** A folder in the shared folder for a folder of the account's memory: created, or a plain one. */
-const ensureSharedFolder = Effect.fn("claudeSharedMemory.ensureFolder")(function* (
-  memoryFs: MemoryFs,
-  guard: SharedGuard,
-  target: string,
-) {
-  const { fileSystem, path } = memoryFs;
-  const parent = yield* fileSystem.realPath(path.dirname(target));
-  if (!inside(path, guard.real, parent)) {
-    return yield* aliasError(target, "A memory folder resolves outside the shared folder");
-  }
-  if ((yield* unlessMissing(fileSystem.lstat(target))) === undefined) {
-    yield* fileSystem
-      .makeDirectory(target)
-      .pipe(Effect.catchIf(isAlreadyExists, () => Effect.void));
-  }
-  const info = yield* fileSystem.lstat(target);
-  if (info.type !== "Directory") {
-    return yield* aliasError(target, "A memory folder's name is taken by a link or a file");
-  }
-});
 
 interface SourceEntry {
   readonly segments: readonly string[];
@@ -418,6 +390,7 @@ const listAccountMemory = Effect.fn("claudeSharedMemory.listAccount")(function* 
     }
     const names = (yield* unlessMissing(fileSystem.readDirectory(directory))) ?? [];
     for (const name of names.sort()) {
+      if (name.startsWith(TEMPORARY_PREFIX)) continue;
       const source = path.join(directory, name);
       const info = yield* unlessMissing(fileSystem.lstat(source));
       if (info === undefined) continue;
@@ -460,144 +433,41 @@ const listAccountMemory = Effect.fn("claudeSharedMemory.listAccount")(function* 
   return entries;
 });
 
-interface IndexState {
-  readonly text: string;
-  readonly snapshot: Snapshot | undefined;
-}
-
-const readIndex = Effect.fn("claudeSharedMemory.readIndex")(function* (
-  memoryFs: MemoryFs,
-  guard: SharedGuard,
-) {
-  const { fileSystem, path } = memoryFs;
-  const indexPath = path.join(guard.directory, MEMORY_INDEX);
-  const snapshot = yield* writableTarget(memoryFs, guard, indexPath);
-  if (snapshot === undefined) return { text: "", snapshot } satisfies IndexState;
-  if (snapshot.size > BigInt(sharedMemoryLimits.maxIndexBytes)) {
-    return yield* new ClaudeSharedMemoryError({
-      alias: false,
-      reason: "MEMORY.md is too large to update",
-      path: indexPath,
-    });
-  }
-  const text = yield* unlessMissing(fileSystem.readFileString(indexPath));
-  return { text: text ?? "", snapshot: text === undefined ? undefined : snapshot };
-});
-
 /**
- * Replaces `MEMORY.md` with `next(current)` by a rename, only while it still holds what was read;
- * when another writer changed it meanwhile, reads it again. `next` returns `undefined` for no
- * change. Never appends or writes the index in place.
+ * Removes this module's temporary files that a crash left in the shared folder, once they are an
+ * hour old. Links are not followed; only plain files with the exact temporary name are removed,
+ * after their folder was checked to resolve inside the shared folder.
  */
-const updateIndex = Effect.fn("claudeSharedMemory.updateIndex")(function* (
+const removeStaleTemporaries = Effect.fn("claudeSharedMemory.removeStaleTemporaries")(function* (
   memoryFs: MemoryFs,
-  guard: SharedGuard,
-  next: (current: string) => string | undefined,
+  guard: Guard,
+  directory: string,
 ) {
   const { fileSystem, path } = memoryFs;
-  const indexPath = path.join(guard.directory, MEMORY_INDEX);
-  for (let attempt = 0; attempt < sharedMemoryLimits.indexUpdateAttempts; attempt++) {
-    const read = yield* readIndex(memoryFs, guard);
-    const text = next(read.text);
-    if (text === undefined) return false;
-    const temporary = yield* writeTemporary(
-      memoryFs,
-      indexPath,
-      new TextEncoder().encode(text),
-      read.snapshot?.mode,
-    );
-    const replaced = yield* Effect.gen(function* () {
-      const now = yield* readIndex(memoryFs, guard);
-      if (!sameSnapshot(now.snapshot, read.snapshot) || now.text !== read.text) return false;
-      yield* fileSystem.rename(temporary, indexPath);
-      return true;
-    }).pipe(Effect.ensuring(fileSystem.remove(temporary).pipe(Effect.ignore)));
-    if (replaced) return true;
-  }
-  return yield* new ClaudeSharedMemoryError({
-    alias: false,
-    reason: "MEMORY.md kept changing while it was being updated",
-    path: indexPath,
-  });
-});
-
-/** Writes a small file outside the shared folder whole: written beside it, then renamed. */
-const writeStateFile = Effect.fn("claudeSharedMemory.writeStateFile")(function* (
-  memoryFs: MemoryFs,
-  target: string,
-  text: string,
-) {
-  const { fileSystem, path } = memoryFs;
-  yield* fileSystem.makeDirectory(path.dirname(target), { recursive: true });
-  const temporary = yield* writeTemporary(memoryFs, target, new TextEncoder().encode(text));
-  yield* fileSystem
-    .rename(temporary, target)
-    .pipe(Effect.onError(() => fileSystem.remove(temporary).pipe(Effect.ignore)));
-});
-
-const appendLines = (current: string, lines: readonly string[]) =>
-  lines.length === 0
-    ? undefined
-    : `${current}${current.length === 0 || current.endsWith("\n") ? "" : "\n"}${lines.join("\n")}\n`;
-
-/**
- * Seeds the shared folder once per account from its project memory, folders included. A different
- * version of an existing file is kept as `<name>.conflict-<account>.md`; index lines are added.
- * Fails without writing the marker unless every file was published and verified.
- */
-export const seedSharedClaudeMemory = Effect.fn("claudeSharedMemory.seed")(function* (
-  memoryFs: MemoryFs,
-  input: {
-    readonly sharedDirectory: string;
-    readonly sourceDirectories: readonly string[];
-    readonly account: string;
-    /** Records that the account was seeded; seeding is skipped while it exists. */
-    readonly marker: string;
-  },
-) {
-  const { fileSystem, path } = memoryFs;
-  return yield* withFolderPermit(
-    path.resolve(input.sharedDirectory),
-    Effect.gen(function* () {
-      const account = input.account.replace(/[^A-Za-z0-9_-]/g, "-");
-      if ((yield* unlessMissing(fileSystem.lstat(input.marker))) !== undefined) return false;
-      const guard = yield* guardSharedDirectory(
-        memoryFs,
-        input.sharedDirectory,
-        input.sourceDirectories.filter(
-          (source) => path.resolve(source) !== path.resolve(input.sharedDirectory),
-        ),
-      );
-      const indexLines: string[] = [];
-      for (const sourceDirectory of input.sourceDirectories) {
-        if (path.resolve(sourceDirectory) === path.resolve(input.sharedDirectory)) continue;
-        for (const entry of yield* listAccountMemory(memoryFs, sourceDirectory)) {
-          const target = path.join(guard.directory, ...entry.segments);
-          if (entry.kind === "folder") {
-            yield* ensureSharedFolder(memoryFs, guard, target);
-          } else if (entry.segments.length === 1 && entry.segments[0] === MEMORY_INDEX) {
-            indexLines.push(...(yield* fileSystem.readFileString(entry.source)).split("\n"));
-          } else {
-            yield* seedFile(memoryFs, guard, { source: entry.source, target, account });
-          }
-        }
+  const cutoff = (yield* Clock.currentTimeMillis) - STALE_TEMPORARY_MS;
+  let seen = 0;
+  const visit: (
+    folder: string,
+    depth: number,
+  ) => Effect.Effect<void, PlatformError | ClaudeSharedMemoryError> = Effect.fn(
+    "claudeSharedMemory.visitTemporaries",
+  )(function* (folder: string, depth: number) {
+    const names = (yield* unlessMissing(fileSystem.readDirectory(folder))) ?? [];
+    for (const name of names.sort()) {
+      if (++seen > sharedMemoryLimits.maxEntries) return;
+      const full = path.join(folder, name);
+      const info = yield* unlessMissing(fileSystem.lstat(full));
+      if (info?.type === "Directory" && depth < sharedMemoryLimits.maxDepth) {
+        yield* visit(full, depth + 1);
+      } else if (info?.type === "File" && temporaryPattern.test(name)) {
+        const modified = Option.getOrUndefined(info.mtime)?.getTime();
+        if (modified === undefined || modified > cutoff) continue;
+        yield* checkReal(path, guard, yield* fileSystem.realPath(folder), full);
+        yield* fileSystem.remove(full);
       }
-      // Index lines last, so they never point at a file that is not there yet.
-      yield* updateIndex(memoryFs, guard, (current) => {
-        const present = new Set(current.split("\n").map((line) => line.trim()));
-        const missing: string[] = [];
-        for (const line of indexLines) {
-          const trimmed = line.trim();
-          if (trimmed.length === 0 || present.has(trimmed)) continue;
-          present.add(trimmed);
-          missing.push(line);
-        }
-        return appendLines(current, missing);
-      });
-      yield* writeStateFile(memoryFs, input.marker, `${DateTime.formatIso(yield* DateTime.now)}\n`);
-      return true;
-    }),
-  );
+    }
+  });
+  yield* visit(directory, 0);
 });
 
 /** `name` and `description` from a memory file's YAML frontmatter. */
@@ -631,7 +501,7 @@ function memoryLinkTarget(relativePath: string): string {
 
 const escapeLabel = (label: string) => label.replace(/[\\[\]]/g, (character) => `\\${character}`);
 
-/** The relative paths `MEMORY.md` links to, decoded, without fragments or `./`. */
+/** The relative paths a Markdown text links to, decoded, without fragments or `./`. */
 function memoryIndexLinks(index: string): ReadonlySet<string> {
   const links = new Set<string>();
   for (const match of index.matchAll(/\]\(\s*(?:<([^>\n]*)>|([^)\s]+))/g)) {
@@ -663,157 +533,199 @@ const readHead = (memoryFs: MemoryFs, file: string, bytes: number) =>
     }),
   );
 
-/** Memory files of the shared folder, as relative paths with `/`, folders included, links skipped. */
-const listSharedMemory = Effect.fn("claudeSharedMemory.listShared")(function* (
-  memoryFs: MemoryFs,
-  guard: SharedGuard,
-) {
-  const { fileSystem, path } = memoryFs;
-  const files: string[] = [];
-  let truncated = false;
-  const visit: (
-    directory: string,
-    prefix: string,
-    depth: number,
-  ) => Effect.Effect<void, PlatformError> = Effect.fn("claudeSharedMemory.visitShared")(function* (
-    directory: string,
-    prefix: string,
-    depth: number,
-  ) {
-    const entries = (yield* unlessMissing(fileSystem.readDirectoryEntries(directory))) ?? [];
-    for (const entry of [...entries].sort((a, b) =>
-      a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
-    )) {
-      if (entry.name.startsWith(".")) continue;
-      if (files.length >= sharedMemoryLimits.maxRepairFiles) {
-        truncated = true;
-        return;
-      }
-      const full = path.join(directory, entry.name);
-      const type =
-        entry.type === "Unknown"
-          ? (yield* unlessMissing(fileSystem.lstat(full)))?.type
-          : entry.type;
-      if (type === "Directory" && depth < sharedMemoryLimits.maxDepth) {
-        yield* visit(full, `${prefix}${entry.name}/`, depth + 1);
-      } else if (type === "File" && entry.name.endsWith(".md")) {
-        if (prefix === "" && entry.name === MEMORY_INDEX) continue;
-        files.push(`${prefix}${entry.name}`);
-      }
-    }
-  });
-  yield* visit(guard.directory, "", 0);
-  return { files, truncated };
-});
+interface Seeded {
+  /** Path relative to the shared folder, with `/`. */
+  readonly file: string;
+  /** For a conflict copy: the relative path of the version it differs from. */
+  readonly conflictOf?: string;
+}
 
-const repairSignature = (index: IndexState, files: readonly string[]) =>
-  NodeCrypto.createHash("sha256")
-    .update(
-      JSON.stringify([
-        index.snapshot === undefined
-          ? null
-          : [
-              String(index.snapshot.dev),
-              String(index.snapshot.ino),
-              String(index.snapshot.size),
-              index.snapshot.mtime,
-            ],
-        NodeCrypto.createHash("sha256").update(index.text).digest("hex"),
-        files,
-      ]),
-    )
-    .digest("hex");
+const conflictLine = (seeded: Seeded, account: string) =>
+  `- [Conflict: ${escapeLabel(seeded.conflictOf ?? seeded.file)}](${memoryLinkTarget(seeded.file)}): account ${account}'s different version of ${seeded.conflictOf}. Merge the two and delete one.`;
 
 /**
- * Adds an index line for every memory file `MEMORY.md` does not link to; never removes one. With a
- * `stateFile`, an unchanged index and file list skip the work. A folder overlapping one of
- * `protectedDirectories`, or an index that is a link, is left alone with a warning.
+ * Seeds the shared folder once per account, adding files only; a different version is kept as
+ * `<name>.conflict-<account>.md`. Creates a missing MEMORY.md, else lists new files in new notes.
+ * Writes the marker only after every file arrived; returns `false` when there was nothing to do.
  */
-export const repairClaudeMemoryIndex = Effect.fn("claudeSharedMemory.repairIndex")(function* (
+export const seedSharedClaudeMemory = Effect.fn("claudeSharedMemory.seed")(function* (
   memoryFs: MemoryFs,
-  directory: string,
-  options: {
-    readonly protectedDirectories?: readonly string[];
-    readonly stateFile?: string;
-  } = {},
+  input: {
+    /** `<memory root>/<project>`; the marker lives in the memory root. */
+    readonly sharedDirectory: string;
+    /** The account's memory folders; only read. */
+    readonly sourceDirectories: readonly string[];
+    readonly account: string;
+  },
 ) {
   const { fileSystem, path } = memoryFs;
+  const sharedDirectory = path.resolve(input.sharedDirectory);
   return yield* withFolderPermit(
-    path.resolve(directory),
+    sharedDirectory,
     Effect.gen(function* () {
-      const guard = yield* guardSharedDirectory(
-        memoryFs,
-        directory,
-        options.protectedDirectories ?? [],
+      const account = sanitizeAccount(input.account);
+      const sources = input.sourceDirectories.filter(
+        (source) => path.resolve(source) !== sharedDirectory,
       );
-      const before = yield* readIndex(memoryFs, guard);
-      const listing = yield* listSharedMemory(memoryFs, guard);
-      if (listing.truncated) {
-        yield* Effect.logWarning(
-          "Claude shared memory index repair looked at the first files only",
-          {
-            directory,
-            limit: sharedMemoryLimits.maxRepairFiles,
-          },
-        );
-      }
-      const signature = repairSignature(before, listing.files);
-      if (options.stateFile !== undefined) {
-        const last = yield* unlessMissing(fileSystem.readFileString(options.stateFile));
-        if (last?.trim() === signature) return 0;
-      }
-      const linked = memoryIndexLinks(before.text);
-      const entries: { readonly file: string; readonly line: string }[] = [];
-      for (const file of listing.files) {
-        if (linked.has(file)) continue;
-        const folder = file.includes("/") ? file.slice(0, file.lastIndexOf("/") + 1) : "";
-        const conflictOf = path.basename(file).match(conflictPattern)?.[1];
-        const target = memoryLinkTarget(file);
-        if (conflictOf !== undefined) {
-          const original = `${folder}${conflictOf}.md`;
-          entries.push({
-            file,
-            line: `- [Conflict: ${escapeLabel(original)}](${target}): another account's different version of ${original}. Merge the two and delete one.`,
-          });
-          continue;
+      // Without an account folder to read there is nothing to record: a later start may find one.
+      if (sources.length === 0) return false;
+      const guard = yield* guardDirectory(memoryFs, sharedDirectory, sources, true);
+      yield* removeStaleTemporaries(memoryFs, guard, sharedDirectory).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Claude shared memory left temporary files in place", {
+            directory: sharedDirectory,
+            cause,
+          }),
+        ),
+      );
+
+      // The marker and every folder above it get the same checks as the shared files.
+      const rootGuard = yield* guardDirectory(
+        memoryFs,
+        path.dirname(sharedDirectory),
+        sources,
+        false,
+      );
+      const marker = claudeSharedMemoryMarker(path, sharedDirectory, account);
+      const markerFolders = [path.dirname(path.dirname(marker)), path.dirname(marker)];
+      let markerFoldersExist = true;
+      for (const folder of markerFolders) {
+        if (!(yield* checkedFolder(memoryFs, rootGuard, folder, false))) {
+          markerFoldersExist = false;
+          break;
         }
+      }
+      if (markerFoldersExist) {
+        const info = yield* unlessMissing(fileSystem.lstat(marker));
+        if (info?.type === "File") return false;
+        if (info !== undefined) {
+          return yield* aliasError(marker, "The seed marker is not a plain file");
+        }
+      }
+
+      const indexLines: string[] = [];
+      const seeded: Seeded[] = [];
+      for (const sourceDirectory of sources) {
+        for (const entry of yield* listAccountMemory(memoryFs, sourceDirectory)) {
+          const target = path.join(sharedDirectory, ...entry.segments);
+          if (entry.kind === "folder") {
+            yield* checkedFolder(memoryFs, guard, target, true);
+            continue;
+          }
+          if (entry.segments.length === 1 && entry.segments[0] === MEMORY_INDEX) {
+            indexLines.push(...(yield* fileSystem.readFileString(entry.source)).split("\n"));
+            continue;
+          }
+          const bytes = yield* fileSystem.readFile(entry.source);
+          const name = path.basename(target);
+          const published = yield* publishUnique(
+            memoryFs,
+            guard,
+            (attempt) =>
+              attempt === 1
+                ? target
+                : path.join(path.dirname(target), conflictName(name, account, attempt - 1)),
+            bytes,
+          );
+          const file = entry.segments.join("/");
+          seeded.push(
+            published === target
+              ? { file }
+              : {
+                  file: path.relative(sharedDirectory, published).split(path.sep).join("/"),
+                  conflictOf: file,
+                },
+          );
+        }
+      }
+
+      // Lines for the copied files, last, so they never point at a file that is not there yet.
+      const accountLineFor = new Map<string, string>();
+      const accountLines: string[] = [];
+      const seenLines = new Set<string>();
+      for (const line of indexLines) {
+        const trimmed = line.trim();
+        if (trimmed.length === 0 || seenLines.has(trimmed)) continue;
+        seenLines.add(trimmed);
+        accountLines.push(line);
+        for (const link of memoryIndexLinks(line)) {
+          if (!accountLineFor.has(link)) accountLineFor.set(link, line);
+        }
+      }
+      const fileLine = Effect.fn("claudeSharedMemory.fileLine")(function* (file: string) {
+        const known = accountLineFor.get(file);
+        if (known !== undefined) return known;
         const head = yield* unlessMissing(
           readHead(
             memoryFs,
-            path.join(guard.directory, ...file.split("/")),
+            path.join(sharedDirectory, ...file.split("/")),
             sharedMemoryLimits.frontmatterBytes,
           ),
         );
         const frontmatter = head === undefined ? null : memoryFrontmatter(head);
-        if (frontmatter === null) continue;
-        entries.push({
-          file,
-          line: `- [${escapeLabel(frontmatter.name)}](${target})${frontmatter.description === null ? "" : `: ${frontmatter.description}`}`,
-        });
-      }
-      let added = 0;
-      yield* updateIndex(memoryFs, guard, (current) => {
-        const now = memoryIndexLinks(current);
-        const lines = entries.filter((entry) => !now.has(entry.file)).map((entry) => entry.line);
-        added = lines.length;
-        return appendLines(current, lines);
+        const label = escapeLabel(frontmatter?.name ?? file);
+        const description = frontmatter?.description;
+        return `- [${label}](${memoryLinkTarget(file)})${description ? `: ${description}` : ""}`;
       });
-      if (options.stateFile !== undefined) {
-        const after = yield* readIndex(memoryFs, guard);
-        yield* writeStateFile(
-          memoryFs,
-          options.stateFile,
-          `${repairSignature(after, listing.files)}\n`,
+      const copies = seeded.filter((entry) => entry.conflictOf === undefined);
+      const conflicts = seeded.filter((entry) => entry.conflictOf !== undefined);
+      const isMemory = (file: string) => file.endsWith(".md");
+
+      const accountLinks = memoryIndexLinks(accountLines.join("\n"));
+      const newIndex = [...accountLines];
+      for (const { file } of copies) {
+        if (isMemory(file) && !accountLinks.has(file)) newIndex.push(yield* fileLine(file));
+      }
+      for (const conflict of conflicts) newIndex.push(conflictLine(conflict, account));
+      const encode = (lines: readonly string[]) =>
+        new TextEncoder().encode(`${lines.join("\n")}\n`);
+
+      const indexPath = path.join(sharedDirectory, MEMORY_INDEX);
+      const createdIndex =
+        newIndex.length > 0 &&
+        (yield* unlessMissing(fileSystem.lstat(indexPath))) === undefined &&
+        (yield* publishNew(memoryFs, guard, indexPath, encode(newIndex))) === "published";
+      if (!createdIndex) {
+        // MEMORY.md exists and stays as it is: say in separate new files what arrived.
+        const current = yield* readHead(memoryFs, indexPath, sharedMemoryLimits.maxIndexBytes).pipe(
+          Effect.orElseSucceed(() => ""),
+        );
+        const linked = memoryIndexLinks(current);
+        const unlistedCopies: string[] = [];
+        for (const { file } of copies) {
+          if (isMemory(file) && !linked.has(file)) unlistedCopies.push(yield* fileLine(file));
+        }
+        const unlistedConflicts = conflicts
+          .filter((conflict) => !linked.has(conflict.file))
+          .map((conflict) => conflictLine(conflict, account));
+        const note = (stem: string, intro: string, lines: readonly string[]) =>
+          lines.length === 0
+            ? Effect.void
+            : publishUnique(
+                memoryFs,
+                guard,
+                (attempt) =>
+                  path.join(
+                    sharedDirectory,
+                    attempt === 1 ? `${stem}.md` : `${stem}-${attempt}.md`,
+                  ),
+                encode([intro, "", ...lines]),
+              ).pipe(Effect.asVoid);
+        yield* note(
+          SEEDED_FILES_NOTE,
+          `# Memory copied from account ${account}\n\nT3 Code copied these files from this account's own memory for the project. MEMORY.md already existed and was left unchanged, so it does not list them. Add the ones worth keeping to MEMORY.md, then delete this note.`,
+          unlistedCopies,
+        );
+        yield* note(
+          SEED_CONFLICTS_NOTE,
+          `# Conflicting memory from account ${account}\n\nThis account's version of these files differs from the shared one and was kept beside it. MEMORY.md already existed and was left unchanged. Merge each pair, keep one file, then delete this note.`,
+          unlistedConflicts,
         );
       }
-      return added;
-    }).pipe(
-      Effect.catchIf(isAlias, (error) =>
-        Effect.logWarning("Claude shared memory index left unchanged: it is linked elsewhere", {
-          directory,
-          cause: error,
-        }).pipe(Effect.as(0)),
-      ),
-    ),
+
+      for (const folder of markerFolders) yield* checkedFolder(memoryFs, rootGuard, folder, true);
+      yield* publishNew(memoryFs, rootGuard, marker, new TextEncoder().encode(MARKER_TEXT));
+      return true;
+    }),
   );
 });
