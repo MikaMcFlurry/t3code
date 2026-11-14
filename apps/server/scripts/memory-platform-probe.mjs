@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Native probe of the file-system primitives claudeSharedMemory.ts relies on (wx, no-clobber hard
 // links, link/junction detection). Creates and removes only its own fresh temporary folder.
-// Usage: node apps/server/scripts/memory-platform-probe.mjs [--temp-parent=DIR] [--require-hardlinks]
-// --temp-parent must be on the volume of T3's data directory; exit 1 when a required check fails.
+// Usage: memory-platform-probe.mjs [--temp-parent=DIR] [--require-hardlinks] [--expect-case-insensitive]
+// --temp-parent on the volume of T3's data directory; exit 1 when a required check fails.
 
 import * as NodeFSP from "node:fs/promises";
 import * as NodeFS from "node:fs";
@@ -12,6 +12,9 @@ import * as NodePath from "node:path";
 const argument = (name) =>
   process.argv.find((arg) => arg.startsWith(`--${name}=`))?.slice(name.length + 3);
 const requireHardlinks = process.argv.includes("--require-hardlinks");
+// For a run meant to cover NTFS/APFS: fail unless names here fold case, so the folded branch of the
+// seed's collision tests (N6–N8) is what actually ran.
+const expectCaseInsensitive = process.argv.includes("--expect-case-insensitive");
 const parent = argument("temp-parent") ?? NodeOS.tmpdir();
 
 const report = {
@@ -217,17 +220,29 @@ try {
       ),
       listedAs: (await NodeFSP.readdir(root)).filter((name) => name.startsWith("caf")),
     };
+    if (expectCaseInsensitive && !report.checks.names.caseInsensitive) {
+      fail("names", "this volume is case-sensitive, but a case-insensitive one was expected");
+    }
   }
 
-  // 8. Modification times, which the clean-up of stale temporary files relies on.
+  // 8. Change detection: a later seed copies an account file again when its size, modification
+  // time (milliseconds) or inode changed. A rewrite of the same size must show a new signature.
+  // Nothing is removed by age; leftover temporary files stay where they are.
   {
-    const file = NodePath.join(root, `.t3-memory-${"2".repeat(36)}.tmp`);
-    await NodeFSP.writeFile(file, "LEFTOVER\n");
-    const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
-    await NodeFSP.utimes(file, old, old);
-    const mtime = (await NodeFSP.lstat(file)).mtimeMs;
-    report.checks.mtime = { setTwoHoursBack: Math.abs(mtime - old.getTime()) < 2000 };
-    if (!report.checks.mtime.setTwoHoursBack) fail("mtime", "utimes did not take effect");
+    const file = NodePath.join(root, "changing.md");
+    const signature = async () => {
+      const info = await NodeFSP.lstat(file, { bigint: true });
+      return `${info.size}:${info.mtimeMs}:${info.ino}`;
+    };
+    await NodeFSP.writeFile(file, "AAAA\n");
+    const before = await signature();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await NodeFSP.writeFile(file, "BBBB\n");
+    const after = await signature();
+    report.checks.changeDetection = { sameSizeRewriteSeen: before !== after, before, after };
+    if (before === after) {
+      fail("changeDetection", "a same-size rewrite 50 ms later kept size, mtime and inode");
+    }
   }
 } catch (error) {
   fail("probe", error?.stack ?? String(error));

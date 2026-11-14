@@ -109,6 +109,7 @@ import * as ClaudeAdapterV2 from "./ClaudeAdapterV2.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderInstallationGate from "../../provider/ProviderInstallationGate.ts";
 import { ClaudeOrchestratorReplayHarness } from "./ClaudeAdapterV2.testkit.ts";
+import { createTestLink } from "./sharedMemoryTestLinks.ts";
 import { provideDeterministicTestRuntime } from "../testkit/DeterministicRuntime.ts";
 import { runOrchestratorV2Scenario } from "../testkit/OrchestratorScenario.ts";
 import { layerProviderReplay } from "../testkit/ProviderReplayHarness.ts";
@@ -4949,7 +4950,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         yield* fileSystem.makeDirectory(linkedMemory, { recursive: true });
         yield* fileSystem.writeFileString(path.join(state, "outside.md"), memoryFile("outside"));
-        yield* fileSystem.symlink(path.join(state, "outside.md"), path.join(linkedMemory, "c.md"));
+        yield* createTestLink(
+          path.join(state, "outside.md"),
+          path.join(linkedMemory, "c.md"),
+          "file",
+        );
         // Every harness here is the same instance and thread: forget its seed, as for a new account.
         yield* fileSystem.remove(path.join(root, ".seeded-v2"), { recursive: true });
         const unseeded = yield* openedMemory({ shareProjectMemory: true, cwd: linkedProject });
@@ -4996,100 +5001,140 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ),
     );
 
+    /** An account with project memory, a shared memory root, and starts with a chosen file system. */
+    const sharedMemoryStarts = Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-memory-home-" });
+      const state = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-memory-" });
+      const root = path.join(state, "claude-memory");
+      const project = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-project-" });
+      yield* fileSystem.writeFileString(path.join(home, "settings.json"), "{}");
+      const accountMemory = path.join(
+        home,
+        "projects",
+        project.replace(/[^a-zA-Z0-9]/g, "-"),
+        "memory",
+      );
+      yield* fileSystem.makeDirectory(accountMemory, { recursive: true });
+      yield* fileSystem.writeFileString(path.join(accountMemory, "a.md"), "a\n");
+      yield* fileSystem.writeFileString(path.join(accountMemory, "MEMORY.md"), "- [a](a.md)\n");
+      const markers = path.join(root, ".seeded-v2");
+      const marked = fileSystem.readDirectory(markers, { recursive: true }).pipe(
+        Effect.map((entries) => entries.length >= 2),
+        Effect.orElseSucceed(() => false),
+      );
+      /** A start in its own scope: adapter and session are gone when it returns. */
+      const startWith = (memoryFileSystem: FileSystem.FileSystem) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const harness = yield* makeWakeHarnessWithOptions({
+              settings: { ...DEFAULT_CLAUDE_SETTINGS, homePath: home, shareProjectMemory: true },
+              sharedMemoryRoot: root,
+            });
+            yield* harness.runtime.startTurn(
+              makeClaudeTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now: yield* DateTime.now,
+                attemptId: RunAttemptId.make("attempt-shared-memory-hang"),
+                text: "Remember this.",
+                attachments: [],
+                runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+                  ...CLAUDE_TEST_RUNTIME_POLICY,
+                  cwd: project,
+                }),
+              }),
+            );
+            const settings = harness.getOpenedOptions()?.settings;
+            return {
+              directory: typeof settings === "object" ? settings.autoMemoryDirectory : undefined,
+              projectFolder: path.join(root, `project-${harness.threadId}`),
+            };
+          }),
+        ).pipe(Effect.provideService(FileSystem.FileSystem, memoryFileSystem));
+      /** A file system whose matching calls wait until `release`; `entered` says one did. */
+      const hangingWhere = (
+        where: {
+          readonly makeDirectory?: (at: string) => boolean;
+          readonly readDirectory?: (at: string) => boolean;
+          readonly link?: (to: string) => boolean;
+          readonly remove?: (at: string) => boolean;
+        },
+        entered: Deferred.Deferred<void>,
+        release: Deferred.Deferred<void>,
+      ): FileSystem.FileSystem => {
+        const hang = <A, E>(call: Effect.Effect<A, E>) =>
+          Deferred.succeed(entered, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+            Effect.andThen(call),
+          );
+        return {
+          ...fileSystem,
+          makeDirectory: (at, options) =>
+            where.makeDirectory?.(at)
+              ? hang(fileSystem.makeDirectory(at, options))
+              : fileSystem.makeDirectory(at, options),
+          readDirectory: (at, options) =>
+            where.readDirectory?.(at)
+              ? hang(fileSystem.readDirectory(at, options))
+              : fileSystem.readDirectory(at, options),
+          link: (from, to) =>
+            where.link?.(to) ? hang(fileSystem.link(from, to)) : fileSystem.link(from, to),
+          remove: (at, options) =>
+            where.remove?.(at)
+              ? hang(fileSystem.remove(at, options))
+              : fileSystem.remove(at, options),
+        };
+      };
+      return {
+        fileSystem,
+        path,
+        root,
+        accountMemory,
+        markers,
+        marked,
+        startWith,
+        hangingWhere,
+      };
+    });
+    /** Real time, not the TestClock: how long work that should already be over may still take. */
+    const realDelay = (ms: number) => Effect.sleep(ms).pipe(TestClock.withLive);
+    const sharedMemoryLayer = Layer.mergeAll(
+      IdAllocator.layer,
+      McpProviderSessions.layer,
+      NodeServices.layer,
+      NodeCrypto.layer,
+    );
+
     it.effect(
       "a hung shared memory file system call never holds a session start past its budget",
       () =>
         Effect.gen(function* () {
-          const fileSystem = yield* FileSystem.FileSystem;
-          const path = yield* Path.Path;
-          const home = yield* fileSystem.makeTempDirectoryScoped({
-            prefix: "t3-claude-memory-home-",
-          });
-          const state = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-memory-" });
-          const root = path.join(state, "claude-memory");
-          const project = yield* fileSystem.makeTempDirectoryScoped({
-            prefix: "t3-claude-project-",
-          });
-          yield* fileSystem.writeFileString(path.join(home, "settings.json"), "{}");
-          const accountMemory = path.join(
-            home,
-            "projects",
-            project.replace(/[^a-zA-Z0-9]/g, "-"),
-            "memory",
-          );
-          yield* fileSystem.makeDirectory(accountMemory, { recursive: true });
-          yield* fileSystem.writeFileString(path.join(accountMemory, "a.md"), "a\n");
-          yield* fileSystem.writeFileString(path.join(accountMemory, "MEMORY.md"), "- [a](a.md)\n");
-          const markers = path.join(root, ".seeded-v2");
-          const marked = fileSystem.readDirectory(markers, { recursive: true }).pipe(
-            Effect.map((entries) => entries.length >= 2),
-            Effect.orElseSucceed(() => false),
-          );
-          /** Real time, not the TestClock: how long the background work may take to finish. */
-          const realDelay = (ms: number) => Effect.sleep(ms).pipe(TestClock.withLive);
-          const startWith = (memoryFileSystem: FileSystem.FileSystem) =>
-            Effect.scoped(
-              Effect.gen(function* () {
-                const harness = yield* makeWakeHarnessWithOptions({
-                  settings: {
-                    ...DEFAULT_CLAUDE_SETTINGS,
-                    homePath: home,
-                    shareProjectMemory: true,
-                  },
-                  sharedMemoryRoot: root,
-                });
-                yield* harness.runtime.startTurn(
-                  makeClaudeTestTurnInput({
-                    threadId: harness.threadId,
-                    providerThread: harness.providerThread,
-                    now: yield* DateTime.now,
-                    attemptId: RunAttemptId.make("attempt-shared-memory-hang"),
-                    text: "Remember this.",
-                    attachments: [],
-                    runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
-                      ...CLAUDE_TEST_RUNTIME_POLICY,
-                      cwd: project,
-                    }),
-                  }),
-                );
-                const settings = harness.getOpenedOptions()?.settings;
-                return {
-                  directory:
-                    typeof settings === "object" ? settings.autoMemoryDirectory : undefined,
-                  projectFolder: path.join(root, `project-${harness.threadId}`),
-                };
-              }),
-            ).pipe(Effect.provideService(FileSystem.FileSystem, memoryFileSystem));
-
-          // Settings reads are not hung here: the same files are read, unbounded, by other start
-          // steps (tool search, compaction) that this feature does not own.
-          const modes = ["mkdir", "account-listing", "temporary-unlink"] as const;
-          for (const mode of modes) {
+          const {
+            fileSystem,
+            path,
+            root,
+            accountMemory,
+            markers,
+            marked,
+            startWith,
+            hangingWhere,
+          } = yield* sharedMemoryStarts;
+          const sharedFile = (at: string) => at.startsWith(root) && !at.startsWith(markers);
+          const modes = {
+            mkdir: { makeDirectory: (at: string) => at.startsWith(root) },
+            "account-listing": { readDirectory: (at: string) => at === accountMemory },
+            // After the account's files were read: a seed that went on later would copy stale ones.
+            "publication-link": { link: sharedFile },
+          } as const;
+          for (const [mode, where] of Object.entries(modes)) {
             yield* fileSystem.remove(markers, { recursive: true, force: true });
             const entered = yield* Deferred.make<void>();
             const release = yield* Deferred.make<void>();
-            // Holds the call until released; the start must not wait for it.
-            const hang = <A, E>(call: Effect.Effect<A, E>) =>
-              Deferred.succeed(entered, undefined).pipe(
-                Effect.andThen(Deferred.await(release)),
-                Effect.andThen(call),
-              );
-            const hanging: FileSystem.FileSystem = {
-              ...fileSystem,
-              makeDirectory: (at, options) =>
-                mode === "mkdir" && at.startsWith(root)
-                  ? hang(fileSystem.makeDirectory(at, options))
-                  : fileSystem.makeDirectory(at, options),
-              readDirectory: (at, options) =>
-                mode === "account-listing" && at === accountMemory
-                  ? hang(fileSystem.readDirectory(at, options))
-                  : fileSystem.readDirectory(at, options),
-              remove: (at, options) =>
-                mode === "temporary-unlink" && at.startsWith(root) && at.endsWith(".tmp")
-                  ? hang(fileSystem.remove(at, options))
-                  : fileSystem.remove(at, options),
-            };
-            const starting = yield* startWith(hanging).pipe(Effect.forkScoped);
+            const starting = yield* startWith(hangingWhere(where, entered, release)).pipe(
+              Effect.forkScoped,
+            );
             yield* Deferred.await(entered);
             yield* TestClock.adjust("29 seconds");
             assert.isUndefined(starting.pollUnsafe(), `${mode}: started before the budget`);
@@ -5104,20 +5149,38 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               // This start kept the account's own memory, not a half-seeded shared folder.
               assert.isUndefined(opened.value.directory, mode);
             }
-            // An unlink hangs only after its file was published; the other calls come before.
-            if (mode !== "temporary-unlink") {
-              assert.isFalse(yield* marked, `${mode}: seeded while the call still hung`);
-            }
-
-            // Released, the preparation finishes in the background and seeds the folder.
+            // The preparation was interrupted, not left running: released, it records nothing.
             yield* Deferred.succeed(release, undefined);
-            let done = false;
-            for (let attempt = 0; attempt < 500 && !done; attempt++) {
-              done = yield* marked;
-              if (!done) yield* realDelay(10);
-            }
-            assert.isTrue(done, `${mode}: the background seed did not finish`);
+            yield* realDelay(200);
+            assert.isFalse(
+              yield* marked,
+              `${mode}: a seed recorded itself after the start gave up`,
+            );
           }
+
+          // A temporary file that cannot be removed is left in place within its own short budget.
+          yield* fileSystem.remove(markers, { recursive: true, force: true });
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const temporary = (at: string) => at.startsWith(root) && at.endsWith(".tmp");
+          const starting = yield* startWith(
+            hangingWhere({ remove: temporary }, entered, release),
+          ).pipe(Effect.forkScoped);
+          yield* Deferred.await(entered);
+          // Each hung removal gives up after its own 2 seconds; together they stay within budget.
+          for (let elapsed = 0; elapsed < 28 && starting.pollUnsafe() === undefined; elapsed += 2) {
+            yield* TestClock.adjust("2 seconds");
+            yield* realDelay(50);
+          }
+          const opened = yield* Effect.raceFirst(
+            Fiber.join(starting).pipe(Effect.asSome),
+            realDelay(5_000).pipe(Effect.as(Option.none())),
+          );
+          assert.isTrue(Option.isSome(opened), "temporary-unlink: the start waited past budget");
+          if (Option.isSome(opened))
+            assert.equal(opened.value.directory, opened.value.projectFolder);
+          assert.isTrue(yield* marked);
+          yield* Deferred.succeed(release, undefined);
 
           // With the folder seeded, a start that hangs nowhere uses it.
           const seeded = yield* startWith(fileSystem);
@@ -5126,16 +5189,136 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             yield* fileSystem.readFileString(path.join(seeded.projectFolder, "a.md")),
             "a\n",
           );
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-              NodeCrypto.layer,
+        }).pipe(Effect.provide(sharedMemoryLayer)),
+    );
+
+    it.effect(
+      "SMS4-1: what a session on the account's own memory writes after a timeout reaches the shared folder",
+      () =>
+        Effect.gen(function* () {
+          const {
+            fileSystem,
+            path,
+            root,
+            accountMemory,
+            markers,
+            marked,
+            startWith,
+            hangingWhere,
+          } = yield* sharedMemoryStarts;
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          // The seed has read the account's files and hangs publishing the first one.
+          const starting = yield* startWith(
+            hangingWhere(
+              { link: (to) => to.startsWith(root) && !to.startsWith(markers) },
+              entered,
+              release,
             ),
-          ),
-        ),
+          ).pipe(Effect.forkScoped);
+          yield* Deferred.await(entered);
+          yield* TestClock.adjust("30100 millis");
+          assert.isUndefined((yield* Fiber.join(starting)).directory);
+
+          // That session runs on the account's own memory and writes to it.
+          yield* fileSystem.writeFileString(path.join(accountMemory, "a.md"), "NEW ACCOUNT FACT\n");
+          yield* fileSystem.writeFileString(
+            path.join(accountMemory, "MEMORY.md"),
+            "- [a](a.md)\n- [new](new.md)\nNEW INDEX FACT\n",
+          );
+          yield* fileSystem.writeFileString(path.join(accountMemory, "new.md"), "NEW FILE FACT\n");
+          yield* Deferred.succeed(release, undefined);
+          yield* realDelay(200);
+          assert.isFalse(yield* marked);
+
+          const next = yield* startWith(fileSystem);
+          assert.equal(next.directory, next.projectFolder);
+          const folder = next.projectFolder;
+          const contents = yield* Effect.forEach(
+            (yield* fileSystem.readDirectory(folder)).filter((name) => name.endsWith(".md")),
+            (name) => fileSystem.readFileString(path.join(folder, name)),
+          );
+          const everything = contents.join("\n");
+          assert.include(everything, "NEW ACCOUNT FACT");
+          assert.include(everything, "NEW INDEX FACT");
+          assert.equal(
+            yield* fileSystem.readFileString(path.join(folder, "new.md")),
+            "NEW FILE FACT\n",
+          );
+          // The account's files were only read.
+          assert.equal(
+            yield* fileSystem.readFileString(path.join(accountMemory, "a.md")),
+            "NEW ACCOUNT FACT\n",
+          );
+
+          // The same holds for writes after a completed seed, while such a session still runs.
+          yield* fileSystem.writeFileString(path.join(accountMemory, "later.md"), "LATER FACT\n");
+          yield* fileSystem.writeFileString(
+            path.join(accountMemory, "MEMORY.md"),
+            "- [a](a.md)\nFREE TEXT ONLY\n",
+          );
+          const after = yield* startWith(fileSystem);
+          assert.equal(after.directory, after.projectFolder);
+          assert.equal(
+            yield* fileSystem.readFileString(path.join(folder, "later.md")),
+            "LATER FACT\n",
+          );
+          const indexCopies = yield* Effect.forEach(
+            (yield* fileSystem.readDirectory(folder)).filter((name) =>
+              name.startsWith("MEMORY.from-"),
+            ),
+            (name) => fileSystem.readFileString(path.join(folder, name)),
+          );
+          assert.isTrue(indexCopies.some((text) => text.includes("FREE TEXT ONLY")));
+        }).pipe(Effect.provide(sharedMemoryLayer)),
+    );
+
+    it.effect(
+      "SMS4-2: closed adapter and session scopes leave no shared memory preparation running",
+      () =>
+        Effect.gen(function* () {
+          const { fileSystem, root, accountMemory, startWith } = yield* sharedMemoryStarts;
+          const captured: Fiber.Fiber<unknown, unknown>[] = [];
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const secondCaptured = yield* Deferred.make<void>();
+          const counted: FileSystem.FileSystem = {
+            ...fileSystem,
+            makeDirectory: (at, options) =>
+              at.startsWith(root)
+                ? Effect.withFiber((fiber) => {
+                    if (!captured.includes(fiber)) captured.push(fiber);
+                    return (
+                      captured.length === 2
+                        ? Deferred.succeed(secondCaptured, undefined)
+                        : Effect.void
+                    ).pipe(Effect.andThen(fileSystem.makeDirectory(at, options)));
+                  })
+                : fileSystem.makeDirectory(at, options),
+            readDirectory: (at, options) =>
+              at === accountMemory
+                ? Deferred.succeed(entered, undefined).pipe(
+                    Effect.andThen(Deferred.await(release)),
+                    Effect.andThen(fileSystem.readDirectory(at, options)),
+                  )
+                : fileSystem.readDirectory(at, options),
+          };
+          const first = yield* startWith(counted).pipe(Effect.forkScoped);
+          yield* Deferred.await(entered);
+          yield* TestClock.adjust("31 seconds");
+          assert.isUndefined((yield* Fiber.join(first)).directory);
+          // The first adapter's scope is closed now; a second adapter starts the same project.
+          const second = yield* startWith(counted).pipe(Effect.forkScoped);
+          yield* Deferred.await(secondCaptured);
+          yield* TestClock.adjust("31 seconds");
+          assert.isUndefined((yield* Fiber.join(second)).directory);
+          const pending = captured.filter((fiber) => fiber.pollUnsafe() === undefined).length;
+          // Released and joined before asserting, so this test leaves nothing running either way.
+          yield* Deferred.succeed(release, undefined);
+          for (const fiber of captured) yield* Fiber.await(fiber);
+          assert.equal(captured.length, 2);
+          assert.equal(pending, 0, "a closed scope kept its preparation running");
+        }).pipe(Effect.provide(sharedMemoryLayer)),
     );
   });
 

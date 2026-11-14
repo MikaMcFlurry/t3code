@@ -115,8 +115,7 @@ describe("seedSharedClaudeMemory", () => {
         assert.include(note, "\n- [B](b.md) — B\n");
         assert.notInclude(note, "a.md");
 
-        // A file the account adds later is not copied again; the shared folder is the memory now.
-        yield* write(gmail, "late.md", memoryFile("late", "Late", "late"));
+        // Nothing changed: the account is not copied again.
         assert.isFalse(yield* seed(gmail, "gmail"));
         assert.deepEqual(yield* files, [
           "MEMORY.from-work.md",
@@ -125,6 +124,14 @@ describe("seedSharedClaudeMemory", () => {
           "a.md",
           "b.md",
         ]);
+        // A file the account adds later (a session that kept the account's own memory) arrives at
+        // the next start, listed in a note of its own; what was there stays as it was.
+        yield* write(gmail, "late.md", memoryFile("late", "Late", "late"));
+        assert.isTrue(yield* seed(gmail, "gmail"));
+        assert.equal(yield* read(shared, "late.md"), memoryFile("late", "Late", "late"));
+        assert.include(yield* read(shared, "SEEDED-FILES-2.md"), "](late.md)");
+        assert.equal(yield* read(shared, "MEMORY.md"), "- [A](a.md) — A\n");
+        assert.isFalse(yield* seed(gmail, "gmail"));
         // Work's own index differs from the shared one, so it is kept whole and listed.
         assert.equal(
           yield* read(shared, "MEMORY.from-work.md"),

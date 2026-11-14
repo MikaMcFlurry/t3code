@@ -161,6 +161,7 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import type * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
@@ -356,8 +357,8 @@ const CLAUDE_SCRIPT_EXTENSIONS = [".js", ".mjs", ".tsx", ".ts", ".jsx"];
 // The SDK has no control-request deadline; the CLI waits up to 30 s per MCP server.
 const CLAUDE_MCP_REGISTRATION_TIMEOUT = "90 seconds";
 const CLAUDE_BOOT_TIMEOUT = "5 minutes";
-// How long a session start waits for the shared memory folder to be ready; past it the session
-// starts with the account's own memory and the preparation continues in the background.
+// How long a session start may spend preparing the shared memory folder; past it the preparation
+// is interrupted and the session starts with the account's own memory. The next start continues.
 const CLAUDE_SHARED_MEMORY_SEED_TIMEOUT = "30 seconds";
 // Claude can consume a subagent result before the launching turn ends, leaving
 // its notification with no native wake turn to answer the continuation.
@@ -5489,12 +5490,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
   });
 
   // An autoMemoryDirectory the user set wins; Claude Code ignores one in checked-in project settings.
-  // Preparing the shared folder runs detached; a start waits for it at most the seed timeout, then
-  // keeps the account's own memory while the work finishes (or fails, logged) in the background.
-  // One preparation per folder and cwd at a time; later starts wait on the same one.
-  const sharedMemoryPreparations = new Map<string, Deferred.Deferred<boolean>>();
+  // The shared folder is prepared within the session start, in the session's scope, for at most
+  // the seed timeout. Past it the preparation is interrupted, records nothing, and the session keeps
+  // the account's own memory; the next start seeds on additively, including what that session wrote.
   const prepareSharedMemoryDirectory = Effect.fn("ClaudeAdapterV2.prepareSharedMemoryDirectory")(
-    function* (cwd: string | null, directory: string) {
+    function* (cwd: string | null, directory: string, abandoned: () => boolean) {
       const projectSettingsFile = cwd === null ? null : path.join(cwd, ".claude", "settings.json");
       for (const settingsFile of yield* settingsFilesByPrecedence(cwd)) {
         if (settingsFile === projectSettingsFile) continue;
@@ -5532,6 +5532,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           sharedDirectory: directory,
           sourceDirectories: directories,
           account: adapterOptions.instanceId,
+          abandoned,
         });
         return true;
       }).pipe(
@@ -5549,48 +5550,40 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
       cwd: string | null,
       projectId: ProjectId,
       launchArgSettings: ClaudeSdkSettings | undefined,
+      sessionScope: Scope.Scope,
     ) {
       const root = adapterOptions.sharedMemoryRoot;
       if (!adapterOptions.settings.shareProjectMemory || root === undefined) return undefined;
       if (setsAutoMemoryDirectory(launchArgSettings)) return undefined;
       const directory = path.join(root, projectId.replace(/[^a-zA-Z0-9_-]/g, "-"));
-      const key = `${directory}\u0000${cwd ?? ""}`;
-      let preparation = sharedMemoryPreparations.get(key);
-      if (preparation === undefined) {
-        const started = Deferred.makeUnsafe<boolean>();
-        preparation = started;
-        sharedMemoryPreparations.set(key, started);
-        yield* prepareSharedMemoryDirectory(cwd, directory).pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("Claude shared project memory could not be prepared", {
-              directory,
-              cause,
-            }).pipe(Effect.as(false)),
-          ),
-          Effect.flatMap((ready) => Deferred.succeed(started, ready)),
-          // Also on interruption: no waiter is left without an answer.
-          Effect.ensuring(
-            Effect.suspend(() => {
-              if (sharedMemoryPreparations.get(key) === started) {
-                sharedMemoryPreparations.delete(key);
-              }
-              return Deferred.succeed(started, false);
-            }),
-          ),
-          Effect.forkDetach,
-        );
-      }
-      const ready = yield* Deferred.await(preparation).pipe(
+      // Set when the start stops waiting: a file system call that returns only afterwards can no
+      // longer record the seed as done.
+      let abandoned = false;
+      const preparation = yield* prepareSharedMemoryDirectory(cwd, directory, () => abandoned).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Claude shared project memory could not be prepared", {
+            directory,
+            cause,
+          }).pipe(Effect.as(false)),
+        ),
+        Effect.forkIn(sessionScope),
+      );
+      // Waiting on the fiber, not running the work inline, so a call that cannot be interrupted
+      // (a hung file system call) never holds the start past the budget.
+      const ready = yield* Fiber.await(preparation).pipe(
         Effect.timeoutOption(CLAUDE_SHARED_MEMORY_SEED_TIMEOUT),
       );
       if (Option.isNone(ready)) {
+        abandoned = true;
+        // Interrupted without waiting for it; the session's scope still owns the fiber.
+        yield* Fiber.interrupt(preparation).pipe(Effect.forkIn(sessionScope));
         yield* Effect.logWarning(
-          "Claude shared project memory is still being prepared; this session keeps the account's own memory",
+          "Claude shared project memory took too long to prepare; this session keeps the account's own memory",
           { directory },
         );
         return undefined;
       }
-      return ready.value ? directory : undefined;
+      return Exit.isSuccess(ready.value) && ready.value.value ? directory : undefined;
     },
   );
 
@@ -12250,6 +12243,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             turnInput.runtimePolicy.cwd,
             turnInput.appThread.projectId,
             launchArgSettings,
+            sessionScope,
           );
           const queryOptions = makeClaudeQueryOptions({
             modelSelection: turnInput.modelSelection,

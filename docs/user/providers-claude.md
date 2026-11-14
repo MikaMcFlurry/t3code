@@ -50,7 +50,9 @@ project into the shared folder. The copy only adds files: the account's own dire
 read and stays as it was, so turning the option off goes back to it, and nothing already in the
 shared folder is replaced or changed, `MEMORY.md` included. A file the shared folder already holds
 in a different version is kept beside it as `<name>.conflict-<instance>.md`. Identical files are
-skipped, and subfolders are copied with their files.
+skipped, and subfolders are copied with their files. Later session starts copy, the same way,
+whatever the account's own memory gained or changed since (for example from a session that kept
+using it); a file removed from the shared folder comes back only if the account's own copy changed.
 
 If the shared folder has no `MEMORY.md` yet, the copy creates one from the account's own
 `MEMORY.md`, unchanged, followed by lines for copied files and conflicts it does not list. If it
@@ -65,13 +67,14 @@ Files are published by hard link so that a file another session writes at the sa
 never replaced. On a file system without hard links (FAT32, exFAT, some network or sync folders)
 nothing is copied and sessions keep the account's own memory. Until every file has been copied and
 checked, sessions of that account keep using the account's own memory, and the next session start
-tries again; the server log says why. A session start waits at most 30 seconds for the shared
-folder: if the copy takes longer, for example on a slow or hanging disk, that session keeps the
-account's own memory and the copy finishes in the background. A shared folder, a file in it, or a
+tries again; the server log says why. A session start spends at most 30 seconds on the shared
+folder: if the copy takes longer, for example on a slow or hanging disk, it is stopped, that
+session keeps the account's own memory, and the next session start continues the copy, including
+what that session wrote meanwhile. Files already copied stay; nothing half-written is published. A shared folder, a file in it, or a
 folder for T3's seed records that links into an account's own memory is never written through.
 The copy removes nothing from the shared folder except its own temporary files
-(`.t3-memory-<id>.tmp`), and only the very file it created; one left behind by a crash stays and
-can be deleted by hand.
+(`.t3-memory-<id>.tmp`), and only the very file it created; one left behind by a crash or a stopped
+copy stays and can be deleted by hand.
 
 Two sessions open on the same project at once share one `MEMORY.md`, so one can drop the other's
 new index line, just as two sessions of one account can.

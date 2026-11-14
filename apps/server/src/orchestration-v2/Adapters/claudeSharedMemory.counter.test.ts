@@ -11,6 +11,7 @@ import * as PlatformError from "effect/PlatformError";
 import type * as Scope from "effect/Scope";
 
 import { claudeSharedMemoryMarker, seedSharedClaudeMemory } from "./claudeSharedMemory.ts";
+import { createTestLink, folderLinkKinds } from "./sharedMemoryTestLinks.ts";
 
 /**
  * Counter-cases from the independent reviews of the shared memory seed: R1–R15 from the first,
@@ -85,7 +86,7 @@ const setup = Effect.gen(function* () {
   const marker = claudeSharedMemoryMarker(path, shared, "work");
   const input = { sharedDirectory: shared, sourceDirectories: [account], account: "work" };
   const seed = (
-    overrides: Partial<typeof input> = {},
+    overrides: Partial<typeof input & { abandoned: () => boolean }> = {},
     fs: { fileSystem: FileSystem.FileSystem; path: Path.Path } = memoryFs,
   ) => Effect.exit(seedSharedClaudeMemory(fs, { ...input, ...overrides }));
   const write = (file: string, text: string) => fileSystem.writeFileString(file, text);
@@ -516,61 +517,75 @@ describe("SMS3-2: an account MEMORY.md is never lost, free notes included (P2)",
 });
 
 describe("SMS2-3: metadata paths get the same alias checks as memory files (P1)", () => {
-  it.effect("S4/S5 a marker folder linked to an account folder is never written through", () =>
-    run(
-      Effect.gen(function* () {
-        const { fileSystem, path, memoryRoot, shared, account, marker, seed, write, tree, names } =
-          yield* setup;
-        yield* fileSystem.makeDirectory(path.join(account, "project-1"));
-        yield* write(path.join(account, "topic.md"), memory());
-        yield* fileSystem.symlink(account, path.join(memoryRoot, ".seeded-v2"));
-        const before = yield* tree(account);
-        const history = path.join(account, "project-1", "work");
-        let raced = false;
-        // As in S5: an account file appears at the marker's name after the first look.
-        const racing: FileSystem.FileSystem = {
-          ...fileSystem,
-          makeDirectory: (directory, options) =>
-            fileSystem.makeDirectory(directory, options).pipe(
-              Effect.tap(() =>
-                raced || directory !== path.dirname(marker)
-                  ? Effect.void
-                  : Effect.sync(() => {
-                      raced = true;
-                    }).pipe(Effect.andThen(write(history, "ACCOUNT HISTORY\n"))),
+  it.effect.each(folderLinkKinds)(
+    "S4/S5 a marker folder linked to an account folder is never written through (%s)",
+    (kind) =>
+      run(
+        Effect.gen(function* () {
+          const {
+            fileSystem,
+            path,
+            memoryRoot,
+            shared,
+            account,
+            marker,
+            seed,
+            write,
+            tree,
+            names,
+          } = yield* setup;
+          yield* fileSystem.makeDirectory(path.join(account, "project-1"));
+          yield* write(path.join(account, "topic.md"), memory());
+          yield* createTestLink(account, path.join(memoryRoot, ".seeded-v2"), kind);
+          const before = yield* tree(account);
+          const history = path.join(account, "project-1", "work");
+          let raced = false;
+          // As in S5: an account file appears at the marker's name after the first look.
+          const racing: FileSystem.FileSystem = {
+            ...fileSystem,
+            makeDirectory: (directory, options) =>
+              fileSystem.makeDirectory(directory, options).pipe(
+                Effect.tap(() =>
+                  raced || directory !== path.dirname(marker)
+                    ? Effect.void
+                    : Effect.sync(() => {
+                        raced = true;
+                      }).pipe(Effect.andThen(write(history, "ACCOUNT HISTORY\n"))),
+                ),
               ),
-            ),
-        };
-        const result = yield* seed({}, { fileSystem: racing, path });
-        assert.isTrue(Exit.isFailure(result));
-        assert.deepEqual(
-          yield* tree(account),
-          raced
-            ? {
-                ...before,
-                "project-1/work": Buffer.from("ACCOUNT HISTORY\n").toString("base64"),
-              }
-            : before,
-        );
-        assert.deepEqual(yield* names(shared), []);
-      }),
-    ),
+          };
+          const result = yield* seed({}, { fileSystem: racing, path });
+          assert.isTrue(Exit.isFailure(result));
+          assert.deepEqual(
+            yield* tree(account),
+            raced
+              ? {
+                  ...before,
+                  "project-1/work": Buffer.from("ACCOUNT HISTORY\n").toString("base64"),
+                }
+              : before,
+          );
+          assert.deepEqual(yield* names(shared), []);
+        }),
+      ),
   );
 
-  it.effect("S4 a project marker folder linked to an account folder is never written through", () =>
-    run(
-      Effect.gen(function* () {
-        const { fileSystem, path, memoryRoot, account, seed, write, tree } = yield* setup;
-        yield* write(path.join(account, "topic.md"), memory());
-        yield* write(path.join(account, "work"), "ACCOUNT HISTORY\n");
-        yield* fileSystem.makeDirectory(path.join(memoryRoot, ".seeded-v2"));
-        yield* fileSystem.symlink(account, path.join(memoryRoot, ".seeded-v2", "project-1"));
-        const before = yield* tree(account);
-        const result = yield* seed();
-        assert.isTrue(Exit.isFailure(result));
-        assert.deepEqual(yield* tree(account), before);
-      }),
-    ),
+  it.effect.each(folderLinkKinds)(
+    "S4 a project marker folder linked to an account folder is never written through (%s)",
+    (kind) =>
+      run(
+        Effect.gen(function* () {
+          const { fileSystem, path, memoryRoot, account, seed, write, tree } = yield* setup;
+          yield* write(path.join(account, "topic.md"), memory());
+          yield* write(path.join(account, "work"), "ACCOUNT HISTORY\n");
+          yield* fileSystem.makeDirectory(path.join(memoryRoot, ".seeded-v2"));
+          yield* createTestLink(account, path.join(memoryRoot, ".seeded-v2", "project-1"), kind);
+          const before = yield* tree(account);
+          const result = yield* seed();
+          assert.isTrue(Exit.isFailure(result));
+          assert.deepEqual(yield* tree(account), before);
+        }),
+      ),
   );
 
   it.effect("a memory root inside an account folder is never written", () =>
@@ -613,7 +628,7 @@ describe("SMS2-4: markers are versioned; markers of the earlier seed are ignored
     ),
   );
 
-  it.effect("a v2 marker skips the seed without reading the account", () =>
+  it.effect("a marker skips an unchanged account without reading its files", () =>
     run(
       Effect.gen(function* () {
         const { fileSystem, path, shared, account, memoryFs, seed, write, names } = yield* setup;
@@ -623,15 +638,36 @@ describe("SMS2-4: markers are versioned; markers of the earlier seed are ignored
         let accountReads = 0;
         const counted: FileSystem.FileSystem = {
           ...fileSystem,
-          readDirectory: (directory, options) => {
-            if (directory.startsWith(account)) accountReads++;
-            return fileSystem.readDirectory(directory, options);
+          readFile: (file) => {
+            if (file.startsWith(account)) accountReads++;
+            return fileSystem.readFile(file);
+          },
+          open: (file, options) => {
+            if (file.startsWith(account)) accountReads++;
+            return fileSystem.open(file, options);
           },
         };
         const again = yield* seed({}, { ...memoryFs, fileSystem: counted });
         assert.isTrue(Exit.isSuccess(again) && again.value === false);
         assert.equal(accountReads, 0);
+        // A file removed from the shared folder does not come back while the account's is unchanged.
         assert.deepEqual(yield* names(shared), ["MEMORY.md"]);
+      }),
+    ),
+  );
+
+  it.effect("a marker of the earlier format leads to one more additive seed", () =>
+    run(
+      Effect.gen(function* () {
+        const { fileSystem, path, shared, account, marker, seed, write, read } = yield* setup;
+        yield* write(path.join(account, "topic.md"), memory());
+        yield* fileSystem.makeDirectory(path.dirname(marker), { recursive: true });
+        yield* write(marker, "seeded v2\n");
+        assert.isTrue(Exit.isSuccess(yield* seed()));
+        assert.equal(yield* read(path.join(shared, "topic.md")), memory());
+        assert.isTrue((yield* read(marker)).startsWith("seeded v2\n{"));
+        const again = yield* seed();
+        assert.isTrue(Exit.isSuccess(again) && again.value === false);
       }),
     ),
   );
@@ -782,7 +818,7 @@ describe("SMS2-5/SMS3-1: only a temporary file this run created is ever removed 
         yield* fileSystem.link(elsewhere, hardLinked);
         yield* fileSystem.utimes(hardLinked, old, old);
         const symlinked = path.join(shared, ".t3-memory-66666666-7777-4888-8999-aaaaaaaaaaaa.tmp");
-        yield* fileSystem.symlink(elsewhere, symlinked);
+        yield* createTestLink(elsewhere, symlinked, "file");
 
         assert.isTrue(Exit.isSuccess(yield* seed()));
         assert.isTrue(yield* exists(marker));
@@ -805,7 +841,7 @@ describe("shared memory: aliases never let a write reach an account's files (R1,
         const accountIndex = path.join(account, "MEMORY.md");
         yield* write(accountIndex, "# Account-only memory\n");
         yield* write(path.join(account, "topic.md"), memory());
-        yield* fileSystem.symlink(accountIndex, path.join(shared, "MEMORY.md"));
+        yield* createTestLink(accountIndex, path.join(shared, "MEMORY.md"), "file");
         assert.isTrue(Exit.isSuccess(yield* seed()));
         assert.equal(yield* read(accountIndex), "# Account-only memory\n");
         assert.equal(
@@ -833,23 +869,25 @@ describe("shared memory: aliases never let a write reach an account's files (R1,
     ),
   );
 
-  it.effect("a shared folder that is a symlink to the account folder is never written", () =>
-    run(
-      Effect.gen(function* () {
-        const { fileSystem, path, memoryRoot, account, seed, write, tree } = yield* setup;
-        const linked = path.join(memoryRoot, "linked-shared");
-        yield* fileSystem.symlink(account, linked);
-        yield* write(path.join(account, "MEMORY.md"), "# Account\n");
-        yield* write(path.join(account, "topic.md"), memory());
-        const before = yield* tree(account);
-        const result = yield* seed({
-          sharedDirectory: linked,
-          sourceDirectories: [path.join(memoryRoot, "none")],
-        });
-        assert.deepEqual(yield* tree(account), before);
-        assert.isTrue(Exit.isFailure(result));
-      }),
-    ),
+  it.effect.each(folderLinkKinds)(
+    "a shared folder that is a symlink to the account folder is never written (%s)",
+    (kind) =>
+      run(
+        Effect.gen(function* () {
+          const { path, memoryRoot, account, seed, write, tree } = yield* setup;
+          const linked = path.join(memoryRoot, "linked-shared");
+          yield* createTestLink(account, linked, kind);
+          yield* write(path.join(account, "MEMORY.md"), "# Account\n");
+          yield* write(path.join(account, "topic.md"), memory());
+          const before = yield* tree(account);
+          const result = yield* seed({
+            sharedDirectory: linked,
+            sourceDirectories: [path.join(memoryRoot, "none")],
+          });
+          assert.deepEqual(yield* tree(account), before);
+          assert.isTrue(Exit.isFailure(result));
+        }),
+      ),
   );
 
   it.effect("a shared folder inside an account folder is never written", () =>
@@ -867,33 +905,39 @@ describe("shared memory: aliases never let a write reach an account's files (R1,
     ),
   );
 
-  it.effect("a shared subfolder symlinked into an account folder receives no copies", () =>
-    run(
-      Effect.gen(function* () {
-        const { fileSystem, path, root, shared, account, marker, seed, write, exists, tree } =
-          yield* setup;
-        const victim = path.join(root, "victim-account");
-        yield* fileSystem.makeDirectory(victim);
-        yield* write(path.join(victim, "keep.md"), memory("keep"));
-        yield* fileSystem.symlink(victim, path.join(shared, "notes"));
-        yield* fileSystem.makeDirectory(path.join(account, "notes"));
-        yield* write(path.join(account, "notes", "topic.md"), memory());
-        const before = yield* tree(victim);
-        const result = yield* seed();
-        assert.deepEqual(yield* tree(victim), before);
-        assert.isTrue(Exit.isFailure(result));
-        assert.isFalse(yield* exists(marker));
-      }),
-    ),
+  it.effect.each(folderLinkKinds)(
+    "a shared subfolder symlinked into an account folder receives no copies (%s)",
+    (kind) =>
+      run(
+        Effect.gen(function* () {
+          const { fileSystem, path, root, shared, account, marker, seed, write, exists, tree } =
+            yield* setup;
+          const victim = path.join(root, "victim-account");
+          yield* fileSystem.makeDirectory(victim);
+          yield* write(path.join(victim, "keep.md"), memory("keep"));
+          yield* createTestLink(victim, path.join(shared, "notes"), kind);
+          yield* fileSystem.makeDirectory(path.join(account, "notes"));
+          yield* write(path.join(account, "notes", "topic.md"), memory());
+          const before = yield* tree(victim);
+          const result = yield* seed();
+          assert.deepEqual(yield* tree(victim), before);
+          assert.isTrue(Exit.isFailure(result));
+          assert.isFalse(yield* exists(marker));
+        }),
+      ),
   );
 
   it.effect("R8 a memory file symlinked into the account folder is never replaced or written", () =>
     run(
       Effect.gen(function* () {
-        const { fileSystem, path, shared, account, seed, write, read } = yield* setup;
+        const { path, shared, account, seed, write, read } = yield* setup;
         yield* write(path.join(account, "other.md"), memory("account"));
         yield* write(path.join(account, "topic.md"), memory("new"));
-        yield* fileSystem.symlink(path.join(account, "other.md"), path.join(shared, "topic.md"));
+        yield* createTestLink(
+          path.join(account, "other.md"),
+          path.join(shared, "topic.md"),
+          "file",
+        );
         assert.isTrue(Exit.isSuccess(yield* seed()));
         assert.equal(yield* read(path.join(account, "other.md")), memory("account"));
         assert.equal(yield* read(path.join(shared, "topic.conflict-work.md")), memory("new"));
@@ -1180,10 +1224,13 @@ describe("shared memory: folders migrate with their index links (R5)", () => {
   it.effect("a symlink in the account folder pointing outside it stops the seed", () =>
     run(
       Effect.gen(function* () {
-        const { fileSystem, path, root, shared, account, marker, seed, write, exists, names } =
-          yield* setup;
+        const { path, root, shared, account, marker, seed, write, exists, names } = yield* setup;
         yield* write(path.join(root, "outside.md"), memory("outside"));
-        yield* fileSystem.symlink(path.join(root, "outside.md"), path.join(account, "topic.md"));
+        yield* createTestLink(
+          path.join(root, "outside.md"),
+          path.join(account, "topic.md"),
+          "file",
+        );
         const result = yield* seed();
         assert.isTrue(Exit.isFailure(result));
         assert.isFalse(yield* exists(marker));
@@ -1300,5 +1347,306 @@ describe("shared memory: bounded start-up work (R15)", () => {
         assert.isTrue(copied.length === big.length && copied.every((byte) => byte === 0xa5));
       }),
     ),
+  );
+});
+
+describe("SMS4-1: what an account writes during or after a seed reaches the shared folder (P2)", () => {
+  /** Every Markdown file of the shared folder, joined: where a fact is does not matter here. */
+  const sharedText = (
+    fileSystem: FileSystem.FileSystem,
+    path: Path.Path,
+    shared: string,
+  ): Effect.Effect<string, PlatformError.PlatformError> =>
+    Effect.gen(function* () {
+      const texts: string[] = [];
+      for (const name of yield* fileSystem.readDirectory(shared)) {
+        if (name.endsWith(".md"))
+          texts.push(yield* fileSystem.readFileString(path.join(shared, name)));
+      }
+      return texts.join("\n");
+    });
+
+  it.effect("N10 account writes while the seed publishes are copied before its marker", () =>
+    run(
+      Effect.gen(function* () {
+        const { fileSystem, path, shared, account, marker, memoryFs, seed, write, read, exists } =
+          yield* setup;
+        yield* write(path.join(account, "a.md"), "OLD");
+        yield* write(path.join(account, "MEMORY.md"), "OLD INDEX");
+        let wrote = false;
+        // The seed has read the account and publishes a.md; the account session writes meanwhile.
+        const racing: FileSystem.FileSystem = {
+          ...fileSystem,
+          link: (from, to) =>
+            (to === path.join(shared, "a.md") && !wrote
+              ? Effect.gen(function* () {
+                  wrote = true;
+                  yield* write(path.join(account, "a.md"), "NEW ACCOUNT FACT");
+                  yield* write(path.join(account, "MEMORY.md"), "NEW INDEX FACT");
+                  yield* write(path.join(account, "new.md"), "NEW FILE FACT");
+                })
+              : Effect.void
+            ).pipe(Effect.andThen(fileSystem.link(from, to))),
+        };
+        assert.isTrue(Exit.isSuccess(yield* seed({}, { ...memoryFs, fileSystem: racing })));
+        assert.isTrue(wrote);
+        assert.isTrue(yield* exists(marker));
+        const text = yield* sharedText(fileSystem, path, shared);
+        assert.include(text, "NEW ACCOUNT FACT");
+        assert.include(text, "NEW INDEX FACT");
+        assert.equal(yield* read(path.join(shared, "new.md")), "NEW FILE FACT");
+        // The first version stays as well; the account is unchanged by the seed.
+        assert.equal(yield* read(path.join(shared, "a.md")), "OLD");
+        assert.equal(yield* read(path.join(account, "a.md")), "NEW ACCOUNT FACT");
+      }),
+    ),
+  );
+
+  it.effect(
+    "account writes after the marker (a session still on its own memory) arrive next time",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const { path, shared, account, seed, write, read } = yield* setup;
+          yield* write(path.join(account, "a.md"), "a\n");
+          yield* write(path.join(account, "MEMORY.md"), "- [a](a.md)\n");
+          assert.isTrue(Exit.isSuccess(yield* seed()));
+          yield* write(path.join(account, "a.md"), "CHANGED FACT\n");
+          yield* write(path.join(account, "new.md"), "NEW FILE FACT\n");
+          yield* write(path.join(account, "MEMORY.md"), "- [a](a.md)\nFREE TEXT ONLY\n");
+          const again = yield* seed();
+          assert.isTrue(Exit.isSuccess(again) && again.value === true);
+          assert.equal(yield* read(path.join(shared, "a.md")), "a\n");
+          assert.equal(yield* read(path.join(shared, "a.conflict-work.md")), "CHANGED FACT\n");
+          assert.equal(yield* read(path.join(shared, "new.md")), "NEW FILE FACT\n");
+          assert.equal(yield* read(path.join(shared, "MEMORY.md")), "- [a](a.md)\n");
+          assert.equal(
+            yield* read(path.join(shared, "MEMORY.from-work.md")),
+            "- [a](a.md)\nFREE TEXT ONLY\n",
+          );
+          const third = yield* seed();
+          assert.isTrue(Exit.isSuccess(third) && third.value === false);
+        }),
+      ),
+  );
+
+  it.effect("an account that keeps changing during every pass leaves no marker", () =>
+    run(
+      Effect.gen(function* () {
+        const { fileSystem, path, account, marker, memoryFs, seed, write, exists } = yield* setup;
+        yield* write(path.join(account, "a.md"), "a\n");
+        let writes = 0;
+        const busy: FileSystem.FileSystem = {
+          ...fileSystem,
+          link: (from, to) =>
+            write(path.join(account, `busy-${++writes}.md`), `busy ${writes}\n`).pipe(
+              Effect.andThen(fileSystem.link(from, to)),
+            ),
+        };
+        const result = yield* seed({}, { ...memoryFs, fileSystem: busy });
+        assert.isTrue(Exit.isFailure(result));
+        assert.isFalse(yield* exists(marker));
+        // Quiet again, the next start finishes.
+        assert.isTrue(Exit.isSuccess(yield* seed()));
+        assert.isTrue(yield* exists(marker));
+      }),
+    ),
+  );
+});
+
+describe("SMS4-1/2: a seed the session start gave up on records nothing (P2)", () => {
+  it.effect("an abandoned seed keeps what it published but writes no marker", () =>
+    run(
+      Effect.gen(function* () {
+        const { path, shared, account, marker, seed, write, read, exists } = yield* setup;
+        yield* write(path.join(account, "a.md"), "a\n");
+        const result = yield* seed({ abandoned: () => true });
+        assert.isTrue(Exit.isFailure(result));
+        assert.isFalse(yield* exists(marker));
+        assert.equal(yield* read(path.join(shared, "a.md")), "a\n");
+        assert.isTrue(Exit.isSuccess(yield* seed()));
+        assert.isTrue(yield* exists(marker));
+      }),
+    ),
+  );
+
+  it.effect("a marker call that returns after the start gave up leaves no marker", () =>
+    run(
+      Effect.gen(function* () {
+        const { fileSystem, path, account, marker, memoryFs, seed, write, exists } = yield* setup;
+        yield* write(path.join(account, "a.md"), "a\n");
+        let abandoned = false;
+        // The start gives up while the call that makes the marker visible is still running.
+        const late: FileSystem.FileSystem = {
+          ...fileSystem,
+          link: (from, to) =>
+            fileSystem.link(from, to).pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  if (to === marker) abandoned = true;
+                }),
+              ),
+            ),
+        };
+        const result = yield* seed(
+          { abandoned: () => abandoned },
+          { ...memoryFs, fileSystem: late },
+        );
+        assert.isTrue(abandoned);
+        assert.isTrue(Exit.isFailure(result));
+        assert.isFalse(yield* exists(marker));
+        // No temporary file of the marker stays behind either.
+        const leftovers = (yield* fileSystem.readDirectory(path.dirname(marker))).filter((name) =>
+          name.startsWith(".t3-memory-"),
+        );
+        assert.deepEqual(leftovers, []);
+      }),
+    ),
+  );
+});
+
+/**
+ * Case-insensitive volumes (NTFS, APFS by default): an existing name that differs only in case is
+ * taken, and the seed must find another name for its copy. On a case-sensitive volume both names
+ * are distinct and both versions are kept as well. Set T3_EXPECT_CASE_INSENSITIVE=1 to require the
+ * folded branch, so a native Windows or macOS run proves it.
+ */
+describe("SMS4-3: case-folded name collisions keep both versions", () => {
+  const requireFolded = process.env.T3_EXPECT_CASE_INSENSITIVE === "1";
+  const folds = (fileSystem: FileSystem.FileSystem, existing: string, other: string) =>
+    Effect.gen(function* () {
+      const folded = yield* fileSystem.exists(other);
+      if (requireFolded) assert.isTrue(folded, `${existing} does not fold to ${other} here`);
+      return folded;
+    });
+
+  it.effect("N6 Foo.md in the shared folder and foo.md in the account", () =>
+    run(
+      Effect.gen(function* () {
+        const { fileSystem, path, shared, account, seed, write, read } = yield* setup;
+        yield* write(path.join(shared, "Foo.md"), "EXISTING");
+        yield* write(path.join(account, "foo.md"), "ACCOUNT");
+        const folded = yield* folds(fileSystem, "Foo.md", path.join(shared, "foo.md"));
+        assert.isTrue(Exit.isSuccess(yield* seed()));
+        assert.equal(yield* read(path.join(shared, "Foo.md")), "EXISTING");
+        assert.equal(
+          yield* read(path.join(shared, folded ? "foo.conflict-work.md" : "foo.md")),
+          "ACCOUNT",
+        );
+      }),
+    ),
+  );
+
+  it.effect("N7 an existing memory.md is kept and no second MEMORY.md appears", () =>
+    run(
+      Effect.gen(function* () {
+        const { fileSystem, path, shared, account, seed, write, read, names } = yield* setup;
+        yield* write(path.join(shared, "memory.md"), "SHARED LOWERCASE");
+        yield* write(path.join(account, "topic.md"), memory());
+        const folded = yield* folds(fileSystem, "memory.md", path.join(shared, "MEMORY.md"));
+        assert.isTrue(Exit.isSuccess(yield* seed()));
+        assert.equal(yield* read(path.join(shared, "memory.md")), "SHARED LOWERCASE");
+        const listed = yield* names(shared);
+        if (folded) {
+          assert.isFalse(listed.includes("MEMORY.md"));
+          assert.include(yield* read(path.join(shared, "SEEDED-FILES.md")), "](topic.md)");
+        }
+        assert.equal(yield* read(path.join(shared, "topic.md")), memory());
+      }),
+    ),
+  );
+
+  it.effect(
+    "N8 an existing memory.from-work.md keeps its bytes; the account index goes elsewhere",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const { fileSystem, path, shared, account, seed, write, read } = yield* setup;
+          yield* write(path.join(shared, "MEMORY.md"), "SHARED");
+          yield* write(path.join(shared, "memory.from-work.md"), "EXISTING");
+          yield* write(path.join(account, "MEMORY.md"), "ACCOUNT");
+          const folded = yield* folds(
+            fileSystem,
+            "memory.from-work.md",
+            path.join(shared, "MEMORY.from-work.md"),
+          );
+          assert.isTrue(Exit.isSuccess(yield* seed()));
+          assert.equal(yield* read(path.join(shared, "memory.from-work.md")), "EXISTING");
+          assert.equal(
+            yield* read(
+              path.join(shared, folded ? "MEMORY.from-work-2.md" : "MEMORY.from-work.md"),
+            ),
+            "ACCOUNT",
+          );
+        }),
+      ),
+  );
+});
+
+/**
+ * Device and inode numbers past 2^53 (as NTFS file ids are) are compared as BigInt: only a file with
+ * exactly the identity the seed created is removed; a neighbouring, zero or missing one never is.
+ */
+describe("SMS4-3: temporary file identity is compared as BigInt", () => {
+  const huge = 9007199254740992n;
+  it.effect.each(["same", "neighbour", "zero", "missing"] as const)(
+    "N9 a temporary file with %s identity",
+    (identity) =>
+      run(
+        Effect.gen(function* () {
+          const { fileSystem, path, shared, account, memoryFs, seed, write } = yield* setup;
+          yield* write(path.join(account, "topic.md"), memory());
+          let removed = 0;
+          const relabelled: FileSystem.FileSystem = {
+            ...fileSystem,
+            open: (file, options) =>
+              options?.flag !== "wx"
+                ? fileSystem.open(file, options)
+                : Effect.map(
+                    fileSystem.open(file, options),
+                    (handle) =>
+                      Object.defineProperty(Object.create(handle), "stat", {
+                        value: Effect.map(handle.stat, (info) => ({
+                          ...info,
+                          dev: huge,
+                          ino: Option.some(huge),
+                        })),
+                      }) as FileSystem.File,
+                  ),
+            lstat: (file) =>
+              Effect.map(fileSystem.lstat(file), (info) =>
+                !file.endsWith(".tmp")
+                  ? info
+                  : {
+                      ...info,
+                      dev: huge,
+                      ino:
+                        identity === "missing"
+                          ? Option.none()
+                          : Option.some(
+                              identity === "zero"
+                                ? 0n
+                                : identity === "neighbour"
+                                  ? huge + 1n
+                                  : huge,
+                            ),
+                    },
+              ),
+            remove: (file, options) => {
+              if (file.endsWith(".tmp")) removed++;
+              return fileSystem.remove(file, options);
+            },
+          };
+          assert.isTrue(Exit.isSuccess(yield* seed({}, { ...memoryFs, fileSystem: relabelled })));
+          // topic.md, MEMORY.md and the marker each had one temporary file.
+          assert.equal(removed, identity === "same" ? 3 : 0);
+          if (identity !== "same") {
+            const left = (yield* fileSystem.readDirectory(shared)).filter((name) =>
+              name.endsWith(".tmp"),
+            );
+            assert.lengthOf(left, 2);
+          }
+        }),
+      ),
   );
 });
