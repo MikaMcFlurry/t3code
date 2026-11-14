@@ -7,6 +7,12 @@ import {
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
 import {
+  claudeAccountMemoryDirectories,
+  claudeMemoryProjectPaths,
+  repairClaudeMemoryIndex,
+  seedSharedClaudeMemory,
+} from "./claudeSharedMemory.ts";
+import {
   dynamicToolTitle,
   formatReadToolLabel,
   formatSearchToolLabel,
@@ -5500,16 +5506,46 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         );
         if (setsAutoMemoryDirectory(settings)) return undefined;
       }
-      const directory = path.join(root, projectId.replace(/[^a-zA-Z0-9_-]/g, "-"));
-      return yield* fileSystem.makeDirectory(directory, { recursive: true }).pipe(
-        Effect.as(directory),
+      const folder = projectId.replace(/[^a-zA-Z0-9_-]/g, "-");
+      const directory = path.join(root, folder);
+      const created = yield* fileSystem.makeDirectory(directory, { recursive: true }).pipe(
+        Effect.as(true),
         Effect.catch((cause) =>
           Effect.logWarning("Claude shared project memory folder could not be created", {
             directory,
             cause,
-          }).pipe(Effect.as(undefined)),
+          }).pipe(Effect.as(false)),
         ),
       );
+      if (!created) return undefined;
+      // Seed from this account's own project memory once, then add index lines a concurrent
+      // rewrite of MEMORY.md may have lost. A failure here leaves the folder usable.
+      const memoryFs = { fileSystem, path };
+      yield* Effect.gen(function* () {
+        const account = adapterOptions.instanceId.replace(/[^a-zA-Z0-9_-]/g, "-");
+        yield* seedSharedClaudeMemory(memoryFs, {
+          sharedDirectory: directory,
+          sourceDirectories:
+            cwd === null
+              ? []
+              : yield* claudeAccountMemoryDirectories(
+                  memoryFs,
+                  homePath,
+                  yield* claudeMemoryProjectPaths(memoryFs, cwd),
+                ),
+          account,
+          marker: path.join(root, ".seeded", folder, account),
+        });
+        yield* repairClaudeMemoryIndex(memoryFs, directory);
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("Claude shared project memory could not be seeded or indexed", {
+            directory,
+            cause,
+          }),
+        ),
+      );
+      return directory;
     },
   );
 

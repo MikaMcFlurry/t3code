@@ -4903,9 +4903,38 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.isUndefined(off.directory);
         assert.isFalse(yield* fileSystem.exists(root));
 
-        const on = yield* openedMemory({ shareProjectMemory: true });
+        // The first shared session seeds the folder from the account's own project memory and indexes
+        // a memory file its MEMORY.md had lost; the account's folder stays as it was.
+        const accountMemory = path.join(
+          home,
+          "projects",
+          project.replace(/[^a-zA-Z0-9]/g, "-"),
+          "memory",
+        );
+        yield* fileSystem.makeDirectory(accountMemory, { recursive: true });
+        const memoryFile = (name: string) =>
+          `---\nname: ${name}\ndescription: ${name} notes\n---\n\n${name}\n`;
+        yield* fileSystem.writeFileString(path.join(accountMemory, "a.md"), memoryFile("a"));
+        yield* fileSystem.writeFileString(path.join(accountMemory, "b.md"), memoryFile("b"));
+        yield* fileSystem.writeFileString(
+          path.join(accountMemory, "MEMORY.md"),
+          "- [A](a.md) — a notes\n",
+        );
+        const on = yield* openedMemory({ shareProjectMemory: true, cwd: project });
         assert.equal(on.directory, on.projectFolder);
         assert.isTrue(yield* fileSystem.exists(on.projectFolder));
+        assert.equal(
+          yield* fileSystem.readFileString(path.join(on.projectFolder, "b.md")),
+          memoryFile("b"),
+        );
+        assert.equal(
+          yield* fileSystem.readFileString(path.join(on.projectFolder, "MEMORY.md")),
+          "- [A](a.md) — a notes\n- [b](b.md): b notes\n",
+        );
+        assert.equal(
+          yield* fileSystem.readFileString(path.join(accountMemory, "MEMORY.md")),
+          "- [A](a.md) — a notes\n",
+        );
 
         // The user's own value wins: --settings travels unchanged, user settings are left to Claude.
         const launchArg = yield* openedMemory({

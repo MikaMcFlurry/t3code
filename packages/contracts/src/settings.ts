@@ -844,7 +844,7 @@ export const ClaudeSettings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "Share project memory across Claude accounts",
         description:
-          "Keep Claude's auto memory for each project in one T3 folder that every Claude instance with this option uses. An autoMemoryDirectory in your own Claude settings wins.",
+          "Keep Claude's auto memory for each project in one folder that every Claude instance with this option uses: claude-memory/<project id> in T3 Code's data directory (by default ~/.t3/userdata/claude-memory). Each account's first session copies its own memory in; two different versions of a file are both kept and marked in MEMORY.md. An autoMemoryDirectory in your own Claude settings wins.",
         providerSettingsForm: { control: "switch" },
       }),
     ),

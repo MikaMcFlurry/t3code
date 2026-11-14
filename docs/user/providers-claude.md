@@ -40,12 +40,21 @@ state. Claude does not have Codex's shared-home and shadow-home arrangement.
 Claude Code keeps its auto memory in each config directory, so every account
 remembers a project separately. To give accounts one memory per project, turn on
 **Share project memory across Claude accounts** in each Claude instance's settings in
-**Settings > Providers**. Sessions that start afterwards keep memory in a
-`claude-memory` folder in T3 Code's data directory. Memory saved before you turn the
-option on stays in the account's own directory and is not copied. Turn the option off
-to go back to it. An `autoMemoryDirectory` set in `--settings`, or in the account's user
-or local Claude settings, still takes precedence. Two sessions open on the same project at
-once share one `MEMORY.md`, just as two sessions of one account do.
+**Settings > Providers**. Sessions that start afterwards keep memory in
+`claude-memory/<project id>` in T3 Code's data directory (by default
+`~/.t3/userdata/claude-memory/`). An `autoMemoryDirectory` set in `--settings`, or in the
+account's user or local Claude settings, still takes precedence.
+
+The first shared session of each account copies that account's existing memory for the
+project into the shared folder; the account's own directory is only read and stays as it
+was, so turning the option off goes back to it. A file the shared folder already holds in a
+different version is not replaced: the account's copy is kept beside it as
+`<name>.conflict-<instance>.md` and listed in `MEMORY.md` as a conflict, for the next session
+or you to merge. Identical files are skipped.
+
+Two sessions open on the same project at once share one `MEMORY.md`, so one can drop the
+other's new index line. Each session start adds a line for every memory file the index does
+not link to, from the file's `name` and `description`; it never removes a line.
 
 For presets that differ only in API keys or endpoints, use the instance's
 **Environment variables**. Variable assignments do not belong in **Launch arguments**.
