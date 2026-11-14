@@ -52,18 +52,26 @@ shared folder is replaced or changed, `MEMORY.md` included. A file the shared fo
 in a different version is kept beside it as `<name>.conflict-<instance>.md`. Identical files are
 skipped, and subfolders are copied with their files.
 
-If the shared folder has no `MEMORY.md` yet, the copy creates one that lists the copied files and
-conflicts. If it already has one, that file is left alone and the copy lists what it does not link
-to in a new `SEEDED-FILES.md` and `SEED-CONFLICTS.md` (or `SEEDED-FILES-2.md` and so on when such a
-note exists already). Claude does not read these notes by itself: ask it to merge them into
+If the shared folder has no `MEMORY.md` yet, the copy creates one from the account's own
+`MEMORY.md`, unchanged, followed by lines for copied files and conflicts it does not list. If it
+already has one, that file is left alone: an account `MEMORY.md` that differs is kept whole, notes
+without links included, as `MEMORY.from-<instance>.md` (or `MEMORY.from-<instance>-2.md` and so on
+when that name is taken), and the copy lists it and the files `MEMORY.md` does not link to in a
+new `SEEDED-FILES.md` and `SEED-CONFLICTS.md` (or `SEEDED-FILES-2.md` and so on when such a note
+exists already). Claude does not read these notes by itself: ask it to merge them into
 `MEMORY.md`, or do it yourself, then delete them.
 
 Files are published by hard link so that a file another session writes at the same moment is
 never replaced. On a file system without hard links (FAT32, exFAT, some network or sync folders)
 nothing is copied and sessions keep the account's own memory. Until every file has been copied and
 checked, sessions of that account keep using the account's own memory, and the next session start
-tries again; the server log says why. A shared folder, a file in it, or a folder for T3's seed
-records that links into an account's own memory is never written through.
+tries again; the server log says why. A session start waits at most 30 seconds for the shared
+folder: if the copy takes longer, for example on a slow or hanging disk, that session keeps the
+account's own memory and the copy finishes in the background. A shared folder, a file in it, or a
+folder for T3's seed records that links into an account's own memory is never written through.
+The copy removes nothing from the shared folder except its own temporary files
+(`.t3-memory-<id>.tmp`), and only the very file it created; one left behind by a crash stays and
+can be deleted by hand.
 
 Two sessions open on the same project at once share one `MEMORY.md`, so one can drop the other's
 new index line, just as two sessions of one account can.

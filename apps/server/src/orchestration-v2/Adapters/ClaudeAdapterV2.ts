@@ -356,7 +356,8 @@ const CLAUDE_SCRIPT_EXTENSIONS = [".js", ".mjs", ".tsx", ".ts", ".jsx"];
 // The SDK has no control-request deadline; the CLI waits up to 30 s per MCP server.
 const CLAUDE_MCP_REGISTRATION_TIMEOUT = "90 seconds";
 const CLAUDE_BOOT_TIMEOUT = "5 minutes";
-// Bound on seeding shared memory at a session start; past it the session starts anyway.
+// How long a session start waits for the shared memory folder to be ready; past it the session
+// starts with the account's own memory and the preparation continues in the background.
 const CLAUDE_SHARED_MEMORY_SEED_TIMEOUT = "30 seconds";
 // Claude can consume a subagent result before the launching turn ends, leaving
 // its notification with no native wake turn to answer the continuation.
@@ -5487,17 +5488,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
     return "";
   });
 
-  // An autoMemoryDirectory the user set wins. Claude Code ignores one in checked-in project
-  // settings, so only --settings, local, and user settings count.
-  const resolveSharedMemoryDirectory = Effect.fn("ClaudeAdapterV2.resolveSharedMemoryDirectory")(
-    function* (
-      cwd: string | null,
-      projectId: ProjectId,
-      launchArgSettings: ClaudeSdkSettings | undefined,
-    ) {
-      const root = adapterOptions.sharedMemoryRoot;
-      if (!adapterOptions.settings.shareProjectMemory || root === undefined) return undefined;
-      if (setsAutoMemoryDirectory(launchArgSettings)) return undefined;
+  // An autoMemoryDirectory the user set wins; Claude Code ignores one in checked-in project settings.
+  // Preparing the shared folder runs detached; a start waits for it at most the seed timeout, then
+  // keeps the account's own memory while the work finishes (or fails, logged) in the background.
+  // One preparation per folder and cwd at a time; later starts wait on the same one.
+  const sharedMemoryPreparations = new Map<string, Deferred.Deferred<boolean>>();
+  const prepareSharedMemoryDirectory = Effect.fn("ClaudeAdapterV2.prepareSharedMemoryDirectory")(
+    function* (cwd: string | null, directory: string) {
       const projectSettingsFile = cwd === null ? null : path.join(cwd, ".claude", "settings.json");
       for (const settingsFile of yield* settingsFilesByPrecedence(cwd)) {
         if (settingsFile === projectSettingsFile) continue;
@@ -5505,10 +5502,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           Effect.flatMap(decodeClaudeLaunchArgSettings),
           Effect.orElseSucceed(() => undefined),
         );
-        if (setsAutoMemoryDirectory(settings)) return undefined;
+        if (setsAutoMemoryDirectory(settings)) return false;
       }
-      const folder = projectId.replace(/[^a-zA-Z0-9_-]/g, "-");
-      const directory = path.join(root, folder);
       const created = yield* fileSystem.makeDirectory(directory, { recursive: true }).pipe(
         Effect.as(true),
         Effect.catch((cause) =>
@@ -5518,13 +5513,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           }).pipe(Effect.as(false)),
         ),
       );
-      if (!created) return undefined;
+      if (!created) return false;
       // Seed from this account's own project memory once, only adding files: nothing in the
       // shared folder is replaced, MEMORY.md included. Until a seed has copied and verified every
-      // file, this session keeps the account's own memory, so nothing it knew goes missing; the
-      // next session start tries again. A failing or slow seed never holds up the session start.
+      // file, sessions keep the account's own memory, so nothing it knew goes missing; the next
+      // session start tries again.
       const memoryFs = { fileSystem, path };
-      const seeded = yield* Effect.gen(function* () {
+      return yield* Effect.gen(function* () {
         const directories =
           cwd === null
             ? []
@@ -5540,16 +5535,62 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         });
         return true;
       }).pipe(
-        Effect.timeout(CLAUDE_SHARED_MEMORY_SEED_TIMEOUT),
         Effect.catchCause((cause) =>
           Effect.logWarning(
-            "Claude shared project memory could not be seeded; this session keeps the account's own memory",
+            "Claude shared project memory could not be seeded; sessions keep the account's own memory",
             { directory, cause },
           ).pipe(Effect.as(false)),
         ),
       );
-      if (!seeded) return undefined;
-      return directory;
+    },
+  );
+  const resolveSharedMemoryDirectory = Effect.fn("ClaudeAdapterV2.resolveSharedMemoryDirectory")(
+    function* (
+      cwd: string | null,
+      projectId: ProjectId,
+      launchArgSettings: ClaudeSdkSettings | undefined,
+    ) {
+      const root = adapterOptions.sharedMemoryRoot;
+      if (!adapterOptions.settings.shareProjectMemory || root === undefined) return undefined;
+      if (setsAutoMemoryDirectory(launchArgSettings)) return undefined;
+      const directory = path.join(root, projectId.replace(/[^a-zA-Z0-9_-]/g, "-"));
+      const key = `${directory}\u0000${cwd ?? ""}`;
+      let preparation = sharedMemoryPreparations.get(key);
+      if (preparation === undefined) {
+        const started = Deferred.makeUnsafe<boolean>();
+        preparation = started;
+        sharedMemoryPreparations.set(key, started);
+        yield* prepareSharedMemoryDirectory(cwd, directory).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Claude shared project memory could not be prepared", {
+              directory,
+              cause,
+            }).pipe(Effect.as(false)),
+          ),
+          Effect.flatMap((ready) => Deferred.succeed(started, ready)),
+          // Also on interruption: no waiter is left without an answer.
+          Effect.ensuring(
+            Effect.suspend(() => {
+              if (sharedMemoryPreparations.get(key) === started) {
+                sharedMemoryPreparations.delete(key);
+              }
+              return Deferred.succeed(started, false);
+            }),
+          ),
+          Effect.forkDetach,
+        );
+      }
+      const ready = yield* Deferred.await(preparation).pipe(
+        Effect.timeoutOption(CLAUDE_SHARED_MEMORY_SEED_TIMEOUT),
+      );
+      if (Option.isNone(ready)) {
+        yield* Effect.logWarning(
+          "Claude shared project memory is still being prepared; this session keeps the account's own memory",
+          { directory },
+        );
+        return undefined;
+      }
+      return ready.value ? directory : undefined;
     },
   );
 
