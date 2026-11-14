@@ -2058,3 +2058,112 @@ describe("going back to the account a usage-limit switch left", () => {
     ).toBeNull();
   });
 });
+
+describe("Claude windows that limit only some models", () => {
+  // Real snapshots from pingdotgg/t3code#28595 (niklasbabel, 13.11.): Opus kept running on both
+  // seats; only Fable on seat A was refused.
+  const HOUR_MS = 3_600_000;
+  const at = (offset: number) => DateTime.formatIso(DateTime.makeUnsafe(now + offset));
+  const OPUS = "claude-opus-5-5";
+  const FABLE = "claude-fable-5-1";
+  const models = [OPUS, FABLE].map((slug) => ({
+    slug,
+    name: slug,
+    isCustom: false,
+    isDefault: slug === OPUS,
+    capabilities: null,
+  }));
+  const weekly = (id: string, label: string, usedPercent: number) => ({
+    id,
+    kind: "weekly" as const,
+    label,
+    usedPercent,
+    windowDurationMins: 7 * 24 * 60,
+    resetsAt: at(72 * HOUR_MS),
+  });
+  const spend = (usedPercent: number) => ({
+    id: "monthly_spend",
+    kind: "monthly" as const,
+    label: "Monthly spend",
+    usedPercent,
+  });
+  const claude = (
+    id: string,
+    windows: NonNullable<ServerProvider["usageLimits"]>["windows"],
+  ): ServerProvider =>
+    provider({
+      instanceId: ProviderInstanceId.make(id),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      models,
+      usageLimits: { checkedAt: at(-HOUR_MS), windows },
+    });
+  const seatA = claude("seat-a", [
+    { ...window, usedPercent: 30, resetsAt: at(HOUR_MS) },
+    weekly("seven_day", "Weekly", 98),
+    weekly("seven_day_fable", "Weekly · Fable", 100),
+  ]);
+  const seatB = claude("seat-b", [
+    { ...window, usedPercent: 20, resetsAt: at(HOUR_MS) },
+    weekly("seven_day", "Weekly", 66),
+    weekly("seven_day_fable", "Weekly · Fable", 84),
+    spend(100),
+  ]);
+  const spent = claude("spent", [
+    { ...window, usedPercent: 100, resetsAt: at(HOUR_MS) },
+    weekly("seven_day", "Weekly", 50),
+  ]);
+  const settingsFor = (providers: readonly ServerProvider[]) => ({
+    ...DEFAULT_SERVER_SETTINGS,
+    fallbackToAvailableAccounts: true,
+    providerInstances: Object.fromEntries(
+      providers.map((entry) => [
+        entry.instanceId,
+        { driver: entry.driver, enabled: true, config: {} },
+      ]),
+    ),
+  });
+  const choose = (from: ServerProvider, model: string, others: readonly ServerProvider[]) => {
+    const providers = [from, ...others];
+    return (
+      availableAccountSelection({
+        selection: { instanceId: from.instanceId, model },
+        providers,
+        now,
+        settings: settingsFor(providers),
+      })?.instanceId ?? null
+    );
+  };
+
+  it("lets a spent Fable window stop only Fable", () => {
+    expect(exhaustedUsageWindow(seatA, now, OPUS)).toBeUndefined();
+    expect(exhaustedUsageWindow(seatA, now, FABLE)?.id).toBe("seven_day_fable");
+    expect(choose(seatA, OPUS, [seatB])).toBeNull();
+    expect(choose(seatA, FABLE, [seatB])).toBe("seat-b");
+  });
+
+  it("does not let a spent monthly cap stop a seat whose plan windows have room", () => {
+    expect(exhaustedUsageWindow(seatB, now, OPUS)).toBeUndefined();
+    expect(choose(seatB, OPUS, [seatA])).toBeNull();
+    // Seat B takes over Opus work from a spent seat.
+    expect(choose(spent, OPUS, [seatB])).toBe("seat-b");
+  });
+
+  it("still stops an account whose only reported limit is the spent monthly cap", () => {
+    expect(exhaustedUsageWindow(claude("api", [spend(100)]), now, OPUS)?.id).toBe("monthly_spend");
+  });
+
+  it("rates headroom by the windows that limit the model the account would run", () => {
+    // Seat B has 34% weekly left for Opus; this seat has 25%.
+    const tighter = claude("tighter", [
+      { ...window, usedPercent: 10, resetsAt: at(HOUR_MS) },
+      weekly("seven_day", "Weekly", 75),
+    ]);
+    expect(choose(spent, OPUS, [tighter, seatB])).toBe("seat-b");
+    const fableSpent = claude("fable-spent", [
+      { ...window, usedPercent: 10, resetsAt: at(HOUR_MS) },
+      weekly("seven_day", "Weekly", 40),
+      weekly("seven_day_fable", "Weekly · Fable", 100),
+    ]);
+    expect(choose(spent, OPUS, [tighter, fableSpent])).toBe("fable-spent");
+  });
+});

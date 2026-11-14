@@ -80,9 +80,31 @@ function blockingUsageWindow(
       return exhausted.find(
         (window) => !window.id.startsWith("go_") || model.startsWith("opencode-go/"),
       );
+    case "claudeAgent":
+      return exhausted.find((window) => claudeWindowLimitsModel(window, model, windows));
     default:
       return exhausted[0];
   }
+}
+
+const CLAUDE_SCOPED_WINDOW_PREFIX = "seven_day_";
+const claudeScopeToken = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+
+/**
+ * Whether a Claude window can stop `model`. A model-scoped weekly window (`seven_day_fable`)
+ * stops only its own model, as `windowLimitsModel` upstream; the monthly spend cap pays only
+ * for use past the plan windows, so it stops nothing while the account reports them.
+ */
+function claudeWindowLimitsModel(
+  window: ServerProviderUsageWindow,
+  model: string,
+  windows: readonly ServerProviderUsageWindow[],
+): boolean {
+  if (window.id === "monthly_spend") {
+    return !windows.some((other) => other.id === "five_hour" || other.id === "seven_day");
+  }
+  if (!window.id.startsWith(CLAUDE_SCOPED_WINDOW_PREFIX)) return true;
+  return claudeScopeToken(model).includes(window.id.slice(CLAUDE_SCOPED_WINDOW_PREFIX.length));
 }
 
 interface AccountChoiceInput {
@@ -262,17 +284,20 @@ function automaticFallbackSelections(
     return soonest !== null && soonest - now <= EXPIRING_QUOTA_WINDOW ? soonest : null;
   };
   // Only accounts that report limits: an unknown balance could be pay-per-use or already spent.
-  const headroom = (entry: ServerProvider) => {
-    const windows = entry.usageLimits?.unavailable ? [] : (entry.usageLimits?.windows ?? []);
+  // Claude windows of another model or the spend cap do not limit the model it would run.
+  const headroom = (entry: ServerProvider, model: string) => {
+    const reported = entry.usageLimits?.unavailable ? [] : (entry.usageLimits?.windows ?? []);
+    const windows =
+      entry.driver === "claudeAgent"
+        ? reported.filter((window) => claudeWindowLimitsModel(window, model, reported))
+        : reported;
     return windows.length === 0 ? null : Math.min(...windows.map(remainingPercent));
   };
   const exhaustedLogin = exhausted.usageLimits?.credentialFingerprint;
   return providers
     .flatMap((entry) => {
-      const left = headroom(entry);
       if (
         entry.instanceId === exhausted.instanceId ||
-        left === null ||
         // Two instances signed in to the same login share one quota.
         (exhaustedLogin !== undefined &&
           entry.usageLimits?.credentialFingerprint === exhaustedLogin)
@@ -285,6 +310,8 @@ function automaticFallbackSelections(
         entry.models.find((item) => item.isDefault) ??
         entry.models[0];
       if (!model) return [];
+      const left = headroom(entry, model.slug);
+      if (left === null) return [];
       const candidate: ModelSelection =
         sameDriver && model.slug === selection.model
           ? { ...selection, instanceId: entry.instanceId }
