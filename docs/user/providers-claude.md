@@ -50,11 +50,15 @@ project into the shared folder; the account's own directory is only read and sta
 was, so turning the option off goes back to it. A file the shared folder already holds in a
 different version is not replaced: the account's copy is kept beside it as
 `<name>.conflict-<instance>.md` and listed in `MEMORY.md` as a conflict, for the next session
-or you to merge. Identical files are skipped.
+or you to merge. Identical files are skipped, and subfolders are copied with their files. Until
+every file has been copied and checked, sessions of that account keep using the account's own
+memory, and the next session start tries again; the server log says why. A shared folder, or a
+file in it, that links into an account's own memory is never written through.
 
 Two sessions open on the same project at once share one `MEMORY.md`, so one can drop the
-other's new index line. Each session start adds a line for every memory file the index does
-not link to, from the file's `name` and `description`; it never removes a line.
+other's new index line. A session start whose folder changed since the last check adds a line
+for every memory file the index does not link to, from the file's `name` and `description`; it
+never removes a line and replaces `MEMORY.md` only if nothing changed it in the meantime.
 
 For presets that differ only in API keys or endpoints, use the instance's
 **Environment variables**. Variable assignments do not belong in **Launch arguments**.

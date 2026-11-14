@@ -4936,6 +4936,35 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           "- [A](a.md) — a notes\n",
         );
 
+        // A seed that cannot copy everything, here a link leading out of the account's memory,
+        // keeps that session on the account's own memory and is tried again at the next start.
+        const linkedProject = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-claude-project-",
+        });
+        const linkedMemory = path.join(
+          home,
+          "projects",
+          linkedProject.replace(/[^a-zA-Z0-9]/g, "-"),
+          "memory",
+        );
+        yield* fileSystem.makeDirectory(linkedMemory, { recursive: true });
+        yield* fileSystem.writeFileString(path.join(state, "outside.md"), memoryFile("outside"));
+        yield* fileSystem.symlink(path.join(state, "outside.md"), path.join(linkedMemory, "c.md"));
+        // Every harness here is the same instance and thread: forget its seed, as for a new account.
+        yield* fileSystem.remove(path.join(root, ".seeded"), { recursive: true });
+        const unseeded = yield* openedMemory({ shareProjectMemory: true, cwd: linkedProject });
+        assert.isUndefined(unseeded.directory);
+        assert.isFalse(yield* fileSystem.exists(path.join(unseeded.projectFolder, "c.md")));
+        assert.isFalse(yield* fileSystem.exists(path.join(root, ".seeded")));
+        yield* fileSystem.remove(path.join(linkedMemory, "c.md"));
+        yield* fileSystem.writeFileString(path.join(linkedMemory, "c.md"), memoryFile("c"));
+        const retried = yield* openedMemory({ shareProjectMemory: true, cwd: linkedProject });
+        assert.equal(retried.directory, retried.projectFolder);
+        assert.equal(
+          yield* fileSystem.readFileString(path.join(retried.projectFolder, "c.md")),
+          memoryFile("c"),
+        );
+
         // The user's own value wins: --settings travels unchanged, user settings are left to Claude.
         const launchArg = yield* openedMemory({
           shareProjectMemory: true,
