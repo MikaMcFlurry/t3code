@@ -5055,6 +5055,25 @@
   "c752acb0b7088295": "Connecté",
   "a097631b7acab9d8": "En attente d’approbation…",
   "aabd9632196ee7e5": "Reconnexion…",
+  "d92d1201f3aa424b": "(no arguments)",
+  "cb85d4a9792068d5": "Allow desktop control?",
+  "d026764631290844": [
+    "Thread ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    " wants to run the desktop action \"",
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
+    "\". Review the exact input before allowing it. It is shown only for this pending decision and is not saved by the approval broker."
+  ],
+  "7c5eb60743d53f71": "Refuser",
+  "65947ad9a6cae20d": "Allow once",
   "a80895f122d7020f": "Impossible d’ouvrir le lien",
   "2a1758375b2701f3": "Impossible d’ajouter le backend",
   "6730fa8ae68fad99": "Échec de l’ajout du backend.",
@@ -7940,7 +7959,6 @@
     },
     ". N’approuvez que si l’appareil devant vous affiche ce code."
   ],
-  "7c5eb60743d53f71": "Refuser",
   "0ecf3435b0434d1b": [
     "Approuvé depuis",
     " ",
@@ -8389,6 +8407,9 @@
   "3a22541b4b44214b": "Adaptatif",
   "80726ab1cdc0fba1": "Votre navigateur par défaut",
   "f6b11bd9aea5e75e": "Personnalisé",
+  "b7696998059e07cc": "Ask every time",
+  "9f31362c726e9d69": "Not in full access",
+  "338adc52f3ecfbdb": "Never ask",
   "a4808b3447bea046": "Taille d’onglet pour vous et les agents. Remplir s’adapte au panneau ; les autres tailles affichent la barre d’outils de l’appareil.",
   "f26f3869603e5918": "Réinitialiser la fenêtre d’affichage par défaut du navigateur à la valeur par défaut",
   "2aa17f5ea670658e": "Fenêtre d’affichage par défaut du navigateur",
@@ -8431,6 +8452,11 @@
   "a6a6dc235b108747": "Autorise les agents à utiliser le navigateur partagé. Les projets peuvent remplacer ce paramètre.",
   "ea5fed973bfc1aca": "Réinitialiser l’accès par défaut au navigateur à la valeur par défaut",
   "19e1f74805f4a1fb": "Accès des agents au navigateur",
+  "a58f115b3fd97146": "Reset agent desktop control to default",
+  "5df0fe31bd236071": "Agent desktop control",
+  "36dd8189b115f566": "When an agent's desktop actions wait for your approval. Not in full access: full-access threads act without asking. Never ask: a standing approval for every thread. Stop or a new session ends it.",
+  "3986789c00214bc4": "Reset agent desktop approval to default",
+  "e1941f5c6591dc23": "Desktop approval",
   "b395b88284e3bca2": "Affiche l’aperçu flottant quand un agent ouvre un navigateur ou un appareil, sauf si l’agent indique le contraire.",
   "6aadfd59cf60b4b5": "Réinitialiser l’affichage automatique de l’aperçu flottant à la valeur par défaut",
   "e4a7ec61190bc1f9": "Afficher automatiquement l’aperçu flottant",
@@ -8468,6 +8494,37 @@
       "t": "DeviceToolVersions",
       "i": 1
     }
+  ],
+  "a90e1527a54348e0": [
+    "Let agents in this project see and control this machine's desktop. Linux needs",
+    " ",
+    {
+      "t": "code",
+      "i": 1,
+      "c": "computer-use-linux"
+    },
+    " on PATH, Windows needs ",
+    {
+      "t": "code",
+      "i": 2,
+      "c": "uv"
+    },
+    ". Shell and file tools stay off. Applies to new sessions."
+  ],
+  "6a69b1f6c7e050ab": [
+    "Let agents see and control this machine's desktop; projects can override it. Linux needs ",
+    {
+      "t": "code",
+      "i": 1,
+      "c": "computer-use-linux"
+    },
+    " on PATH, Windows needs ",
+    {
+      "t": "code",
+      "i": 2,
+      "c": "uv"
+    },
+    ". Shell and file tools stay off. Applies to new sessions."
   ],
   "093c68324c1b1280": "Ajouter un profil",
   "1f404c456e5b2a0b": "Profil vierge",
@@ -11632,6 +11689,9 @@
   "f2b07faba1229ce7": "Intervalle de vérification de l’état",
   "5c9dc9970db79fe2": "actualiser disponibilité versions état d’authentification modèles sondes en arrière-plan secondes désactivé",
   "056ba6a180d114b5": "autoriser désactiver activer ouvrir piloter aperçu outils sessions remplacement par projet",
+  "e55879a6a62fd41a": "computer use linux ubuntu gnome wayland windows screen mouse keyboard screenshot click type approve",
+  "05495b9974333523": "Agent desktop approval",
+  "eb04997423c85584": "computer use approve ask every time full access standing never ask desktop control",
   "345075be6cacc171": "appareil hôtes ssh distant mac mini identité clé connexion eas expo cloud simlock pool passerelle simulateurs locaux",
   "a6b742430b05d6cc": "Les agents peuvent utiliser les appareils",
   "1d5d7418a83575c2": "autoriser simulateur émulateur ios android piloter outils sessions",

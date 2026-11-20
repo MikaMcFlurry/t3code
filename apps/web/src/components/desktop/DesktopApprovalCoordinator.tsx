@@ -1,4 +1,5 @@
 import type { DesktopApprovalRespondInput } from "@t3tools/contracts";
+import { T, useGT, Var } from "gt-react";
 import { useState } from "react";
 
 import { desktopApprovalEnvironment } from "../../state/desktopApprovals";
@@ -16,6 +17,7 @@ import {
 import { Button } from "../ui/button";
 
 export function DesktopApprovalCoordinator() {
+  const gt = useGT();
   const environmentId = usePrimaryEnvironmentId();
   const approvals = useEnvironmentQuery(
     environmentId === null ? null : desktopApprovalEnvironment.state({ environmentId, input: {} }),
@@ -44,26 +46,30 @@ export function DesktopApprovalCoordinator() {
     >
       <AlertDialogPopup>
         <AlertDialogHeader>
-          <AlertDialogTitle>Allow desktop control?</AlertDialogTitle>
+          <AlertDialogTitle>
+            <T>Allow desktop control?</T>
+          </AlertDialogTitle>
           <AlertDialogDescription>
-            Thread {request?.threadId ?? ""} wants to run the desktop action ÔÇ£
-            {request?.toolName ?? ""}". Review the exact input before allowing it. It is shown only
-            for this pending decision and is not saved by the approval broker.
+            <T>
+              Thread <Var>{request?.threadId ?? ""}</Var> wants to run the desktop action "
+              <Var>{request?.toolName ?? ""}</Var>". Review the exact input before allowing it. It
+              is shown only for this pending decision and is not saved by the approval broker.
+            </T>
           </AlertDialogDescription>
         </AlertDialogHeader>
         <pre className="max-h-64 overflow-auto rounded-md border bg-muted p-3 text-xs whitespace-pre-wrap">
           {request === null
             ? ""
             : request.arguments === undefined
-              ? "(no arguments)"
+              ? gt("(no arguments)")
               : JSON.stringify(request.arguments, null, 2)}
         </pre>
         <AlertDialogFooter>
           <Button disabled={responding} variant="outline" onClick={() => void decide("deny")}>
-            Deny
+            <T>Deny</T>
           </Button>
           <Button disabled={responding} onClick={() => void decide("approve")}>
-            Allow once
+            <T>Allow once</T>
           </Button>
         </AlertDialogFooter>
       </AlertDialogPopup>
