@@ -1,5 +1,6 @@
 import { managedRuntimeModeDenial } from "@t3tools/client-runtime/contract-labels";
 import {
+  type AutoModelSelectionMode,
   DEFAULT_SERVER_SETTINGS,
   type ModelSelection,
   type WorktreeSubmodules,
@@ -7,7 +8,7 @@ import {
 import { createModelSelection, pickModelSelection } from "@t3tools/shared/model";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { useNavigate } from "@tanstack/react-router";
-import { T, useGT, useMessages } from "gt-react";
+import { msg, T, useGT, useMessages } from "gt-react";
 
 import { useClientSettings } from "../../hooks/useSettings";
 import {
@@ -28,6 +29,8 @@ import { toastManager } from "../ui/toast";
 import { Switch } from "../ui/switch";
 import { resolveDefaultModelSettingsPresentation } from "./ProjectDefaultsSettings.logic";
 import type { ProjectSettingsCategory } from "./ProjectSettingsPanel";
+import { AutoRoutingAllowedRow } from "./AutoRoutingAllowedRow";
+import { ResetPlannerRows } from "./ResetPlannerRows";
 import { useSearchableSetting } from "./settingsSearch";
 import { useSettingsScope } from "./SettingsScopeContext";
 import {
@@ -47,6 +50,16 @@ import {
 const WORKTREE_SUBMODULES_OPTIONS = ["recursive", "top-level", "none"] as const;
 function isWorktreeSubmodules(value: string | null): value is WorktreeSubmodules {
   return value !== null && (WORKTREE_SUBMODULES_OPTIONS as readonly string[]).includes(value);
+}
+
+const AUTO_MODEL_SELECTION_MODES = ["off", "balance-accounts", "any-provider"] as const;
+const AUTO_MODEL_SELECTION_LABELS = {
+  off: msg("Off", { $context: "automatic account mode" }),
+  "balance-accounts": msg("Same provider"),
+  "any-provider": msg("Any provider"),
+} satisfies Record<AutoModelSelectionMode, unknown>;
+function isAutoModelSelectionMode(value: string | null): value is AutoModelSelectionMode {
+  return value !== null && (AUTO_MODEL_SELECTION_MODES as readonly string[]).includes(value);
 }
 
 export function ProjectDefaultsSettings({ category }: { category: ProjectSettingsCategory }) {
@@ -97,6 +110,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
     targets.length > 0 &&
     targets.every((candidate) => candidate.settings.defaultModelSelection === null);
   const mixedFallback = useScopedSettingsMixed(["fallbackModelSelection"]);
+  const mixedAutoModel = useScopedSettingsMixed(["autoModelSelection"]);
   const fallbackSelection = settings.fallbackModelSelection ?? selection;
   const fallbackEntry = entries.find((entry) => entry.instanceId === fallbackSelection?.instanceId);
   const fallbackModelOptions = getCustomModelOptionsByInstance(
@@ -350,6 +364,53 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
     />
   ) : null;
 
+  const autoModelRow = !isProjectScope ? (
+    <SettingsRow
+      serverScoped
+      settingKeys={["autoModelSelection"]}
+      mixed={mixedAutoModel}
+      id="auto-model-selection"
+      title={gt("Automatic account")}
+      description={gt(
+        "Starts new threads on the account with the most usage left. Same provider keeps the default model; Any provider may switch providers when every account is low.",
+      )}
+      resetAction={
+        settings.autoModelSelection !== DEFAULT_SERVER_SETTINGS.autoModelSelection ? (
+          <SettingResetButton
+            ariaLabel={gt("Reset automatic account to default")}
+            tooltip={gt("Turn automatic account off")}
+            onClick={() => updateSettings({ autoModelSelection: "off" })}
+          />
+        ) : null
+      }
+      control={
+        <Select
+          value={mixedAutoModel ? null : settings.autoModelSelection}
+          onValueChange={(value) => {
+            if (isAutoModelSelectionMode(value)) updateSettings({ autoModelSelection: value });
+          }}
+        >
+          <SelectTrigger size="sm" aria-label={gt("Automatic account")}>
+            <SelectValue>
+              {(value: string | null) =>
+                isAutoModelSelectionMode(value)
+                  ? m(AUTO_MODEL_SELECTION_LABELS[value])
+                  : gt("Mixed", { $context: "values differ across targets" })
+              }
+            </SelectValue>
+          </SelectTrigger>
+          <SelectPopup align="end" alignItemWithTrigger={false}>
+            {AUTO_MODEL_SELECTION_MODES.map((mode) => (
+              <SelectItem key={mode} value={mode}>
+                {m(AUTO_MODEL_SELECTION_LABELS[mode])}
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
+      }
+    />
+  ) : null;
+
   return (
     <SettingsSection
       id={category === "source-control" ? "source-control-defaults" : "project-defaults"}
@@ -359,12 +420,18 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
         <>
           {modelRow}
           {fallbackRow}
+          {autoModelRow}
+          {autoModelRow ? <AutoRoutingAllowedRow /> : null}
+          {autoModelRow ? <ResetPlannerRows providers={providers} /> : null}
           {workspaceRow}
         </>
       ) : category === "general" ? (
         <>
           {modelRow}
           {fallbackRow}
+          {autoModelRow}
+          {autoModelRow ? <AutoRoutingAllowedRow /> : null}
+          {autoModelRow ? <ResetPlannerRows providers={providers} /> : null}
           <SettingsRow
             serverScoped
             settingKeys={["defaultRuntimeMode"]}
