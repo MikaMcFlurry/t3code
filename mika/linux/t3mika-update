@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# t3mika-update: holt den neuesten mika/main aus dem Fork auf GitHub, baut ihn NEBEN dem laufenden
+# Build und schaltet erst um, wenn in T3 Mika keine Turns laufen. Startet die neue Version nicht
+# gesund (gleiche Environment-ID), geht es automatisch auf den vorherigen Build zurueck.
+#   t3mika-update          pruefen, bauen, bei Leerlauf umschalten (vom Timer alle 30 min)
+#   t3mika-update status   Stand anzeigen
+# Ohne sudo; aendert keine Logins, Connect- oder Zugangsbindungen.
+set -uo pipefail
+M=$HOME/T3-Mika; LOG=$M/logs/t3mika-update.log; mkdir -p "$M/logs" "$M/releases" "$M/tmp"
+REPO=${T3MIKA_REPO:-https://github.com/MikaMcFlurry/t3code.git}
+BRANCH=${T3MIKA_BRANCH:-mika/main}
+log() { printf '[%s] %s\n' "$(date -Iseconds)" "$*" >>"$LOG"; [ -t 1 ] && printf '%s\n' "$*"; }
+envid() { curl -fsS --max-time 5 http://127.0.0.1:3773/.well-known/t3/environment 2>/dev/null | sed -n 's/.*"environmentId":"\([^"]*\)".*/\1/p'; }
+manifest() { (cd "$1" && find apps/server/dist apps/web/dist -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1); }
+
+. "$M/release.env"   # COMMIT, NODE, CURRENT, RELEASE_MANIFEST, ...
+SRC=$M/src
+
+if [ "${1:-}" = status ]; then
+  echo "aktiv: ${COMMIT:-?}  current -> $(readlink -f "$M/current")"
+  echo "bereit: $(ls -1 "$M/releases" 2>/dev/null | tr '\n' ' ')"
+  tail -n 5 "$LOG" 2>/dev/null
+  exit 0
+fi
+
+exec 8>"$M/update.lock"; flock -n 8 || exit 0
+# t3-variante schaltet gerade um: nicht dazwischenfunken.
+exec 9>"$M/variante.lock"; flock -n 9 || { log "t3-variante laeuft, spaeter"; exit 0; }
+systemctl --user is-active --quiet t3mika.service || { log "t3mika.service nicht aktiv, kein Update"; exit 0; }
+
+git -C "$SRC" remote get-url github >/dev/null 2>&1 || git -C "$SRC" remote add github "$REPO"
+git -C "$SRC" fetch -q github "$BRANCH" 2>>"$LOG" || { log "FEHLER: fetch $BRANCH"; exit 1; }
+NEW=$(git -C "$SRC" rev-parse FETCH_HEAD)
+[ "$NEW" = "${COMMIT:-}" ] && exit 0
+
+REL=$M/releases/$NEW
+if [ ! -f "$REL/.built" ]; then
+  log "neuer Stand $NEW (aktiv ${COMMIT:-?}): baue in $REL"
+  git -C "$SRC" worktree prune
+  rm -rf "$REL"
+  git -C "$SRC" worktree add -q --detach "$REL" "$NEW" 2>>"$LOG" || { log "FEHLER: worktree"; exit 1; }
+  ( . "$M/tools/vite-plus/env"; export TMPDIR=$M/tmp; cd "$REL" &&
+    vp install && vp run --filter t3 build ) >>"$LOG" 2>&1 || { log "FEHLER: Build $NEW, aktive Version bleibt"; exit 1; }
+  manifest "$REL" >"$REL/.built"
+  log "Build $NEW fertig"
+fi
+
+# Nur im Leerlauf umschalten; der Timer versucht es sonst spaeter erneut.
+IDLE=$M/bin/t3mika-idle.cjs; [ -f "$IDLE" ] || IDLE=$M/bin/running-turns.cjs
+TURNS=$("$NODE" "$IDLE" "$M/home/userdata/statev2.sqlite" 2>/dev/null || echo fehler)
+[ "$TURNS" = 0 ] || { log "warte: $TURNS laufende oder wartende Laeufe"; exit 0; }
+
+EXP=$(cat "$M/home/userdata/environment-id")
+PREV=$(readlink -f "$M/current")
+cp "$M/release.env" "$M/release.env.prev"
+switch_to() { ln -sfn "$1" "$M/current.next" && mv -Tf "$M/current.next" "$M/current"; }
+switch_to "$REL"
+{
+  grep -vE '^(COMMIT|RELEASE_MANIFEST|BUILT_ON|BUILT_AT|INSTALLED_ON)=' "$M/release.env.prev"
+  printf 'COMMIT=%s\nRELEASE_MANIFEST=%s\nBUILT_ON=%s\nBUILT_AT="%s"\nINSTALLED_ON=%s\n' \
+    "$NEW" "$(cat "$REL/.built")" "$(hostname)" "$(date -u '+%F %T +0000')" "$(hostname)"
+} >"$M/release.env.next" && mv -f "$M/release.env.next" "$M/release.env"
+log "schalte um auf $NEW"
+systemctl --user restart t3mika.service
+for _ in $(seq 1 90); do [ "$(envid)" = "$EXP" ] && break; sleep 2; done
+if [ "$(envid)" = "$EXP" ]; then
+  log "PASS: T3 Mika laeuft mit $NEW"
+  # Die zwei neuesten Builds behalten, aeltere entfernen (nie den aktiven).
+  ls -1t "$M/releases" | tail -n +3 | while read -r old; do
+    [ "$M/releases/$old" = "$(readlink -f "$M/current")" ] || { git -C "$SRC" worktree remove --force "$M/releases/$old" 2>/dev/null || rm -rf "$M/releases/$old"; }
+  done
+  exit 0
+fi
+log "FEHLER: $NEW nicht gesund, zurueck auf $PREV"
+switch_to "$PREV"; mv -f "$M/release.env.prev" "$M/release.env"
+systemctl --user restart t3mika.service
+for _ in $(seq 1 90); do [ "$(envid)" = "$EXP" ] && { log "Rueckfall ok"; exit 1; }; sleep 2; done
+log "Rueckfall: T3 Mika nicht gesund!"; exit 1
