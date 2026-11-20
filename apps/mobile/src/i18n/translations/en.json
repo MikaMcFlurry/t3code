@@ -5615,6 +5615,9 @@
   "3328503592789bed": "Zen",
   "856812e7e1fc445e": "Tool calls in chat",
   "8d545d54c0a9e950": "Hide the commands, edits, and searches agents run. Hide successful keeps failures. Zen shows only final answers. Approvals, questions, and errors always show.",
+  "3afb8ca84915e986": "Allow camera access in Settings to take photos.",
+  "3d4320b2497d393d": "Could not open the camera.",
+  "a21fcfe973803872": "Take Photo",
   "99d51127f573296b": "Another account",
   "8ec2c57414669b79": "Connect a second {tracker} workspace or user.",
   "892f08d21b8e48a9": "Merge {layers} into {base} using {kind, select, squash {squash} merge {merge} rebase {rebase} fastForward {fast-forward} other {{method}}} once their requirements are met. This may happen immediately."
