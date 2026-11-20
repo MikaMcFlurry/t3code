@@ -5,6 +5,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it, vi } from "@effect/vitest";
 import {
   CommandId,
+  type ModelSelection,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -12,9 +13,8 @@ import {
   ScheduledTaskId,
   type ScheduledTaskUpsertInput,
   SecretRef,
-  ThreadId,
-  type ModelSelection,
   type ServerProvider,
+  ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -32,6 +32,8 @@ import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { OrchestratorDispatchError } from "../orchestration-v2/Orchestrator.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
@@ -39,8 +41,6 @@ import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
-import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
-import * as ServerSettings from "../serverSettings.ts";
 
 const isScheduledTaskError = Schema.is(ScheduledTaskError);
 
