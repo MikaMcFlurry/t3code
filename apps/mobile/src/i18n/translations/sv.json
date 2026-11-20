@@ -1866,6 +1866,7 @@
       "t": "p"
     }
   },
+  "a21fcfe973803872": "Ta foto",
   "4d1f68ef069c7a0b": "Ny flik",
   "9c149c8c50e58e4c": "Uppdatera miljöer",
   "d81626aad3a95cb2": "Logga in på ditt T3-konto för att konfigurera {product}.",
@@ -3016,6 +3017,7 @@
   "c62311139918f880": "Öppna den här {term, select, mr {merge requesten} cr {ändringsbegäran} other {pull requesten}} igen innan du mergar.",
   "5c0a19cbbced2709": "Miljöanslutningen är skrivskyddad.",
   "3ae4ee5c8007019d": "Leverantören stöder inte merge här.",
+  "3afb8ca84915e986": "Tillåt kameraåtkomst i Inställningar för att ta foton.",
   "25ebe44592ca4297": "Ditt konto kan inte merga den här {term, select, mr {merge requesten} cr {ändringsbegäran} other {pull requesten}}.",
   "1d44f8d46fa8508e": "Markera utkastet som redo för granskning innan du mergar.",
   "6ffcf2825c96d94b": "Lös grenkonflikterna innan du mergar.",
@@ -5003,6 +5005,7 @@
   "e5181944df63a9e9": "Väntar på anslutning…",
   "19f7b2512b080d03": "Läser in användning…",
   "3d3a23f398a8831d": "Uppdaterar användning…",
+  "3d4320b2497d393d": "Det gick inte att öppna kameran.",
   "3d55c97a8189568e": "{label}: {remaining} % kvar",
   "621d60f9c3bddcf3": "Användningen är aktuell",
   "f84a568a46203b5d": "Filtrera användningsmiljöer",
