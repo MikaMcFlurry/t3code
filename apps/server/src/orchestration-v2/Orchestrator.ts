@@ -4040,6 +4040,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ...(command.linkOrigin === undefined || command.delegatedFrom === undefined
         ? {}
         : { delegatedFrom: command.delegatedFrom }),
+      ...(command.worktreeBaseCommit === undefined
+        ? {}
+        : { worktreeBaseCommit: command.worktreeBaseCommit }),
       lineage: {
         parentThreadId: null,
         relationshipToParent: null,

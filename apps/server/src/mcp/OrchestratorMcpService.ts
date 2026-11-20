@@ -134,6 +134,7 @@ import {
   resolveRuntimeMode,
   runtimeModeRank,
   taskPrompt,
+  validateWorktreeBase,
 } from "./delegatedTaskModes.ts";
 import { assertTargetWithinLimits, isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
@@ -2798,6 +2799,7 @@ const make = Effect.gen(function* () {
       };
     }),
     delegateTask: Effect.fn("OrchestratorMcpService.delegateTask")(function* (callerScope, input) {
+      yield* validateWorktreeBase(input);
       const environmentId =
         input.target === undefined
           ? undefined
@@ -2861,8 +2863,30 @@ const make = Effect.gen(function* () {
         parent.thread.interactionMode,
         input.interactionMode,
       );
+      // A retry of an accepted delegation replays it with the base it resolved the first time.
       let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
-      if (input.isolation === "worktree" && !isRetryOfAcceptedDelegation) {
+      if (
+        input.isolation === "worktree" &&
+        input.baseRef !== undefined &&
+        !isRetryOfAcceptedDelegation
+      ) {
+        // A chosen base resolves where the worktree is created, the project's checkout, to
+        // one commit now, so preparation cannot pick another later.
+        workspaceStrategy = yield* threadLaunch
+          .resolveWorktreeBase({
+            projectId: parent.thread.projectId,
+            workspaceStrategy: {
+              type: "worktree",
+              baseRef: input.baseRef,
+              startFromOrigin: input.startFromOrigin ?? false,
+            },
+          })
+          .pipe(
+            Effect.mapError((error) =>
+              failure("base_unavailable", `${error.message} No task was created.`),
+            ),
+          );
+      } else if (input.isolation === "worktree" && !isRetryOfAcceptedDelegation) {
         const project = yield* requireProject(parent.thread.projectId);
         const base = yield* gitDriver
           .resolveCommit({
