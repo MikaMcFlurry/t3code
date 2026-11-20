@@ -5254,6 +5254,23 @@
   "c752acb0b7088295": "已连接",
   "a097631b7acab9d8": "等待批准…",
   "aabd9632196ee7e5": "正在重新连接…",
+  "d92d1201f3aa424b": "(no arguments)",
+  "cb85d4a9792068d5": "Allow desktop control?",
+  "d026764631290844": [
+    "Thread ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    " wants to run the desktop action \"",
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
+    "\". Review the exact input before allowing it. It is shown only for this pending decision and is not saved by the approval broker."
+  ],
   "a80895f122d7020f": "无法打开链接",
   "2a1758375b2701f3": "无法添加后端",
   "6730fa8ae68fad99": "无法添加后端。",
@@ -8129,6 +8146,7 @@
     "。仅当你面前的设备显示此验证码时才批准。"
   ],
   "7c5eb60743d53f71": "拒绝",
+  "65947ad9a6cae20d": "Allow once",
   "0ecf3435b0434d1b": [
     "信任自",
     " ",
@@ -8684,6 +8702,9 @@
   "3a22541b4b44214b": "响应式",
   "80726ab1cdc0fba1": "你的默认浏览器",
   "f6b11bd9aea5e75e": "自定义",
+  "b7696998059e07cc": "Ask every time",
+  "9f31362c726e9d69": "Not in full access",
+  "338adc52f3ecfbdb": "Never ask",
   "a4808b3447bea046": "你和智能体使用的标签页尺寸。“填满面板”会适应面板大小；其他尺寸会显示设备工具栏。",
   "f26f3869603e5918": "重置默认浏览器视口为默认值",
   "2aa17f5ea670658e": "默认浏览器视口",
@@ -8726,6 +8747,11 @@
   "a6a6dc235b108747": "允许智能体使用共享浏览器。项目可以覆盖此设置。",
   "ea5fed973bfc1aca": "重置默认浏览器访问权限为默认值",
   "19e1f74805f4a1fb": "智能体浏览器访问",
+  "a58f115b3fd97146": "Reset agent desktop control to default",
+  "5df0fe31bd236071": "Agent desktop control",
+  "36dd8189b115f566": "When an agent's desktop actions wait for your approval. Not in full access: full-access threads act without asking. Never ask: a standing approval for every thread. Stop or a new session ends it.",
+  "3986789c00214bc4": "Reset agent desktop approval to default",
+  "e1941f5c6591dc23": "Desktop approval",
   "b395b88284e3bca2": "智能体打开浏览器或设备时显示浮动预览，除非智能体另有要求。",
   "6aadfd59cf60b4b5": "重置自动显示浮动预览为默认值",
   "e4a7ec61190bc1f9": "自动显示浮动预览",
@@ -8763,6 +8789,37 @@
       "t": "DeviceToolVersions",
       "i": 1
     }
+  ],
+  "a90e1527a54348e0": [
+    "Let agents in this project see and control this machine's desktop. Linux needs",
+    " ",
+    {
+      "t": "code",
+      "i": 1,
+      "c": "computer-use-linux"
+    },
+    " on PATH, Windows needs ",
+    {
+      "t": "code",
+      "i": 2,
+      "c": "uv"
+    },
+    ". Shell and file tools stay off. Applies to new sessions."
+  ],
+  "6a69b1f6c7e050ab": [
+    "Let agents see and control this machine's desktop; projects can override it. Linux needs ",
+    {
+      "t": "code",
+      "i": 1,
+      "c": "computer-use-linux"
+    },
+    " on PATH, Windows needs ",
+    {
+      "t": "code",
+      "i": 2,
+      "c": "uv"
+    },
+    ". Shell and file tools stay off. Applies to new sessions."
   ],
   "093c68324c1b1280": "添加浏览器配置",
   "1f404c456e5b2a0b": "空白浏览器配置",
@@ -12013,6 +12070,9 @@
   "f2b07faba1229ce7": "健康检查间隔",
   "5c9dc9970db79fe2": "刷新 可用性 版本 认证状态 模型 后台 探测 秒 关闭",
   "056ba6a180d114b5": "允许 禁用 启用 打开 操控 预览 工具 智能体会话 项目 覆盖",
+  "e55879a6a62fd41a": "computer use linux ubuntu gnome wayland windows screen mouse keyboard screenshot click type approve",
+  "05495b9974333523": "Agent desktop approval",
+  "eb04997423c85584": "computer use approve ask every time full access standing never ask desktop control",
   "345075be6cacc171": "设备 主机 ssh 远程 mac mini 身份 密钥 连接 eas expo 云 simlock 池 网关 本地 模拟器",
   "a6b742430b05d6cc": "允许智能体使用设备",
   "1d5d7418a83575c2": "允许 模拟器 ios android 操控 工具 智能体会话",
