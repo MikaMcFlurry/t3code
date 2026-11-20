@@ -127,6 +127,7 @@ import {
   type ProviderApprovalFullAccessOverride,
   type ProviderApprovalOption,
   ProviderDriverKind,
+  type ProjectId,
   type ProviderInstanceId,
   type ProviderRequestKind,
   type ProviderUserInputAnswers,
@@ -2281,6 +2282,7 @@ export function makeClaudeQueryOptions(input: {
   readonly appendSystemPromptFileText?: string;
   // Flag settings, because a user's settings.json env beats the process env in Claude Code.
   readonly toolSearchOverride?: "true";
+  readonly autoMemoryDirectory?: string;
 }): ClaudeAgentSdkQueryOptions {
   const compiledSelection = compileClaudeModelSelection(input.modelSelection, input.modelCatalog);
   const {
@@ -2340,6 +2342,13 @@ export function makeClaudeQueryOptions(input: {
           ...(typeof querySettings === "object" && querySettings !== null ? querySettings : {}),
           autoCompactWindow: Number(autoCompactWindow),
         } as ClaudeSdkSettings);
+  const memoryQuerySettings =
+    input.autoMemoryDirectory === undefined || typeof compactQuerySettings === "string"
+      ? compactQuerySettings
+      : ({
+          ...compactQuerySettings,
+          autoMemoryDirectory: input.autoMemoryDirectory,
+        } as ClaudeSdkSettings);
   // Claude Code expands a bare alias to its own model, so a custom model with an alias's name
   // pins the alias to itself.
   const aliasOverrideEnv =
@@ -2354,12 +2363,12 @@ export function makeClaudeQueryOptions(input: {
     (input.toolSearchOverride === undefined &&
       aliasOverrideEnv === undefined &&
       autoCompactWindow === undefined) ||
-    typeof compactQuerySettings === "string"
-      ? compactQuerySettings
+    typeof memoryQuerySettings === "string"
+      ? memoryQuerySettings
       : ({
-          ...compactQuerySettings,
+          ...memoryQuerySettings,
           env: {
-            ...compactQuerySettings?.env,
+            ...memoryQuerySettings?.env,
             ...aliasOverrideEnv,
             // Claude Code ranks this env var above the autoCompactWindow setting.
             ...(autoCompactWindow === undefined
@@ -2505,6 +2514,11 @@ const readClaudeAppendSystemPromptFile = Effect.fnUntraced(function* (input: {
 const decodeClaudeLaunchArgSettings = Schema.decodeUnknownEffect(
   fromLenientJson(Schema.Record(Schema.String, Schema.Unknown)),
 );
+
+const setsAutoMemoryDirectory = (settings: object | undefined) => {
+  const value = settings === undefined ? undefined : Reflect.get(settings, "autoMemoryDirectory");
+  return typeof value === "string" && value.trim().length > 0;
+};
 
 /**
  * Reads the --settings launch argument: a value starting with a brace is inline
@@ -5708,6 +5722,8 @@ export interface ClaudeAdapterV2Options {
   readonly attachmentsDir: string;
   /** The central skill library every Claude session loads; see skills/CentralSkills.ts. */
   readonly centralSkillsDirectory?: string;
+  /** Parent of the per-project auto memory folders that `shareProjectMemory` points Claude at. */
+  readonly sharedMemoryRoot?: string;
   readonly fileSystem: FileSystem.FileSystem;
   readonly path: Path.Path;
   readonly random: SecureRandom.SecureRandom["Service"];
@@ -5957,6 +5973,39 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
     }
     return "";
   });
+
+  // An autoMemoryDirectory the user set wins. Claude Code ignores one in checked-in project
+  // settings, so only --settings, local, and user settings count.
+  const resolveSharedMemoryDirectory = Effect.fn("ClaudeAdapterV2.resolveSharedMemoryDirectory")(
+    function* (
+      cwd: string | null,
+      projectId: ProjectId,
+      launchArgSettings: ClaudeSdkSettings | undefined,
+    ) {
+      const root = adapterOptions.sharedMemoryRoot;
+      if (!adapterOptions.settings.shareProjectMemory || root === undefined) return undefined;
+      if (setsAutoMemoryDirectory(launchArgSettings)) return undefined;
+      const projectSettingsFile = cwd === null ? null : path.join(cwd, ".claude", "settings.json");
+      for (const settingsFile of yield* settingsFilesByPrecedence(cwd)) {
+        if (settingsFile === projectSettingsFile) continue;
+        const settings = yield* fileSystem.readFileString(settingsFile).pipe(
+          Effect.flatMap(decodeClaudeLaunchArgSettings),
+          Effect.orElseSucceed(() => undefined),
+        );
+        if (setsAutoMemoryDirectory(settings)) return undefined;
+      }
+      const directory = path.join(root, projectId.replace(/[^a-zA-Z0-9_-]/g, "-"));
+      return yield* fileSystem.makeDirectory(directory, { recursive: true }).pipe(
+        Effect.as(directory),
+        Effect.catch((cause) =>
+          Effect.logWarning("Claude shared project memory folder could not be created", {
+            directory,
+            cause,
+          }).pipe(Effect.as(undefined)),
+        ),
+      );
+    },
+  );
 
   const userInvocableSkills = (cwd: string | null) =>
     discoverClaudeSkills(
@@ -13143,18 +13192,24 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           }
 
           // Read before closing the live process so a bad path leaves it running.
-          const [appendSystemPromptFileText, toolSearchOverride] = yield* Effect.all(
-            [
-              readClaudeAppendSystemPromptFile({
-                settings: adapterOptions.settings,
-                cwd: turnInput.runtimePolicy.cwd,
-                fileSystem,
-                path,
-              }),
-              resolveToolSearchOverride(turnInput.runtimePolicy.cwd, launchArgSettings),
-            ],
-            { concurrency: "unbounded" },
-          );
+          const [appendSystemPromptFileText, toolSearchOverride, autoMemoryDirectory] =
+            yield* Effect.all(
+              [
+                readClaudeAppendSystemPromptFile({
+                  settings: adapterOptions.settings,
+                  cwd: turnInput.runtimePolicy.cwd,
+                  fileSystem,
+                  path,
+                }),
+                resolveToolSearchOverride(turnInput.runtimePolicy.cwd, launchArgSettings),
+                resolveSharedMemoryDirectory(
+                  turnInput.runtimePolicy.cwd,
+                  turnInput.appThread.projectId,
+                  launchArgSettings,
+                ),
+              ],
+              { concurrency: "unbounded" },
+            );
           const closedExistingNativeThreadId = existing !== null ? existing.nativeThreadId : null;
           clearedNativeSessions.delete(nativeThreadId);
           if (existing !== null) {
@@ -13221,6 +13276,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             supportedDialogKinds: ["resume_return"],
             ...(appendSystemPromptFileText === undefined ? {} : { appendSystemPromptFileText }),
             ...(toolSearchOverride === undefined ? {} : { toolSearchOverride }),
+            ...(autoMemoryDirectory === undefined ? {} : { autoMemoryDirectory }),
           });
           const resolvedTurnCwd = yield* fileSystem
             .realPath(turnInput.runtimePolicy.cwd ?? ".")
@@ -14957,6 +15013,7 @@ export const createClaudeAdapterV2 = Effect.fn("ClaudeAdapterV2Driver.create")(
       environment: claudeEnvironment,
       attachmentsDir: serverConfig.attachmentsDir,
       centralSkillsDirectory: serverConfig.skillsDir,
+      sharedMemoryRoot: path.join(serverConfig.stateDir, "claude-memory"),
       fileSystem,
       path,
       random,
