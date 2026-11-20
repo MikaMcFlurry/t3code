@@ -1,4 +1,5 @@
 import type { CentralMcpServer } from "@t3tools/contracts";
+import { T, useGT } from "gt-react";
 import { Trash2Icon } from "lucide-react";
 import { useState } from "react";
 
@@ -24,6 +25,7 @@ export function CentralMcpServersSection({
   readonly readOnly: boolean;
   readonly onChange: (servers: ReadonlyArray<CentralMcpServer>) => void;
 }) {
+  const gt = useGT();
   const [name, setName] = useState("");
   const [target, setTarget] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
@@ -35,7 +37,7 @@ export function CentralMcpServersSection({
       return;
     }
     if (servers.some((existing) => existing.name === server.name)) {
-      setProblem(`A central MCP server named '${server.name}' already exists.`);
+      setProblem(gt("A central MCP server named {name} already exists.", { name: server.name }));
       return;
     }
     onChange([...servers, server]);
@@ -45,10 +47,12 @@ export function CentralMcpServersSection({
   };
 
   return (
-    <SettingsSection title="Central MCP servers">
+    <SettingsSection title={gt("Central MCP servers")}>
       <SettingsRow
-        title="Add MCP server"
-        description="Added to every Claude and Codex session on this machine, whichever account runs it. Environment variables and headers are kept in the secret store."
+        title={gt("Add MCP server")}
+        description={gt(
+          "Added to every Claude and Codex session on this machine, whichever account runs it. Environment variables and headers are kept in the secret store.",
+        )}
         control={
           <div className="flex w-full max-w-lg items-center gap-2">
             <Input
@@ -56,20 +60,23 @@ export function CentralMcpServersSection({
               className="w-32"
               value={name}
               disabled={readOnly}
-              placeholder="name"
-              aria-label="MCP server name"
+              placeholder={gt("name", { $context: "MCP server name placeholder" })}
+              aria-label={gt("MCP server name")}
               onChange={(event) => setName(event.target.value)}
             />
             <Input
               size="sm"
               value={target}
               disabled={readOnly}
-              placeholder="Command (npx -y …) or https:// URL"
-              aria-label="MCP server command or URL"
+              placeholder={gt("Command ({example} …) or {scheme} URL", {
+                example: "npx -y",
+                scheme: "https://",
+              })}
+              aria-label={gt("MCP server command or URL")}
               onChange={(event) => setTarget(event.target.value)}
             />
             <Button size="sm" disabled={readOnly || !name.trim() || !target.trim()} onClick={add}>
-              Add
+              <T>Add</T>
             </Button>
           </div>
         }
@@ -85,7 +92,7 @@ export function CentralMcpServersSection({
               <Switch
                 checked={server.enabled}
                 disabled={readOnly}
-                aria-label={`Enable ${server.name}`}
+                aria-label={gt("Enable {name}", { name: server.name })}
                 onCheckedChange={(enabled) =>
                   onChange(
                     servers.map((entry) =>
@@ -98,7 +105,7 @@ export function CentralMcpServersSection({
                 size="icon-sm"
                 variant="ghost"
                 disabled={readOnly}
-                aria-label={`Remove ${server.name}`}
+                aria-label={gt("Remove {name}", { name: server.name })}
                 onClick={() => onChange(servers.filter((entry) => entry.name !== server.name))}
               >
                 <Trash2Icon />
@@ -132,8 +139,8 @@ function CentralMcpServerSecrets({
   readonly readOnly: boolean;
   readonly onChange: (server: CentralMcpServer) => void;
 }) {
+  const gt = useGT();
   const kind = centralMcpServerSecretKind(server);
-  const noun = kind === "env" ? "environment variable" : "header";
   const [replacements, setReplacements] = useState<Readonly<Record<string, string>>>({});
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
@@ -156,7 +163,9 @@ function CentralMcpServerSecrets({
       return;
     }
     if (centralMcpServerSecretEntries(server).some((entry) => entry.key === trimmed)) {
-      setProblem(`'${trimmed}' is already set; type a new value in its row to replace it.`);
+      setProblem(
+        gt("{key} is already set; type a new value in its row to replace it.", { key: trimmed }),
+      );
       return;
     }
     onChange(withCentralMcpServerSecret(server, trimmed, value));
@@ -176,8 +185,12 @@ function CentralMcpServerSecrets({
             autoComplete="off"
             value={replacements[entry.key] ?? ""}
             disabled={readOnly}
-            placeholder={entry.saved ? "Saved; type to replace" : "Empty"}
-            aria-label={`New value for ${noun} ${entry.key}`}
+            placeholder={entry.saved ? gt("Saved; type to replace") : gt("Empty")}
+            aria-label={
+              kind === "env"
+                ? gt("New value for environment variable {key}", { key: entry.key })
+                : gt("New value for header {key}", { key: entry.key })
+            }
             onChange={(event) => {
               const next = event.target.value;
               setReplacements((current) => ({ ...current, [entry.key]: next }));
@@ -192,13 +205,17 @@ function CentralMcpServerSecrets({
             disabled={readOnly || !replacements[entry.key]}
             onClick={() => replace(entry.key)}
           >
-            Replace
+            <T>Replace</T>
           </Button>
           <Button
             size="icon-sm"
             variant="ghost"
             disabled={readOnly}
-            aria-label={`Remove ${noun} ${entry.key}`}
+            aria-label={
+              kind === "env"
+                ? gt("Remove environment variable {key}", { key: entry.key })
+                : gt("Remove header {key}", { key: entry.key })
+            }
             onClick={() => onChange(withCentralMcpServerSecret(server, entry.key, null))}
           >
             <Trash2Icon />
@@ -211,8 +228,13 @@ function CentralMcpServerSecrets({
           className="w-40 shrink-0"
           value={key}
           disabled={readOnly}
+          // oxlint-disable-next-line t3code/no-untranslated-copy -- example identifiers, not prose
           placeholder={kind === "env" ? "VARIABLE_NAME" : "Header-Name"}
-          aria-label={`New ${noun} name for ${server.name}`}
+          aria-label={
+            kind === "env"
+              ? gt("New environment variable name for {name}", { name: server.name })
+              : gt("New header name for {name}", { name: server.name })
+          }
           onChange={(event) => setKey(event.target.value)}
         />
         <Input
@@ -221,12 +243,16 @@ function CentralMcpServerSecrets({
           autoComplete="off"
           value={value}
           disabled={readOnly}
-          placeholder="Value"
-          aria-label={`New ${noun} value for ${server.name}`}
+          placeholder={gt("Value")}
+          aria-label={
+            kind === "env"
+              ? gt("New environment variable value for {name}", { name: server.name })
+              : gt("New header value for {name}", { name: server.name })
+          }
           onChange={(event) => setValue(event.target.value)}
         />
         <Button size="sm" variant="outline" disabled={readOnly || !key.trim()} onClick={add}>
-          {kind === "env" ? "Add variable" : "Add header"}
+          {kind === "env" ? gt("Add variable") : gt("Add header")}
         </Button>
       </div>
       {problem ? <p className="text-xs text-destructive">{problem}</p> : null}
