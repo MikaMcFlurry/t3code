@@ -28,6 +28,51 @@ if (-not $SkipFetch) {
   if (-not $NoPush) { git push -q origin main }
 }
 
+# Conflicts between the Mika branches are resolved once and the resolutions committed to
+# mika/tooling (mika/rr-cache, see mika/README.md); rerere replays them below like resolutions made
+# on this machine. Read them and the catalog merge driver from the branch: the working tree may not
+# hold mika/ right now, and rebases of the feature branches run without it.
+$gitCommon = (Resolve-Path (git rev-parse --git-common-dir)).Path
+$rrTemp = Join-Path ([IO.Path]::GetTempPath()) "t3mika-rr-$PID"
+New-Item -ItemType Directory -Force $rrTemp | Out-Null
+try {
+  $paths = @('mika/t3mika-merge-catalog.mjs')
+  if (git ls-tree --name-only mika/tooling mika/rr-cache) { $paths += 'mika/rr-cache' }
+  git archive -o (Join-Path $rrTemp 'tooling.tar') mika/tooling @paths
+  tar -xf (Join-Path $rrTemp 'tooling.tar') -C $rrTemp
+  Copy-Item (Join-Path $rrTemp 'mika\t3mika-merge-catalog.mjs') $gitCommon -Force
+  if (Test-Path (Join-Path $rrTemp 'mika\rr-cache')) {
+    Get-ChildItem (Join-Path $rrTemp 'mika\rr-cache') -Directory | ForEach-Object {
+      $target = Join-Path $gitCommon "rr-cache\$($_.Name)"
+      if (-not (Test-Path (Join-Path $target 'postimage'))) {
+        New-Item -ItemType Directory -Force $target | Out-Null
+        Copy-Item (Join-Path $_.FullName '*') $target -Force
+      }
+    }
+  }
+} finally {
+  Remove-Item -Recurse -Force $rrTemp -ErrorAction SilentlyContinue
+}
+# agentContextBudget.json holds measured byte counts that every branch adding an MCP tool changes
+# on the same lines. Merges keep mika/main's side; the exact-match budget test guards upstream CI only.
+git config merge.t3mika-keep.name 'keep mika/main side'
+git config merge.t3mika-keep.driver true
+# The translation catalogs merge key by key: branches that add strings add them on neighbouring
+# lines, which a line merge reports as a conflict. git runs drivers through sh: forward slashes.
+$catalogDriver = (Join-Path $gitCommon 't3mika-merge-catalog.mjs') -replace '\\', '/'
+git config merge.t3mika-catalog.name 'GT catalogs, key by key'
+git config merge.t3mika-catalog.driver "node '$catalogDriver' %O %A %B %P"
+$attributes = Join-Path $gitCommon 'info\attributes'
+foreach ($rule in @(
+    'apps/server/src/provider/agentContextBudget.json merge=t3mika-keep',
+    'apps/*/src/i18n/translations/*.json merge=t3mika-catalog'
+  )) {
+  if (-not ((Test-Path $attributes) -and (Select-String -Quiet -SimpleMatch $rule $attributes))) {
+    New-Item -ItemType Directory -Force (Split-Path $attributes) | Out-Null
+    Add-Content $attributes $rule
+  }
+}
+
 $lockBefore = git rev-parse 'mika/main:pnpm-lock.yaml' 2>$null
 $failed = @()
 foreach ($branch in $branches) {
