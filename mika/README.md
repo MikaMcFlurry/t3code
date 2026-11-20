@@ -114,6 +114,21 @@ Dann in einem T3-Code-Thread im Projekt `D:\T3-Dev\t3code`:
 > Upstream-Änderungen passt. Danach `vp run check:changed` und die Tests des Branches ausführen, dann
 > `mika\Update-T3Mika.ps1 -SkipFetch` starten.
 
+### Konflikte zwischen den Branches (mika/main)
+
+Die Branches starten alle von upstream main und berühren teils dieselben Stellen. `Update-T3Mika.ps1`
+merged sie mit rerere; die einmal gelösten Konflikte liegen in `mika/rr-cache` (Kopie von
+`.git/rr-cache/<id>/preimage` und `postimage`) und werden vor dem Mergen eingespielt. Neue
+Merge-Konflikte: von Hand lösen, committen, dann die neuen Einträge aus `.git/rr-cache` (nur die mit
+`postimage`) nach `mika/rr-cache` kopieren und auf `mika/tooling` committen.
+
+- `agentContextBudget.json` (gemessene Byte-Zahlen) merged mit dem Treiber `t3mika-keep`: mika/main
+  behält seinen Wert, der Budget-Test schlägt auf mika/main deshalb fehl. Das ist erwartet.
+- Die Übersetzungskataloge (`apps/*/src/i18n/translations/*.json`) merged der Treiber
+  `t3mika-catalog` (`mika/t3mika-merge-catalog.mjs`) Schlüssel für Schlüssel; er stoppt nur, wenn
+  beide Seiten denselben Schlüssel verschieden ändern. Neue Schlüssel trotzdem nicht ans Dateiende
+  hängen, sondern hinter den upstream-Schlüssel, der davor sortiert: das hält auch Rebases ruhig.
+
 ## Automatische Updates
 
 - **Windows:** `mika\Invoke-T3MikaSafeUpdate.ps1 -Register` legt den geplanten Task "T3 Mika Safe Update" an
