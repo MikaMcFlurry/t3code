@@ -1,4 +1,7 @@
 import type { CentralMcpServer } from "@t3tools/contracts";
+import { msg } from "gt-react";
+
+import { m, type MessageResolver } from "../../i18n/messages";
 
 const SERVER_NAME = /^(?!t3-code$)[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 
@@ -10,10 +13,18 @@ function splitCommandLine(value: string): string[] {
 }
 
 /** An http(s) address becomes an http server; anything else is a command line to run. */
-export function centralMcpServerFromInput(name: string, target: string): CentralMcpServer | string {
+export function centralMcpServerFromInput(
+  name: string,
+  target: string,
+  resolve: MessageResolver = m,
+): CentralMcpServer | string {
   const trimmedName = name.trim();
   if (!SERVER_NAME.test(trimmedName)) {
-    return "Use letters, digits, '-' or '_' for the name (not t3-code).";
+    return resolve(
+      msg("Use letters, digits, '-' or '_' for the name (not {reserved}).", {
+        reserved: "t3-code",
+      }),
+    );
   }
   const trimmedTarget = target.trim();
   if (/^https?:\/\//i.test(trimmedTarget)) {
@@ -24,7 +35,7 @@ export function centralMcpServerFromInput(name: string, target: string): Central
     };
   }
   const [command, ...args] = splitCommandLine(trimmedTarget);
-  if (!command) return "Enter a command or an http(s) URL.";
+  if (!command) return resolve(msg("Enter a command or an http(s) URL."));
   return { name: trimmedName, enabled: true, transport: { type: "stdio", command, args, env: {} } };
 }
 
@@ -77,12 +88,15 @@ const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 export function centralMcpServerSecretKeyProblem(
   server: CentralMcpServer,
   key: string,
+  resolve: MessageResolver = m,
 ): string | null {
   const kind = centralMcpServerSecretKind(server);
   if (!(kind === "env" ? ENV_NAME : HEADER_NAME).test(key)) {
     return kind === "env"
-      ? "Use letters, digits and '_' for the variable name, not starting with a digit."
-      : "Enter a valid header name, such as Authorization.";
+      ? resolve(
+          msg("Use letters, digits and '_' for the variable name, not starting with a digit."),
+        )
+      : resolve(msg("Enter a valid header name, such as {example}.", { example: "Authorization" }));
   }
   return null;
 }
