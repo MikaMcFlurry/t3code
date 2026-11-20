@@ -4,6 +4,13 @@ import { memo, useLayoutEffect, useRef, useState } from "react";
 import { msg, T, useMessages } from "gt-react";
 import { StarIcon } from "lucide-react";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
+import { describeUsageHeadroom } from "@t3tools/shared/usageLimitsCopy";
+import {
+  type ModelPickerUsage,
+  ProviderResetClock,
+  ProviderUsageHalo,
+  ProviderUsageTooltipDetails,
+} from "./ModelPickerUsage";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
 import type { MessageResolver } from "../../i18n/messages";
@@ -56,6 +63,8 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
   disabledInstanceIds?: ReadonlySet<ProviderInstanceId>;
   selectableUnavailableInstanceIds?: ReadonlySet<ProviderInstanceId>;
   getDisabledInstanceTooltip?: (entry: ProviderInstanceEntry) => string;
+  /** Set while the Labs usage setting is on. */
+  usage?: ModelPickerUsage | null;
 }) {
   const m = useMessages();
   const handleSelect = (instanceId: ProviderInstanceId | "favorites") => {
@@ -78,7 +87,10 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
       setSelectedIndicatorTop(null);
       return;
     }
-    setSelectedIndicatorTop(selectedItem.offsetTop + selectedItem.offsetHeight / 2 - 10);
+    // Center on the icon button, not the reset time under it.
+    const button = selectedItem.firstElementChild;
+    const height = button instanceof HTMLElement ? button.offsetHeight : selectedItem.offsetHeight;
+    setSelectedIndicatorTop(selectedItem.offsetTop + height / 2 - 10);
   }, [
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Adding, removing or reordering providers moves the selected item, so the indicator re-measures.
     props.instanceEntries,
@@ -152,6 +164,8 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
             const isSelected = props.selectedInstanceId === entry.instanceId;
             const isHovered = hoveredInstanceId === entry.instanceId;
             const showInstanceBadge = shouldShowInstanceBadge(entry, props.instanceEntries);
+            const headroom = isUnavailable ? null : props.usage?.byInstance.get(entry.instanceId);
+            const now = props.usage?.now ?? 0;
 
             const tooltip = isUnavailable
               ? describeUnavailableInstance(entry, m)
@@ -179,8 +193,22 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                 focusableWhenDisabled={!isDisabled}
                 aria-pressed={isSelected}
                 type="button"
-                aria-label={isUnavailable || isContextDisabled ? tooltip : entry.displayName}
+                aria-label={
+                  isUnavailable || isContextDisabled
+                    ? tooltip
+                    : headroom
+                      ? `${entry.displayName}, ${describeUsageHeadroom(headroom, now, m)}`
+                      : entry.displayName
+                }
               >
+                {headroom ? (
+                  <ProviderUsageHalo
+                    headroom={headroom}
+                    driver={entry.driverKind}
+                    accentColor={entry.accentColor}
+                    className="z-20"
+                  />
+                ) : null}
                 <ProviderInstanceIcon
                   driverKind={entry.driverKind}
                   displayName={entry.displayName}
@@ -222,8 +250,23 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                     align="center"
                   >
                     {tooltip}
+                    {headroom ? (
+                      <ProviderUsageTooltipDetails
+                        headroom={headroom}
+                        driver={entry.driverKind}
+                        accentColor={entry.accentColor}
+                        now={now}
+                      />
+                    ) : null}
                   </TooltipPopup>
                 </Tooltip>
+                {headroom ? (
+                  <ProviderResetClock
+                    headroom={headroom}
+                    now={now}
+                    className={cn("-mt-0.5 pb-1", isDisabled && "opacity-50")}
+                  />
+                ) : null}
               </div>
             );
           })}
