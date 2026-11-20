@@ -5399,5 +5399,8 @@
   "ad208e3e32c85029": "Dölj alla",
   "3328503592789bed": "Zen",
   "856812e7e1fc445e": "Verktygsanrop i chatten",
-  "8d545d54c0a9e950": "Dölj kommandon, redigeringar och sökningar som agenter kör. Dölj lyckade behåller misslyckanden. Zen visar bara slutliga svar. Godkännanden, frågor och fel visas alltid."
+  "8d545d54c0a9e950": "Dölj kommandon, redigeringar och sökningar som agenter kör. Dölj lyckade behåller misslyckanden. Zen visar bara slutliga svar. Godkännanden, frågor och fel visas alltid.",
+  "3afb8ca84915e986": "Tillåt kameraåtkomst i Inställningar för att ta foton.",
+  "3d4320b2497d393d": "Det gick inte att öppna kameran.",
+  "a21fcfe973803872": "Ta foto"
 }
