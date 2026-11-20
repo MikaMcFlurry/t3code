@@ -111,6 +111,7 @@ import { resolveAttachmentPath, resolveAttachmentPathById } from "../../attachme
 import * as PortScanner from "../../preview/PortScanner.ts";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import { ServerConfig } from "../../config.ts";
+import { mirrorCentralSkillsToCodexHome } from "../../skills/CentralSkillsMirror.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import { buildCodexAdditionalContext } from "../../provider/CodexDeveloperInstructions.ts";
 import {
@@ -1879,6 +1880,7 @@ export const createCodexAdapterV2 = Effect.fn("CodexAdapterV2.createCodexAdapter
   const portDiscovery = yield* PortScanner.PortDiscovery;
   const serverConfig = yield* ServerConfig;
   const homeLayout = yield* resolveCodexHomeLayout(config);
+  const pathService = yield* Path.Path;
 
   yield* materializeCodexShadowHome(homeLayout).pipe(
     Effect.mapError(
@@ -1911,6 +1913,16 @@ export const createCodexAdapterV2 = Effect.fn("CodexAdapterV2.createCodexAdapter
     serverConfig,
     continuationRequests,
     watchCommandStops: portDiscovery.watchAgentCommandStops,
+    syncCentralSkills: (runtimeSettings, runtimeEnvironment) =>
+      mirrorCentralSkillsToCodexHome({
+        skillsDir: serverConfig.skillsDir,
+        homePath: runtimeSettings.homePath,
+        environment: runtimeEnvironment,
+      }).pipe(
+        Effect.asVoid,
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, pathService),
+      ),
     ...hooks,
   });
 });
@@ -1931,6 +1943,11 @@ export interface CodexAdapterV2Options {
   readonly fileSystem: FileSystem.FileSystem;
   readonly idAllocator: IdAllocator.IdAllocatorV2["Service"];
   readonly serverConfig: ServerConfig["Service"];
+  /** Copies the central skill library into the session's Codex home before it starts. */
+  readonly syncCentralSkills?: (
+    settings: CodexSettings,
+    environment: NodeJS.ProcessEnv,
+  ) => Effect.Effect<void>;
   /** Omitting this leaves late completions projection-only. */
   readonly continuationRequests?: {
     readonly offer: (
@@ -1976,6 +1993,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     }),
                 ),
               );
+        if (adapterOptions.syncCentralSkills !== undefined) {
+          yield* adapterOptions.syncCentralSkills(
+            resolvedRuntime?.config ?? adapterOptions.settings,
+            resolvedRuntime?.environment ?? adapterOptions.environment,
+          );
+        }
         const client = yield* clientFactory.open({
           instanceId: adapterOptions.instanceId,
           threadId: input.threadId,
