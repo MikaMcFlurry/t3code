@@ -408,6 +408,7 @@
   "a11d4c010567faac": "Redémarrez T3 Code sur cet appareil.",
   "6a1d53c7bee371aa": "Si l’échec persiste, retirez {host} de cet appareil puis ajoutez-le à nouveau.",
   "41dd22a83e2fa219": "Déconnectez-vous de T3 Connect, puis reconnectez-vous.",
+  "41df551174846725": "Bibliothèque de skills",
   "a569ba31753e80a3": "Vérifiez la connexion Internet de cet appareil.",
   "74d36a4b4a67340f": "Un VPN, un pare-feu ou un bloqueur de publicités sur cet appareil peut bloquer T3 Connect.",
   "13d74302502bdb92": "Un VPN, un pare-feu ou un filtre DNS sur cet appareil peut bloquer le tunnel.",
@@ -623,6 +624,7 @@
   "dda5dec2ba19575c": "{count, plural, one {{count} octet} other {{count} octets}}",
   "133aaa0f98c2ea49": "« {name} » dépasse la limite de {size} par pièce jointe.",
   "16ebaeabe59a4857": "Impossible de joindre cet environnement via T3 Connect avec ce compte.",
+  "16f3efa6174af615": "Les skills activés sont disponibles pour chaque compte fournisseur de cette machine : Claude les charge directement, les dossiers Codex en reçoivent une copie gérée. Vos propres skills portant le même nom sont prioritaires.",
   "7e19512f1ce2b686": "Les versions des outils d’appareil n’ont pas été vérifiées.",
   "7bdc8e41c92e24b7": "Hub d’appareils",
   "7c2dbfeeb5981501": "Outils de l’agent",
@@ -736,6 +738,7 @@
   "101bf926f0721df4": "Workflow",
   "d3f66f03a1c8ddc8": "{count, plural, one {{count} agent} other {{count} agents}}",
   "624506a403296638": "En cours",
+  "6248d665f995d8d1": "Dossier : {directory}",
   "7bfe35051f932b93": "Approbation requise",
   "b67d6bd5c4e311b7": "Attend votre réponse",
   "166661f94b300f5b": "Terminé",
@@ -814,6 +817,7 @@
   "9f70c78508f05cc5": "Ce soir",
   "1b9d249ecc4cc532": "Demain",
   "f3e58d0c7a119551": "La semaine prochaine",
+  "f3eeebac9160c736": "Skills centraux",
   "26dd8a65fa8bd045": "maintenant",
   "7ac52df3f6b0a072": "{minutes} min",
   "8ebe1f516687cb93": "{hours} h",
@@ -2520,6 +2524,7 @@
   "33c7e68fca089036": "Fil, {title}",
   "b4b98a0287c282e2": "Sur une autre machine, l’agent de cette machine ne peut donc pas le lire. Retirez-le ou revenez en arrière pour envoyer.",
   "c6196d99000642b4": "Ouvrir le fil",
+  "c62a0c9e2a477626": "Depuis {source}",
   "34cc63390ad793cc": "Choisir un fil",
   "8f12309ead62e38a": "Rechercher des fils ou des projets...",
   "2f664754d005d9a7": "Aucun fil actif trouvé.",
@@ -2946,6 +2951,7 @@
   "8c1bb7953bdeb59b": "{title} nécessite un environnement compatible. Choisissez-en un pour continuer.",
   "c83f08486162e679": "{title} nécessite un environnement compatible. Connectez ou mettez à jour un environnement pour continuer.",
   "93723f58bafe1568": "{title} n’est pas disponible pour la cible sélectionnée. Choisissez sa portée d’origine pour continuer.",
+  "93776d65eeabf676": "Aucun skill central pour l’instant.",
   "22a6870eaaa85f1f": "Contenu des paramètres",
   "dc06ede61ff5d1cc": "Rétablir les valeurs par défaut de l’appareil",
   "c4b395da633cf4d3": [
@@ -3223,6 +3229,14 @@
   "536a820f2ff726da": "Sélectionnez au moins un modèle.",
   "fbafbe78b5e37966": "Reprendre le fil",
   "bcd7eb979dd38dae": "Ouvrir la zone de saisie pour compacter et envoyer",
+  "bcd81f6bc8be0377": [
+    "Impossible de charger les skills : ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
   "95ee62a0d6968b89": "Envoyer le message",
   "164d3295a763dbad": "L’instantané n’est plus disponible.",
   "f77ce9bc81a68882": "L’instantané n’est pas prêt à être copié.",
@@ -3874,6 +3888,7 @@
   "7d3850e5d84691a5": "Le fournisseur {provider} est indisponible.",
   "8c373cfba06c51f9": "La disponibilité du fournisseur {provider} est limitée.",
   "7869f98d80c5be6e": "{provider} n’est pas authentifié",
+  "786d17c346c53e64": "Dossier, URL git ou URL de SKILL.md",
   "60c47138e614902e": "{provider} {version} est connu pour être défectueux",
   "a9c2d58d116bedfb": "{provider} {version} n’est pas pris en charge",
   "4d2ce7340c3903f0": "Statut du fournisseur {provider}",
@@ -4212,6 +4227,7 @@
   "194a9791a83d3f79": "Arrêter de rediriger localhost:{port}",
   "95bbbac2f2e17273": "Rediriger localhost:{port} vers cette machine",
   "95b263aa683271cc": "Arrêter localhost:{port}",
+  "95b612e63247ef9b": "Source du skill",
   "f94866e17faddc05": [
     "Ouvrir dans le panneau du navigateur. ",
     {
@@ -9695,6 +9711,7 @@
   "32659cddbd37d220": "Ces autorisations s’appliquent à votre route active. D’autres routes peuvent avoir des autorisations différentes.",
   "26fa470bd81ee396": "Ces autorisations s’appliquent à la connexion actuelle de ce client.",
   "059f7301895a5c0d": "Conventions du dépôt",
+  "05a06bc27d4f461e": "Impossible de mettre à jour le skill",
   "b2c5419d306bbc16": "Conventional Commits",
   "d15f079ebaf277ae": "Jamais",
   "19cca7227459820e": "Modèle de génération de texte",
@@ -11002,6 +11019,7 @@
   "f52d327181f9a4ee": "ex. Aurora",
   "965d6e4434fa4fe9": "Apparence du thème",
   "b83dd0d0a205e0a2": "Filtrer les couleurs",
+  "b848773fd942cc02": "Installer",
   "7ae134bfa6398e08": "Utiliser les couleurs avancées du thème",
   "146db132ffe8d931": "Modifier le thème",
   "f95fc9cb84ffcea3": "Créer un thème",
@@ -11167,6 +11185,7 @@
   "f7f094d73b29a862": "Lissage des polices",
   "7b0ad6e5d8a16b64": "Renvoie à la ligne les lignes longues dans les blocs de code, les diffs et les aperçus de fichiers par défaut.",
   "9f70f4d043be6ca9": "Réinitialiser le retour à la ligne à la valeur par défaut",
+  "9f750ea9758231e9": "Impossible de supprimer le skill",
   "d7a3cc624e8db58c": "Renvoyer à la ligne le code, les diffs et les aperçus de fichiers par défaut",
   "6c0b3cac1d55caf1": "Définit séparément les polices du prompt, du code et du terminal au lieu d’une seule police monospace.",
   "bdb7779bb61f13bb": "Polices séparées",
@@ -11764,6 +11783,7 @@
   "a75fb28f41e65d1d": "{count, plural, =1 {Clos,} other {{count} clos,}}",
   "0186f474fc350897": "{count, plural, =1 {Reporté,} other {{count} reportés,}}",
   "1bc189242bfa159d": "{count, plural, =1 {Désépinglé,} other {{count} désépinglés,}}",
+  "1bc402d7ddebc6c9": "Impossible d’installer le skill",
   "0cb1701d57cffefc": "{count, plural, =1 {Archivé,} other {{count} archivés,}}",
   "3cb98bdea58716bf": "{count, plural, =1 {Abandonné,} other {{count} abandonnés,}}",
   "d941432304b69645": "redémarre dans {seconds} s",
@@ -12196,21 +12216,5 @@
   "27d76249d09eb69f": "Guide de revue prêt",
   "faa3bb26abb39c93": "Échec du guide de revue",
   "b7df38b7d8792d78": "Ouvrir le guide",
-  "9e91e9a77b664e4e": "Impossible de démarrer un guide de revue",
-  "f3eeebac9160c736": "Skills centraux",
-  "41df551174846725": "Bibliothèque de skills",
-  "16f3efa6174af615": "Les skills activés sont disponibles pour chaque compte fournisseur de cette machine : Claude les charge directement, les dossiers Codex en reçoivent une copie gérée. Vos propres skills portant le même nom sont prioritaires.",
-  "6248d665f995d8d1": "Dossier : {directory}",
-  "786d17c346c53e64": "Dossier, URL git ou URL de SKILL.md",
-  "95b612e63247ef9b": "Source du skill",
-  "1bc402d7ddebc6c9": "Impossible d’installer le skill",
-  "c62a0c9e2a477626": "Depuis {source}",
-  "05a06bc27d4f461e": "Impossible de mettre à jour le skill",
-  "9f750ea9758231e9": "Impossible de supprimer le skill",
-  "b848773fd942cc02": "Installer",
-  "bcd81f6bc8be0377": [
-    "Impossible de charger les skills : ",
-    { "i": 1, "k": "_gt_value_1", "v": "v" }
-  ],
-  "93776d65eeabf676": "Aucun skill central pour l’instant."
+  "9e91e9a77b664e4e": "Impossible de démarrer un guide de revue"
 }

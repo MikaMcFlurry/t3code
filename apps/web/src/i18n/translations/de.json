@@ -408,6 +408,7 @@
   "a11d4c010567faac": "Starte T3 Code auf diesem Gerät neu.",
   "6a1d53c7bee371aa": "Wenn es weiter fehlschlägt, entferne {host} von diesem Gerät und füge es erneut hinzu.",
   "41dd22a83e2fa219": "Melde dich bei T3 Connect ab und wieder an.",
+  "41df551174846725": "Skill-Bibliothek",
   "a569ba31753e80a3": "Prüfe die Internetverbindung dieses Geräts.",
   "74d36a4b4a67340f": "Ein VPN, eine Firewall oder ein Werbeblocker auf diesem Gerät kann T3 Connect blockieren.",
   "13d74302502bdb92": "Ein VPN, eine Firewall oder ein DNS-Filter auf diesem Gerät kann den Tunnel blockieren.",
@@ -623,6 +624,7 @@
   "dda5dec2ba19575c": "{count, plural, one {{count} Byte} other {{count} Bytes}}",
   "133aaa0f98c2ea49": "„{name}“ überschreitet das Anhanglimit von {size}.",
   "16ebaeabe59a4857": "Diese Umgebung war mit diesem Konto über T3 Connect nicht erreichbar.",
+  "16f3efa6174af615": "Aktivierte Skills stehen jedem Anbieterkonto auf diesem Rechner zur Verfügung: Claude lädt sie direkt, Codex-Homes erhalten eine verwaltete Kopie. Eigene Skills mit demselben Namen haben Vorrang.",
   "7e19512f1ce2b686": "Die Versionen der Geräte-Tools wurden nicht geprüft.",
   "7bdc8e41c92e24b7": "Geräte-Hub",
   "7c2dbfeeb5981501": "Agenten-Tools",
@@ -736,6 +738,7 @@
   "101bf926f0721df4": "Workflow",
   "d3f66f03a1c8ddc8": "{count, plural, one {{count} Agent} other {{count} Agenten}}",
   "624506a403296638": "Arbeitet",
+  "6248d665f995d8d1": "Ordner: {directory}",
   "7bfe35051f932b93": "Genehmigung nötig",
   "b67d6bd5c4e311b7": "Braucht deine Eingabe",
   "166661f94b300f5b": "Fertig",
@@ -814,6 +817,7 @@
   "9f70c78508f05cc5": "Heute Abend",
   "1b9d249ecc4cc532": "Morgen",
   "f3e58d0c7a119551": "Nächste Woche",
+  "f3eeebac9160c736": "Zentrale Skills",
   "26dd8a65fa8bd045": "jetzt",
   "7ac52df3f6b0a072": "{minutes} Min.",
   "8ebe1f516687cb93": "{hours} Std.",
@@ -2521,6 +2525,7 @@
   "33c7e68fca089036": "Thread, {title}",
   "b4b98a0287c282e2": "Auf einem anderen Rechner, daher kann der Agent dieses Rechners es nicht lesen. Entferne es oder wechsle zum Senden zurück.",
   "c6196d99000642b4": "Thread öffnen",
+  "c62a0c9e2a477626": "Aus {source}",
   "34cc63390ad793cc": "Thread wählen",
   "8f12309ead62e38a": "Threads oder Projekte durchsuchen...",
   "2f664754d005d9a7": "Keine aktiven Threads gefunden.",
@@ -2947,6 +2952,7 @@
   "8c1bb7953bdeb59b": "{title} braucht eine passende Umgebung. Wähle eine, um fortzufahren.",
   "c83f08486162e679": "{title} braucht eine passende Umgebung. Verbinde oder aktualisiere eine Umgebung, um fortzufahren.",
   "93723f58bafe1568": "{title} ist für das ausgewählte Ziel nicht verfügbar. Wähle den zugehörigen Bereich, um fortzufahren.",
+  "93776d65eeabf676": "Noch keine zentralen Skills.",
   "22a6870eaaa85f1f": "Inhalt der Einstellungen",
   "dc06ede61ff5d1cc": "Gerätestandards wiederherstellen",
   "c4b395da633cf4d3": [
@@ -3224,6 +3230,14 @@
   "536a820f2ff726da": "Wähle mindestens ein Modell.",
   "fbafbe78b5e37966": "Thread fortsetzen",
   "bcd7eb979dd38dae": "Eingabefeld öffnen, um zu komprimieren und zu senden",
+  "bcd81f6bc8be0377": [
+    "Skills konnten nicht geladen werden: ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
   "95ee62a0d6968b89": "Nachricht senden",
   "164d3295a763dbad": "Der Snapshot ist nicht mehr verfügbar.",
   "f77ce9bc81a68882": "Der Snapshot ist noch nicht bereit zum Kopieren.",
@@ -3877,6 +3891,7 @@
   "7d3850e5d84691a5": "Der Anbieter {provider} ist nicht verfügbar.",
   "8c373cfba06c51f9": "Der Anbieter {provider} ist eingeschränkt verfügbar.",
   "7869f98d80c5be6e": "{provider} ist nicht authentifiziert",
+  "786d17c346c53e64": "Ordner, Git-URL oder SKILL.md-URL",
   "60c47138e614902e": "{provider} {version} ist bekanntermaßen defekt",
   "a9c2d58d116bedfb": "{provider} {version} wird nicht unterstützt",
   "4d2ce7340c3903f0": "Status des Anbieters {provider}",
@@ -4214,6 +4229,7 @@
   "194a9791a83d3f79": "Weiterleitung von localhost:{port} beenden",
   "95bbbac2f2e17273": "localhost:{port} an diesen Rechner weiterleiten",
   "95b263aa683271cc": "localhost:{port} stoppen",
+  "95b612e63247ef9b": "Skill-Quelle",
   "f94866e17faddc05": [
     "Im Browser-Panel öffnen. ",
     {
@@ -9696,6 +9712,7 @@
   "32659cddbd37d220": "Diese Berechtigungen gelten für deine aktive Route. Andere Routen können andere Berechtigungen haben.",
   "26fa470bd81ee396": "Diese Berechtigungen gelten für die aktuelle Verbindung dieses Clients.",
   "059f7301895a5c0d": "Repository-Konventionen",
+  "05a06bc27d4f461e": "Skill konnte nicht aktualisiert werden",
   "b2c5419d306bbc16": "Conventional Commits",
   "d15f079ebaf277ae": "Nie",
   "19cca7227459820e": "Modell für Textgenerierung",
@@ -11002,6 +11019,7 @@
   "f52d327181f9a4ee": "z. B. Aurora",
   "965d6e4434fa4fe9": "Darstellung des Designs",
   "b83dd0d0a205e0a2": "Farben filtern",
+  "b848773fd942cc02": "Installieren",
   "7ae134bfa6398e08": "Erweiterte Designfarben verwenden",
   "146db132ffe8d931": "Design bearbeiten",
   "f95fc9cb84ffcea3": "Design erstellen",
@@ -11167,6 +11185,7 @@
   "f7f094d73b29a862": "Kantenglättung",
   "7b0ad6e5d8a16b64": "Lange Zeilen in Codeblöcken, Diffs und Dateivorschauen standardmäßig umbrechen.",
   "9f70f4d043be6ca9": "Zeilenumbruch auf Standard zurücksetzen",
+  "9f750ea9758231e9": "Skill konnte nicht entfernt werden",
   "d7a3cc624e8db58c": "Code, Diffs und Dateivorschauen standardmäßig umbrechen",
   "6c0b3cac1d55caf1": "Prompt-, Code- und Terminal-Schrift separat festlegen statt einer gemeinsamen Monospace-Schrift.",
   "bdb7779bb61f13bb": "Separate Schriften",
@@ -11766,6 +11785,7 @@
   "a75fb28f41e65d1d": "{count, plural, =1 {Erledigt,} other {{count} erledigt,}}",
   "0186f474fc350897": "{count, plural, =1 {Zurückgestellt,} other {{count} zurückgestellt,}}",
   "1bc189242bfa159d": "{count, plural, =1 {Losgelöst,} other {{count} losgelöst,}}",
+  "1bc402d7ddebc6c9": "Skill konnte nicht installiert werden",
   "0cb1701d57cffefc": "{count, plural, =1 {Archiviert,} other {{count} archiviert,}}",
   "3cb98bdea58716bf": "{count, plural, =1 {Verworfen,} other {{count} verworfen,}}",
   "d941432304b69645": "Neustart in {seconds} s",
@@ -12196,21 +12216,5 @@
   "27d76249d09eb69f": "Review-Leitfaden bereit",
   "faa3bb26abb39c93": "Review-Leitfaden fehlgeschlagen",
   "b7df38b7d8792d78": "Leitfaden öffnen",
-  "9e91e9a77b664e4e": "Review-Leitfaden konnte nicht gestartet werden",
-  "f3eeebac9160c736": "Zentrale Skills",
-  "41df551174846725": "Skill-Bibliothek",
-  "16f3efa6174af615": "Aktivierte Skills stehen jedem Anbieterkonto auf diesem Rechner zur Verfügung: Claude lädt sie direkt, Codex-Homes erhalten eine verwaltete Kopie. Eigene Skills mit demselben Namen haben Vorrang.",
-  "6248d665f995d8d1": "Ordner: {directory}",
-  "786d17c346c53e64": "Ordner, Git-URL oder SKILL.md-URL",
-  "95b612e63247ef9b": "Skill-Quelle",
-  "1bc402d7ddebc6c9": "Skill konnte nicht installiert werden",
-  "c62a0c9e2a477626": "Aus {source}",
-  "05a06bc27d4f461e": "Skill konnte nicht aktualisiert werden",
-  "9f750ea9758231e9": "Skill konnte nicht entfernt werden",
-  "b848773fd942cc02": "Installieren",
-  "bcd81f6bc8be0377": [
-    "Skills konnten nicht geladen werden: ",
-    { "i": 1, "k": "_gt_value_1", "v": "v" }
-  ],
-  "93776d65eeabf676": "Noch keine zentralen Skills."
+  "9e91e9a77b664e4e": "Review-Leitfaden konnte nicht gestartet werden"
 }
