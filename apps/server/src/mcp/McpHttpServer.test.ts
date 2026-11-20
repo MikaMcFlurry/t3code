@@ -1551,6 +1551,7 @@ it.effect("gives outside clients an upload URL on the origin their request reach
         McpHttpServer.layerAttachmentToolkit,
       ).pipe(
         Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
         Layer.provide(McpToolAccessTestkit.liveThreadsLayer),
         Layer.provide(
           Layer.mock(McpSessionRegistry.McpSessionRegistry)({

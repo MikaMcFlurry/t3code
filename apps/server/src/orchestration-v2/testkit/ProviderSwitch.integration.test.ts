@@ -1784,7 +1784,10 @@ describe("orchestration v2 provider switching", () => {
       readonly dispatchRequest: (
         ordinal: number,
         selection: ModelSelection,
-      ) => ReturnType<Orchestrator.OrchestratorV2["Service"]["dispatch"]>;
+      ) => Effect.Effect<
+        Orchestrator.OrchestratorV2DispatchResult,
+        Orchestrator.OrchestratorV2Error
+      >;
       readonly awaitSettled: (
         ordinal: number,
       ) => Effect.Effect<
