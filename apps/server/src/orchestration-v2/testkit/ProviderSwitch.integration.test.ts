@@ -3043,6 +3043,240 @@ describe("orchestration v2 provider switching", () => {
     }),
   );
 
+  // regression: #32296 a steer that switches the provider must not end the held run's background
+  // command. ACP sessions (Antigravity) close with ForceStopCascadeTree, which kills it silently.
+  it.live.each([
+    ["keeps a busy session up when a steer hands the held run off", { sharedHistory: false }],
+    [
+      "queues a steer that switches accounts while the held run's session is busy",
+      {
+        sharedHistory: true,
+      },
+    ],
+  ] as const)("%s", ([, { sharedHistory }]) =>
+    Effect.gen(function* () {
+      const cwd = yield* checkpointWorkspace("steer-busy-session");
+      const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+      const backgroundWork = yield* Ref.make(true);
+      const closedSessions = yield* Ref.make<ReadonlyArray<string>>([]);
+      const started = yield* Deferred.make<void>();
+      const targetSelection: ModelSelection = sharedHistory
+        ? { ...GROK_MODEL_SELECTION, instanceId: ProviderInstanceId.make("acp-second-account") }
+        : CLAUDE_MODEL_SELECTION;
+      const adapters = [
+        makeTestAdapter({
+          instanceId: GROK_MODEL_SELECTION.instanceId,
+          driver: GROK_DRIVER,
+          capabilities: AcpProviderCapabilitiesV2,
+          modelSelection: GROK_MODEL_SELECTION,
+          responseByRunOrdinal: {},
+          capturedTurns,
+          // The turn stays held on a hung foreground tool; a background command also runs.
+          holdFirstTurn: started,
+          heldRunningToolCall: {
+            id: TurnItemId.make("turn-item:steer-busy-session:npm-test"),
+            toolName: "run_command",
+          },
+          backgroundWork,
+          closedSessions,
+        }),
+        makeTestAdapter({
+          instanceId: targetSelection.instanceId,
+          driver: sharedHistory ? GROK_DRIVER : CLAUDE_DRIVER,
+          capabilities: sharedHistory ? AcpProviderCapabilitiesV2 : ClaudeProviderCapabilitiesV2,
+          modelSelection: targetSelection,
+          responseByRunOrdinal: { 1: "Steered on the new provider", 2: "Queued switch" },
+          capturedTurns,
+        }),
+      ];
+      const layerRegistry = sharedHistory
+        ? Layer.succeed(
+            ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+            ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+              get: (instanceId) => {
+                const adapter = adapters.find((candidate) => candidate.instanceId === instanceId);
+                return adapter === undefined
+                  ? Effect.fail(
+                      new ProviderAdapterRegistry.ProviderAdapterRegistryLookupError({
+                        instanceId,
+                      }),
+                    )
+                  : Effect.succeed(adapter);
+              },
+              list: () => Effect.succeed(adapters.map((adapter) => adapter.instanceId)),
+              getMetadata: () =>
+                Effect.succeed({
+                  driver: GROK_DRIVER,
+                  continuationKey: "acp:shared-native-account-history",
+                  enabled: true,
+                  capabilities: AcpProviderCapabilitiesV2,
+                }),
+            }),
+          )
+        : ProviderAdapterRegistry.layerFromAdapters(adapters);
+      const steerThreadId = ThreadId.make("thread:steer-busy-session");
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:steer-busy-session:create"),
+          threadId: steerThreadId,
+          projectId: ProjectId.make("project:steer-busy-session"),
+          title: "Steer while a background command runs",
+          modelSelection: GROK_MODEL_SELECTION,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: cwd,
+        });
+        const heldTurnRunning = yield* orchestrator.streamDomainEvents.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "provider-turn.updated" &&
+              event.threadId === steerThreadId &&
+              event.payload.status === "running",
+          ),
+          Stream.runHead,
+          Effect.forkScoped,
+        );
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:steer-busy-session:first"),
+          threadId: steerThreadId,
+          messageId: MessageId.make("message:steer-busy-session:first"),
+          text: "Run npm test and a dev server in the background",
+          attachments: [],
+          modelSelection: GROK_MODEL_SELECTION,
+          dispatchMode: { type: "start_immediately" },
+        });
+        yield* worker.drain();
+        yield* Deferred.await(started);
+        yield* Fiber.join(heldTurnRunning);
+        const held = yield* orchestrator.getThreadProjection(steerThreadId);
+        const heldRun = held.runs[0]!;
+        const heldSession = held.providerSessions[0]!;
+        assert.equal(heldRun.status, "running");
+        const steerSettled = sharedHistory
+          ? undefined
+          : yield* orchestrator.streamStoredEvents.pipe(
+              Stream.filter(
+                ({ event }) =>
+                  event.type === "run.updated" &&
+                  event.runId === heldRun.id &&
+                  event.payload.status === "waiting",
+              ),
+              Stream.runHead,
+              Effect.forkScoped,
+            );
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:steer-busy-session:steer"),
+          threadId: steerThreadId,
+          messageId: MessageId.make("message:steer-busy-session:steer"),
+          text: "Switch and continue",
+          attachments: [],
+          modelSelection: targetSelection,
+          dispatchMode: { type: "steer_active", targetRunId: heldRun.id },
+        });
+        const afterSteer = yield* orchestrator.getThreadProjection(steerThreadId);
+        const restarted = afterSteer.runs[0]!.activeAttemptId !== heldRun.activeAttemptId;
+        if (restarted) {
+          // The adapter never ends the interrupted turn by itself; report it as the provider would.
+          const interruptedTurn = afterSteer.providerTurns.find(
+            (turn) => turn.runAttemptId === heldRun.activeAttemptId,
+          )!;
+          const interruptedAttempt = afterSteer.attempts.find(
+            (attempt) => attempt.id === heldRun.activeAttemptId,
+          )!;
+          const interruptedAt = yield* DateTime.now;
+          yield* eventSink.write({
+            events: [
+              {
+                id: EventId.make("event:steer-busy-session:turn-interrupted"),
+                type: "provider-turn.updated",
+                threadId: steerThreadId,
+                runId: heldRun.id,
+                nodeId: heldRun.rootNodeId!,
+                driver: GROK_DRIVER,
+                providerInstanceId: GROK_MODEL_SELECTION.instanceId,
+                occurredAt: interruptedAt,
+                payload: { ...interruptedTurn, status: "interrupted", completedAt: interruptedAt },
+              },
+              {
+                id: EventId.make("event:steer-busy-session:attempt-interrupted"),
+                type: "run-attempt.updated",
+                threadId: steerThreadId,
+                runId: heldRun.id,
+                nodeId: heldRun.rootNodeId!,
+                providerInstanceId: GROK_MODEL_SELECTION.instanceId,
+                occurredAt: interruptedAt,
+                payload: {
+                  ...interruptedAttempt,
+                  status: "interrupted",
+                  completedAt: interruptedAt,
+                },
+              },
+            ],
+          });
+        }
+        yield* worker.drain();
+        if (steerSettled !== undefined) yield* Fiber.join(steerSettled);
+        yield* worker.drain();
+        const projection = yield* orchestrator.getThreadProjection(steerThreadId);
+        // Closing the ACP session would end the background command with no notice.
+        assert.deepEqual(yield* Ref.get(closedSessions), []);
+        assert.equal(
+          projection.providerSessions.find((session) => session.id === heldSession.id)?.status,
+          "ready",
+        );
+        if (sharedHistory) {
+          // Resuming the native thread needs the busy session gone, so the switch waits queued.
+          assert.isFalse(restarted);
+          assert.deepEqual(
+            projection.runs.map((run) => [run.providerInstanceId, run.status]),
+            [
+              [GROK_MODEL_SELECTION.instanceId, "running"],
+              [targetSelection.instanceId, "queued"],
+            ],
+          );
+          return;
+        }
+        // A hand-off runs in its own session beside the busy one.
+        assert.deepEqual(
+          projection.runs.map((run) => [run.providerInstanceId, run.status]),
+          [[CLAUDE_MODEL_SELECTION.instanceId, "completed"]],
+        );
+      }).pipe(
+        Effect.provide(
+          ProviderReplayHarness.layerWithRegistry(
+            {
+              name: "steer-busy-session",
+              runtimePolicyOverride: {
+                cwd,
+                approvalPolicy: "never",
+                sandboxPolicy: {
+                  type: "readOnly",
+                  access: { type: "fullAccess" },
+                  networkAccess: false,
+                },
+              },
+            },
+            layerRegistry,
+            { runEffectWorker: false },
+          ),
+        ),
+      );
+    }),
+  );
+
   // regression: #16000 thread setting changes must not end a Claude session's background work
   it.live.each([
     ["runtime mode", "runtime-mode"],
