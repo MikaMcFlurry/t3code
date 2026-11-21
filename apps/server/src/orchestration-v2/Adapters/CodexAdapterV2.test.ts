@@ -10839,6 +10839,308 @@ describe("CodexAdapterV2 post-settle continuation", () => {
   });
 });
 
+describe("CodexAdapterV2 account switch", () => {
+  const NATIVE_THREAD = "native-codex-account-switch-thread";
+  const FIRST_TURN = "native-codex-account-switch-turn-1";
+  const SECOND_TURN = "native-codex-account-switch-turn-2";
+  const MONITOR_ITEM = "exec-account-switch-persistent-monitor";
+  const MONITOR_SETTLED = "item/completed/persistent-monitor";
+  const FIRST_PROMPT = "Start a persistent monitor, then finish the turn.";
+  const SECOND_PROMPT = "Continue on the second account.";
+  const secondAccount = {
+    instanceId: ProviderInstanceId.make("codex-second-account"),
+    model: CODEX_TEST_MODEL_SELECTION.model,
+  } satisfies ModelSelection;
+  const monitorItem = (status: "inProgress" | "completed") => ({
+    type: "dynamicToolCall",
+    id: MONITOR_ITEM,
+    namespace: "grok",
+    tool: "monitor",
+    status,
+    arguments: { persistent: true, command: "tail -f" },
+    ...(status === "completed" ? { result: { content: [{ type: "text", text: "stopped" }] } } : {}),
+  });
+  // The first account's turn ends while a persistent dynamic tool keeps running; the tool's
+  // end reaches the server as a node update alone, after the turn and its run have settled.
+  const firstAccountTranscript = makeCodexReplayTranscript({
+    scenario: "codex-account-switch-node-settlement",
+    entries: [
+      ...codexReplayPreamble({
+        nativeThreadId: NATIVE_THREAD,
+        nativeTurnId: FIRST_TURN,
+        prompt: FIRST_PROMPT,
+      }),
+      {
+        type: "emit_inbound",
+        label: "item/started/persistent-monitor",
+        frame: {
+          method: "item/started",
+          params: {
+            item: monitorItem("inProgress"),
+            threadId: NATIVE_THREAD,
+            turnId: FIRST_TURN,
+            startedAtMs: 1782622443500,
+          },
+        },
+      },
+      {
+        type: "emit_inbound",
+        label: "turn/completed",
+        frame: {
+          method: "turn/completed",
+          params: {
+            threadId: NATIVE_THREAD,
+            turn: makeCodexReplayTurn({ id: FIRST_TURN, status: "completed" }),
+          },
+        },
+      },
+      {
+        type: "emit_inbound",
+        label: MONITOR_SETTLED,
+        frame: {
+          method: "item/completed",
+          params: {
+            item: monitorItem("completed"),
+            threadId: NATIVE_THREAD,
+            turnId: FIRST_TURN,
+            completedAtMs: 1782622473500,
+          },
+        },
+      },
+      // The switch releases the first account's session only now.
+      {
+        type: "expect_outbound",
+        label: "thread/unsubscribe",
+        frame: { id: 4, method: "thread/unsubscribe", params: { threadId: NATIVE_THREAD } },
+      },
+      { type: "emit_inbound", label: "thread/unsubscribe", frame: { id: 4, result: {} } },
+    ],
+  });
+  const secondAccountTranscript = makeCodexReplayTranscript({
+    scenario: "codex-account-switch-node-settlement-second",
+    entries: [
+      ...codexReplayPreamble({
+        nativeThreadId: NATIVE_THREAD,
+        nativeTurnId: SECOND_TURN,
+        prompt: SECOND_PROMPT,
+      }).slice(0, 3),
+      {
+        type: "expect_outbound",
+        label: "thread/resume",
+        frame: {
+          id: 2,
+          method: "thread/resume",
+          params: {
+            threadId: NATIVE_THREAD,
+            excludeTurns: true,
+            config: CodexAdapterV2.CODEX_THREAD_CONFIG,
+          },
+        },
+      },
+      {
+        type: "emit_inbound",
+        label: "thread/resume",
+        frame: {
+          id: 2,
+          result: { thread: { id: NATIVE_THREAD, updatedAt: 1782622450, turns: [] } },
+        },
+      },
+      ...codexReplayPreamble({
+        nativeThreadId: NATIVE_THREAD,
+        nativeTurnId: SECOND_TURN,
+        prompt: SECOND_PROMPT,
+      }).slice(5),
+      {
+        type: "emit_inbound",
+        label: "turn/completed",
+        frame: {
+          method: "turn/completed",
+          params: {
+            threadId: NATIVE_THREAD,
+            turn: makeCodexReplayTurn({ id: SECOND_TURN, status: "completed" }),
+          },
+        },
+      },
+    ],
+  });
+
+  // regression: #32296 a waiting account switch starts when a Codex tool that outlived its turn
+  // settles with a node update alone, without another send or queue resume.
+  it.live("starts a waiting account switch when a persistent tool settles after its turn", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-codex-account-switch-" });
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      for (const args of [
+        ["init", "--quiet"],
+        [
+          "-c",
+          "user.name=Test",
+          "-c",
+          "user.email=test@example.com",
+          "commit",
+          "--allow-empty",
+          "--quiet",
+          "-m",
+          "Initial commit",
+        ],
+      ]) {
+        assert.equal(Number(yield* spawner.exitCode(ChildProcess.make("git", args, { cwd }))), 0);
+      }
+      const localize = (transcript: CodexReplay.CodexAppServerReplayTranscript) =>
+        Effect.gen(function* () {
+          return withConfigReads(
+            yield* decodeReplayTranscriptJson(
+              (yield* encodeReplayTranscriptJson(transcript)).replaceAll(
+                yield* encodeStringJson("/workspace"),
+                yield* encodeStringJson(cwd),
+              ),
+            ),
+          );
+        });
+      const firstTranscript = yield* localize(firstAccountTranscript);
+      const secondTranscript = yield* localize(secondAccountTranscript);
+      const monitorMaySettle = yield* Deferred.make<void>();
+      const firstDriver = yield* CodexReplay.makeReplayDriver(firstTranscript, {
+        beforeEmitInbound: (entry) =>
+          entry.label === MONITOR_SETTLED ? Deferred.await(monitorMaySettle) : Effect.void,
+      });
+      const secondDriver = yield* CodexReplay.makeReplayDriver(secondTranscript);
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const threadId = ThreadId.make("thread:codex-account-switch-node-settlement");
+        const runStatus = (messageId: string, status: string) =>
+          orchestrator.streamDomainEvents.pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "run.updated" &&
+                event.payload.userMessageId === messageId &&
+                event.payload.status === status,
+            ),
+            Stream.runHead,
+            Effect.forkChild({ startImmediately: true }),
+          );
+        const send = (messageId: string, text: string, modelSelection: ModelSelection) =>
+          orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`dispatch-${messageId}`),
+            threadId,
+            messageId: MessageId.make(messageId),
+            text,
+            attachments: [],
+            modelSelection,
+            createdBy: "user",
+            creationSource: "web",
+            dispatchMode: { type: "start_immediately" },
+          });
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("create-codex-account-switch"),
+          threadId,
+          projectId: ProjectId.make("project:codex-account-switch"),
+          title: "Account switch while a persistent tool runs",
+          modelSelection: CODEX_TEST_MODEL_SELECTION,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: cwd,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const firstSettled = yield* runStatus("message:first", "waiting");
+        yield* send("message:first", FIRST_PROMPT, CODEX_TEST_MODEL_SELECTION);
+        yield* worker.drain();
+        yield* Fiber.join(firstSettled);
+        // Checkpoint capture completes the run; the persistent monitor keeps running.
+        yield* worker.drain();
+
+        // The first account's session still runs the monitor, so the switch waits queued.
+        yield* send("message:second", SECOND_PROMPT, secondAccount);
+        yield* worker.drain();
+        const waiting = yield* orchestrator.getThreadProjection(threadId);
+        assert.deepEqual(
+          waiting.runs.map((run) => [run.providerInstanceId, run.status, run.queueHeld === true]),
+          [
+            [CODEX_TEST_MODEL_SELECTION.instanceId, "completed", false],
+            [secondAccount.instanceId, "queued", false],
+          ],
+        );
+        assert.deepEqual(
+          waiting.nodes.flatMap((node) => (node.kind === "tool_call" ? [node.status] : [])),
+          ["running"],
+        );
+
+        // The monitor ends with only its tool node updating: no roster, subagent or run update.
+        const switchStarted = yield* orchestrator.streamDomainEvents.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "run.updated" &&
+              event.payload.userMessageId === "message:second" &&
+              event.payload.status !== "queued",
+          ),
+          Stream.runHead,
+          Effect.forkChild({ startImmediately: true }),
+        );
+        const monitorNodeSettled = yield* orchestrator.streamDomainEvents.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "node.updated" &&
+              event.payload.kind === "tool_call" &&
+              event.payload.status === "completed",
+          ),
+          Stream.runHead,
+          Effect.forkChild({ startImmediately: true }),
+        );
+        yield* Deferred.succeed(monitorMaySettle, undefined);
+        yield* Fiber.join(monitorNodeSettled);
+        // No worker drain here: nothing but the settled node may start the queue.
+        const started = yield* Fiber.join(switchStarted).pipe(Effect.timeoutOption("5 seconds"));
+        const afterSettle = yield* orchestrator.getThreadProjection(threadId);
+        assert.isTrue(
+          Option.isSome(started),
+          `the waiting switch must start once the tool settles; runs: ${JSON.stringify(
+            afterSettle.runs.map((run) => [run.providerInstanceId, run.status]),
+          )}`,
+        );
+        const secondSettled = yield* runStatus("message:second", "waiting");
+        yield* worker.drain();
+        yield* Fiber.join(secondSettled);
+        yield* worker.drain();
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        assert.deepEqual(
+          after.runs.map((run) => [run.providerInstanceId, run.status]),
+          [
+            [CODEX_TEST_MODEL_SELECTION.instanceId, "completed"],
+            [secondAccount.instanceId, "completed"],
+          ],
+        );
+        assert.isNull((yield* Ref.get(firstDriver.state)).failure);
+        assert.isNull((yield* Ref.get(secondDriver.state)).failure);
+      }).pipe(
+        Effect.provide(
+          ProviderReplayHarness.layerWithRegistry(
+            { name: "codex-account-switch-node-settlement", runtimePolicyOverride: { cwd } },
+            CodexAdapterV2Testkit.accountsLayer([
+              {
+                instanceId: CODEX_TEST_MODEL_SELECTION.instanceId,
+                transcript: firstTranscript,
+                driver: firstDriver,
+              },
+              {
+                instanceId: secondAccount.instanceId,
+                transcript: secondTranscript,
+                driver: secondDriver,
+              },
+            ]),
+            { runEffectWorker: false },
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
+});
+
 describe("codexDynamicToolOutput", () => {
   it("translates inputImage data URLs into image blocks the work log can serve", () => {
     const output = CodexAdapterV2.codexDynamicToolOutput({

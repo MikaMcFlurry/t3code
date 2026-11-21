@@ -1,6 +1,10 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { CodexSettings, type ProviderReplayTranscript } from "@t3tools/contracts";
+import {
+  CodexSettings,
+  type ProviderInstanceId,
+  type ProviderReplayTranscript,
+} from "@t3tools/contracts";
 import * as CodexClient from "effect-codex-app-server/client";
 import type * as CodexError from "effect-codex-app-server/errors";
 import * as CodexReplay from "effect-codex-app-server/replay";
@@ -95,7 +99,7 @@ function metadataFromTranscript(transcript: ProviderReplayTranscript): {
   };
 }
 
-export function layer(input: {
+function replayClientFactory(input: {
   readonly transcript: CodexReplay.CodexAppServerReplayTranscript;
   readonly driver?: CodexReplay.CodexAppServerReplayDriver;
 }) {
@@ -103,7 +107,7 @@ export function layer(input: {
     input.driver === undefined
       ? CodexReplay.layerReplay(input.transcript)
       : CodexReplay.layerReplayWithDriver(input.driver);
-  const layerReplayClientFactory = Layer.succeed(CodexAdapterV2.CodexAppServerClientFactory, {
+  return Layer.succeed(CodexAdapterV2.CodexAppServerClientFactory, {
     open: (openInput) =>
       Effect.gen(function* () {
         const context = yield* Layer.build(layerReplay).pipe(
@@ -122,6 +126,13 @@ export function layer(input: {
         );
       }),
   });
+}
+
+export function layer(input: {
+  readonly transcript: CodexReplay.CodexAppServerReplayTranscript;
+  readonly driver?: CodexReplay.CodexAppServerReplayDriver;
+}) {
+  const layerReplayClientFactory = replayClientFactory(input);
   const layerServerConfig = Layer.effect(
     ServerConfig.ServerConfig,
     makeReplayServerConfig(input.transcript.scenario).pipe(Effect.orDie),
@@ -192,3 +203,65 @@ export const CodexOrchestratorReplayHarness: OrchestratorV2ProviderReplayHarness
     );
   },
 };
+
+/**
+ * Codex accounts of one install, each replaying its own app-server process. They share a
+ * continuation key, so a switch between them resumes the native thread (`restart_and_resume`).
+ */
+export function accountsLayer(
+  accounts: ReadonlyArray<{
+    readonly instanceId: ProviderInstanceId;
+    readonly transcript: CodexReplay.CodexAppServerReplayTranscript;
+    readonly driver?: CodexReplay.CodexAppServerReplayDriver;
+  }>,
+) {
+  return Layer.effect(
+    ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+    Effect.gen(function* () {
+      const adapters: Array<ProviderAdapter.ProviderAdapterV2["Service"]> = [];
+      for (const account of accounts) {
+        adapters.push(
+          yield* CodexAdapterV2.createCodexAdapterV2({
+            instanceId: account.instanceId,
+            displayName: undefined,
+            environment: [],
+            enabled: true,
+            config: DEFAULT_CODEX_SETTINGS,
+          }).pipe(Effect.provide(replayClientFactory(account))),
+        );
+      }
+      return ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+        get: (instanceId) => {
+          const adapter = adapters.find((candidate) => candidate.instanceId === instanceId);
+          return adapter === undefined
+            ? Effect.fail(
+                new ProviderAdapterRegistry.ProviderAdapterRegistryLookupError({ instanceId }),
+              )
+            : Effect.succeed(adapter);
+        },
+        list: () => Effect.succeed(adapters.map((adapter) => adapter.instanceId)),
+        getMetadata: () =>
+          Effect.succeed({
+            driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+            continuationKey: "codex:shared-account-history",
+            enabled: true,
+            capabilities: CodexAdapterV2.CodexProviderCapabilitiesV2,
+          }),
+      });
+    }),
+  ).pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.effect(
+          ServerConfig.ServerConfig,
+          makeReplayServerConfig(accounts[0]?.transcript.scenario ?? "codex-accounts").pipe(
+            Effect.orDie,
+          ),
+        ).pipe(Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+        NodeServices.layer,
+        NodeCrypto.layer,
+        IdAllocator.layer,
+      ),
+    ),
+  );
+}
