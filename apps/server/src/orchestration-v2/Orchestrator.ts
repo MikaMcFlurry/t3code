@@ -6153,6 +6153,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       selectionTransition?.type === "create_with_handoff";
     const requiresProviderSessionRestart =
       canResumeAcrossInstances || selectionTransition?.type === "restart_session";
+    // Same rule as a queued start: a hand-off leaves a busy session up, and an account switch,
+    // which resumes that session's native thread, waits in the queue behind the run.
+    const projectedSession = input.projection.providerSessions.find(
+      (candidate) => candidate.id === providerSessionId,
+    );
+    const keepsBusySession =
+      (requiresProviderThreadHandoff || canResumeAcrossInstances) &&
+      projectedSession !== undefined &&
+      (yield* sessionHasBackgroundWork(projectedSession, input.projection.providerThreads));
+    if (keepsBusySession && canResumeAcrossInstances) return "queue_behind_run" as const;
     if (requiresProviderThreadHandoff) {
       const targetAdapter = yield* providerAdapters.get(input.modelSelection.instanceId).pipe(
         Effect.mapError(
@@ -6282,7 +6292,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         updatedAt: now,
         consumedAt: now,
       };
-      restartSessionTransition = { type: "detach" };
+      restartSessionTransition = keepsBusySession ? null : { type: "detach" };
     } else if (requiresProviderSessionRestart) {
       const nextProviderSessionId = yield* mapDispatchError(input.command)(
         idAllocator.allocate.providerSession({
@@ -7168,7 +7178,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     if (dispatchMode.type === "steer_active" || dispatchMode.type === "restart_active") {
       yield* ensureGoalCommandSupported(command, command, modelSelection.instanceId);
-      yield* dispatchSteerIntoRun({
+      const targetRunId = dispatchMode.targetRunId;
+      const steered = yield* dispatchSteerIntoRun({
         command,
         events,
         effects,
@@ -7176,11 +7187,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         modelSelection:
           delegatedCompletion === undefined && command.notification === undefined
             ? modelSelection
-            : (projection.runs.find((run) => run.id === dispatchMode.targetRunId)?.modelSelection ??
+            : (projection.runs.find((run) => run.id === targetRunId)?.modelSelection ??
               modelSelection),
         delegatedCompletion,
         ...(command.notification === undefined ? {} : { notification: command.notification }),
-        targetRunId: dispatchMode.targetRunId,
+        targetRunId,
         messageId: command.messageId,
         text: dispatchText,
         ...(command.context ? { context: command.context } : {}),
@@ -7195,7 +7206,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
         forceRestart: dispatchMode.type === "restart_active",
       });
-      return;
+      if (steered !== "queue_behind_run") return;
+      dispatchMode = { type: "queue_after_active" };
     }
 
     const activeProviderThread =
@@ -11174,7 +11186,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       },
     });
 
-    yield* dispatchSteerIntoRun({
+    const steered = yield* dispatchSteerIntoRun({
       command,
       events,
       effects,
@@ -11201,6 +11213,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         : { idleCompaction: queuedMessage.idleCompaction }),
       forceRestart: false,
     });
+    // The message is already queued behind the run, where the account switch waits.
+    if (steered === "queue_behind_run") {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause:
+          "The current session is still running background agents or commands, and switching accounts now would end them. The message stays queued and starts once they finish.",
+      });
+    }
   });
 
   const dispatchQueuedRunReorder = Effect.fn("Orchestrator.dispatchQueuedRunReorder")(function* (
