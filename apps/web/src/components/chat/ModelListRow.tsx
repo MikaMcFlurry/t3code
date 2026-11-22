@@ -11,6 +11,8 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
 import { modelPickerModelKey } from "./modelPickerKeys";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
+import type { ProviderUsageHeadroom } from "@t3tools/shared/usageLimits";
+import { ProviderUsageText } from "./ModelPickerUsage";
 
 export const ModelListRow = memo(function ModelListRow(props: {
   index: number;
@@ -33,6 +35,11 @@ export const ModelListRow = memo(function ModelListRow(props: {
   unavailable?: boolean;
   jumpLabel?: string | null;
   disabledReason?: string | null;
+  /** This model's usage text, while the Labs setting is on and the row needs its own. */
+  usageHeadroom?: ProviderUsageHeadroom | null;
+  /** A window that stops this model is used up: dimmed, still selectable. */
+  usageExhausted?: boolean;
+  usageNow?: number;
   onToggleFavorite: (instanceId: ProviderInstanceId, slug: string) => void;
 }) {
   const gt = useGT();
@@ -49,6 +56,7 @@ export const ModelListRow = memo(function ModelListRow(props: {
       index={props.index}
       value={modelPickerModelKey(props.instanceId, props.slug)}
       disabled={Boolean(props.disabledReason)}
+      data-usage-exhausted={props.usageExhausted ? "" : undefined}
       className={cn(
         "group relative w-full !min-w-0 max-w-full cursor-pointer",
         props.disabledReason &&
@@ -63,12 +71,17 @@ export const ModelListRow = memo(function ModelListRow(props: {
         acpRegistryAgentId={props.acpRegistryAgentId}
         acpRegistryIconUrl={props.acpRegistryIconUrl}
         showBadge={props.showInstanceBadge}
-        className="size-4"
+        className={cn("size-4", props.usageExhausted && "opacity-55")}
         iconClassName="size-4"
         indicatorBackground="var(--popover)"
         badgeClassName="right-[-0.125rem] bottom-[-0.125rem] h-3 min-w-3 px-0.5 text-5xs"
       />
-      <div className="flex min-w-0 flex-1 items-center gap-2 text-left">
+      <div
+        className={cn(
+          "flex min-w-0 flex-1 items-center gap-2 text-left",
+          props.usageExhausted && "opacity-55",
+        )}
+      >
         <div
           className="min-w-0 truncate text-sm font-normal leading-snug"
           // Names the row in full on hover only when it is cut off.
@@ -94,6 +107,14 @@ export const ModelListRow = memo(function ModelListRow(props: {
           >
             {gt("New", { $context: "badge on a newly added model" })}
           </span>
+        ) : null}
+        {props.usageHeadroom ? (
+          <ProviderUsageText
+            headroom={props.usageHeadroom}
+            now={props.usageNow ?? 0}
+            // Takes only the room the name leaves, so the name is never cut for the usage.
+            className="min-w-0 flex-1 basis-0 truncate whitespace-nowrap text-end text-2xs"
+          />
         ) : null}
         {props.unavailable ? (
           <Badge variant="outline" size="sm">

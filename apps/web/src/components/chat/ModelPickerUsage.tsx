@@ -33,7 +33,16 @@ import { barColor, LimitWindows } from "../usage/UsageLimits";
 
 export interface ModelPickerUsage {
   readonly now: number;
+  /** Each account as a whole: windows that stop every model. Feeds the rail and the account line. */
   readonly byInstance: ReadonlyMap<ProviderInstanceId, ProviderUsageHeadroom>;
+  /**
+   * One model's headroom: only the windows that meter it, so on Antigravity a Claude model reads
+   * the Claude/GPT pool and a Gemini model the Gemini pool. Feeds model rows, search and favorites.
+   */
+  readonly forModel: (
+    instanceId: ProviderInstanceId,
+    model: string,
+  ) => ProviderUsageHeadroom | null;
 }
 
 const subscribeNever = () => () => {};
@@ -66,7 +75,15 @@ export function useModelPickerUsage(
     const headroom = providerUsageHeadroom(entry.instanceId, providers, sources, now);
     if (headroom) byInstance.set(entry.instanceId, headroom);
   }
-  return { now, byInstance };
+  const byModel = new Map<string, ProviderUsageHeadroom | null>();
+  const forModel = (instanceId: ProviderInstanceId, model: string) => {
+    const key = `${instanceId}\u0000${model}`;
+    if (!byModel.has(key)) {
+      byModel.set(key, providerUsageHeadroom(instanceId, providers, sources, now, model));
+    }
+    return byModel.get(key) ?? null;
+  };
+  return { now, byInstance, forModel };
 }
 
 // Outer ring: session window. Inner ring: provider-wide weekly window. Both sit outside a size-6 icon.

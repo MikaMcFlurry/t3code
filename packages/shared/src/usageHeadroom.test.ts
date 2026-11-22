@@ -12,7 +12,9 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   currentUsageWindow,
   formatCountdown,
+  exhaustedUsageWindow,
   formatUsageHeadroom,
+  headroomExhausted,
   nextHeadroomReset,
   providerUsageHeadroom,
   usagePaceTone,
@@ -249,6 +251,118 @@ describe("providerUsageHeadroom", () => {
     const headroom = headroomOf([codex], "codex");
     expect(headroom && formatUsageHeadroom(headroom, NOW)).toBe("5h 90% →1h0m | all: 80% →1d0h");
     expect(headroom && nextHeadroomReset(headroom)?.kind).toBe("session");
+  });
+});
+
+describe("providerUsageHeadroom for one model", () => {
+  // One Antigravity login: the Gemini pool is used up, the shared Claude/GPT pool is untouched.
+  const antigravity = provider({
+    instanceId: ProviderInstanceId.make("antigravity"),
+    driver: ProviderDriverKind.make("antigravity"),
+    usageLimits: limits([
+      {
+        id: "gemini-5h",
+        kind: "session",
+        label: "Gemini · 5-hour",
+        usedPercent: 100,
+        windowDurationMins: 300,
+        resetsAt: at(HOUR),
+      },
+      {
+        id: "gemini-weekly",
+        kind: "weekly",
+        label: "Gemini · Weekly",
+        usedPercent: 70,
+        windowDurationMins: 7 * 24 * 60,
+        resetsAt: at(2 * DAY),
+      },
+      {
+        id: "3p-5h",
+        kind: "session",
+        label: "Claude & GPT (shared) · 5-hour",
+        usedPercent: 0,
+        windowDurationMins: 300,
+        resetsAt: at(4 * HOUR),
+      },
+      {
+        id: "3p-weekly",
+        kind: "weekly",
+        label: "Claude & GPT (shared) · Weekly",
+        usedPercent: 25,
+        windowDurationMins: 7 * 24 * 60,
+        resetsAt: at(5 * DAY),
+      },
+    ]),
+  });
+  const forModel = (model: string) =>
+    providerUsageHeadroom(ProviderInstanceId.make("antigravity"), [antigravity], [], NOW, model);
+
+  it("reads an Antigravity model's own family pool, never the tightest pool of the account", () => {
+    const claude = forModel("claude-sonnet-4-6");
+    const gemini = forModel("gemini-3.1-pro");
+    expect(claude && formatUsageHeadroom(claude, NOW)).toBe("5h 100% →4h0m | week: 75% →5d0h");
+    expect(gemini && formatUsageHeadroom(gemini, NOW)).toBe("5h 0% →1h0m | week: 30% →2d0h");
+    expect(claude && headroomExhausted(claude)).toBe(false);
+    expect(gemini && headroomExhausted(gemini)).toBe(true);
+    // A hub prefix such as `gpt-…` routes to the shared pool too.
+    expect(forModel("gpt-5.5")?.session?.window.id).toBe("3p-5h");
+  });
+
+  it("dims exactly the models exhaustedUsageWindow blocks", () => {
+    for (const model of ["claude-sonnet-4-6", "gpt-5.5", "gemini-3.1-pro"]) {
+      const headroom = forModel(model);
+      expect(headroom && headroomExhausted(headroom)).toBe(
+        exhaustedUsageWindow(antigravity, NOW, model) !== undefined,
+      );
+    }
+  });
+
+  it("shows no account-wide headroom for Antigravity, since no window stops every model", () => {
+    expect(headroomOf([antigravity], "antigravity")).toBeNull();
+  });
+
+  it("drops another model's pool and keeps the provider-wide headline for Claude", () => {
+    const fable: ServerProviderUsageWindow = {
+      id: "seven_day_fable",
+      kind: "weekly",
+      label: "Weekly · Fable",
+      modelIds: ["claude-fable-5-2"],
+      usedPercent: 100,
+      resetsAt: at(3 * DAY + 4 * HOUR),
+    };
+    const claude = provider({ usageLimits: limits(claudeWindows({ extra: [fable] })) });
+    const of = (model: string) =>
+      providerUsageHeadroom(ProviderInstanceId.make("claude"), [claude], [], NOW, model);
+    const opus = of("claude-opus-5-5");
+    expect(opus && formatUsageHeadroom(opus, NOW)).toBe("5h 72% →2h10m | all: 41% →3d4h");
+    const fableModel = of("claude-fable-5-2");
+    expect(fableModel && formatUsageHeadroom(fableModel, NOW)).toBe(
+      "5h 72% →2h10m | all: 41% • fable: 0% →3d4h",
+    );
+    // A used-up model pool never dims the model: only windows that stop it do, as in the picker.
+    expect(fableModel && headroomExhausted(fableModel)).toBe(false);
+  });
+
+  it("dims a Claude model once the session window is used up", () => {
+    const claude = provider({
+      usageLimits: limits(claudeWindows({ session: { usedPercent: 100 } })),
+    });
+    const headroom = providerUsageHeadroom(
+      ProviderInstanceId.make("claude"),
+      [claude],
+      [],
+      NOW,
+      "claude-opus-5-5",
+    );
+    expect(headroom && headroomExhausted(headroom)).toBe(true);
+    expect(headroom && describeUsageHeadroom(headroom, NOW)).toContain("5h: 0% left");
+  });
+
+  it("describes a family's weekly window without claiming it covers all models", () => {
+    const claude = forModel("claude-sonnet-4-6");
+    expect(claude && describeUsageHeadroom(claude, NOW)).toBe(
+      "5h: 100% left, resets in 4h 0m; week: 75% left, resets in 5d 0h",
+    );
   });
 });
 

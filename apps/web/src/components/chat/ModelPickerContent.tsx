@@ -9,6 +9,7 @@ import {
   MODEL_PICKER_JUMP_KEYBINDING_COMMANDS,
 } from "@t3tools/contracts";
 import { resolveSelectableModel } from "@t3tools/shared/model";
+import { headroomExhausted } from "@t3tools/shared/usageLimits";
 import { useAtomValue } from "@effect/atom-react";
 import {
   formatProviderUpdateRequiredNotice,
@@ -908,6 +909,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     modelJumpLabelByKey,
     activeModelKey,
     selectedModelKeySet,
+    usage,
   };
 
   const onWindowKeyDown = (event: globalThis.KeyboardEvent) => {
@@ -1238,6 +1240,15 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                 }
                 const disabledReason =
                   getModelDisabledReason?.(model.instanceId, model.slug) ?? null;
+                const modelHeadroom = usage?.forModel(model.instanceId, model.slug) ?? null;
+                // Search hits and Favorites mix accounts, so each row carries its own usage. In an
+                // account's tab the line above the list covers it, unless the account meters model
+                // families apart (Antigravity) and has no line for the account as a whole.
+                const showRowUsage =
+                  modelHeadroom !== null &&
+                  (isSearching ||
+                    selectedInstanceId === "favorites" ||
+                    !usage?.byInstance.has(model.instanceId));
                 return (
                   <ModelListRow
                     key={modelKey}
@@ -1263,6 +1274,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                     unavailable={model.isUnavailable === true}
                     jumpLabel={modelJumpLabelByKey.get(modelKey) ?? null}
                     disabledReason={disabledReason}
+                    usageHeadroom={showRowUsage ? modelHeadroom : null}
+                    usageExhausted={modelHeadroom !== null && headroomExhausted(modelHeadroom)}
+                    usageNow={usage?.now ?? 0}
                     onToggleFavorite={toggleFavorite}
                   />
                 );

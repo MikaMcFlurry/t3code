@@ -243,9 +243,11 @@ export function describeUsageHeadroom(
     const remaining =
       window.kind === "session"
         ? resolve(msg("{label}: {remaining}% left", values))
-        : window.kind === "weekly"
+        : window.kind === "weekly" && window.label === "all"
           ? resolve(msg("weekly, all models: {remaining}% left", values))
-          : resolve(msg("weekly, {label} only: {remaining}% left", values));
+          : window.kind === "weekly"
+            ? resolve(msg("{label}: {remaining}% left", values))
+            : resolve(msg("weekly, {label} only: {remaining}% left", values));
     const tone =
       window.tone === "warning"
         ? resolve(msg("ahead of pace", { $context: "usage limit spent faster than time passes" }))
