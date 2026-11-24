@@ -2757,9 +2757,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         projectOverride !== undefined
           ? !projectOverride
           : machineInstance !== undefined && !resolveProviderInstanceEnabled(machineInstance);
+      // A buffered wake prompted nothing: a provider error replaying it (a native session it could
+      // not resume) says nothing about the next prompted run, which can recover. Usage limits,
+      // access and transport failures still hold.
+      const failedMessage =
+        failedRun == null
+          ? undefined
+          : projection.messages.find((candidate) => candidate.id === failedRun.userMessageId);
       const providerFailed =
         failureClass !== undefined &&
         failureClass !== "validation_error" &&
+        !(
+          (failureClass === "provider_error" || failureClass === "unknown") &&
+          failedMessage !== undefined &&
+          isBufferedProviderNotification(failedMessage)
+        ) &&
         failedRun?.providerInstanceId === queuedRun.providerInstanceId;
       if (worktreeMissing || instanceDisabledForProject || providerFailed) {
         // A buffered wake prompts nothing: it replays output the CLI already produced.

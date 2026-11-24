@@ -73,6 +73,7 @@ import {
 import { isProviderCommand, outputInstructions } from "./runOutput.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import { isBufferedProviderNotification } from "./NotificationMailbox.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import { unsentManualContinuationSource } from "@t3tools/shared/orchestrationV2ManualContinuation";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
@@ -615,10 +616,11 @@ export const layer: Layer.Layer<
                   )) ||
                   (source.status === "completed" &&
                     handoff.delivery === undefined &&
-                    // Slash command turns defer history to the next turn.
+                    // Slash command turns and buffered wakes defer history to the next turn.
                     projection.messages.some(
                       (message) =>
-                        message.id === source.userMessageId && isSlashCommandMessage(message),
+                        message.id === source.userMessageId &&
+                        (isSlashCommandMessage(message) || isBufferedProviderNotification(message)),
                     ))),
             )));
       const isSideChatHandoff = (handoff: OrchestrationV2ContextHandoff) =>
@@ -1088,6 +1090,9 @@ export const layer: Layer.Layer<
         }),
       );
       const slashCommand = isSlashCommandMessage(providerMessage);
+      // A buffered wake replays output its native session already produced and sends no prompt,
+      // so it carries no history: the next turn that prompts gets the pending handoffs.
+      const promptsNothing = isBufferedProviderNotification(providerMessage);
       const goalDriver =
         session.driver === "codex" ||
         session.driver === "claudeAgent" ||
@@ -1771,7 +1776,9 @@ export const layer: Layer.Layer<
             Effect.as(true),
             Effect.catchTags({ ContextHandoffBudgetError: () => Effect.succeed(false) }),
           );
-          if (fits) return resumed.success;
+          // A buffered wake prompts nothing: a fresh native session it opened would never be
+          // written, so the next turn's resume could not find it. That turn moves instead.
+          if (fits || promptsNothing) return resumed.success;
           const freshThread = { ...resumed.success, nativeThreadRef: null };
           const freshContext = handoffContextForThread(freshThread);
           const { handoff } = yield* recoveryHandoff;
@@ -1798,6 +1805,9 @@ export const layer: Layer.Layer<
           (resumed.failure._tag === "ProviderAdapterThreadInUseError" ||
             outcomeUnknown(resumed.failure))
         ) {
+          return yield* loadFromProvider(Effect.fail(resumed.failure));
+        }
+        if (resumed._tag === "Failure" && promptsNothing) {
           return yield* loadFromProvider(Effect.fail(resumed.failure));
         }
 
@@ -2171,7 +2181,7 @@ export const layer: Layer.Layer<
       const startWithHandoffs = Effect.fn("ProviderTurnStartService.startWithHandoffs")(
         function* (turnInput: Parameters<typeof session.startTurn>[0], compact = false) {
           const delivery = yield* deliverContextHandoffs({
-            handoffs: [...effectiveHandoffs, ...retryHandoff.handoffs],
+            handoffs: promptsNothing ? [] : [...effectiveHandoffs, ...retryHandoff.handoffs],
             deferInline: compact || slashCommand,
             providerThread: runningProviderThread,
             budget,
@@ -2191,7 +2201,7 @@ export const layer: Layer.Layer<
           const start = compact ? session.compactThread! : session.startTurn;
           // Like history, the side chat context waits for a turn that sends a prompt.
           const sideChatContext =
-            sideChatHandoff === undefined || compact || slashCommand
+            sideChatHandoff === undefined || compact || slashCommand || promptsNothing
               ? ""
               : sideChatHandoff.summaryText;
           // Record inline handoffs before startTurn so an immediate dropped terminal can restore them.
@@ -2211,7 +2221,7 @@ export const layer: Layer.Layer<
           const { resume: _resume, ...contextInput } = startInput;
           const { message: resumeMessage, resume: _resumeIntent, ...resumeInput } = startInput;
           const missedAttachments =
-            compact || slashCommand
+            compact || slashCommand || promptsNothing
               ? []
               : retryHandoff.attachments.filter(
                   (missed) =>
