@@ -1345,6 +1345,297 @@ describe("orchestration v2 provider switching", () => {
       }),
   );
 
+  // TrackManiac Owner-Chat 30 (2026-11-24): a buffered wake prompts nothing, so a fresh native
+  // session it moved into was never written, and the next turn's resume could not find it.
+  it.live("keeps a buffered wake out of a fresh native session when the handoff does not fit", () =>
+    Effect.gen(function* () {
+      const cwd = yield* checkpointWorkspace("handoff-retry-wake");
+      const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+      const injectedHistory = yield* Ref.make<ReadonlyArray<unknown>>([]);
+      const failOnce = yield* Ref.make(true);
+      const generation = yield* Ref.make(0);
+      const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+        makeTestAdapter({
+          instanceId: CODEX_MODEL_SELECTION.instanceId,
+          driver: CODEX_DRIVER,
+          capabilities: CodexProviderCapabilitiesV2,
+          modelSelection: CODEX_MODEL_SELECTION,
+          responseByRunOrdinal: { 1: "Original partial work" },
+          capturedTurns,
+        }),
+        makeTestAdapter({
+          instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+          driver: CLAUDE_DRIVER,
+          capabilities: ClaudeProviderCapabilitiesV2,
+          modelSelection: CLAUDE_MODEL_SELECTION,
+          responseByRunOrdinal: {},
+          capturedTurns,
+          injectedHistory,
+          nativeThreadGeneration: generation,
+          getModelContextWindow: () => 32_000,
+          failStartOnce: failOnce,
+        }),
+      ]);
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const dispatch = (ordinal: number, text: string, selection: ModelSelection) =>
+          orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`retry:${ordinal}`),
+            threadId,
+            messageId: MessageId.make(`retry:${ordinal}`),
+            createdBy: "user",
+            creationSource: "web",
+            text,
+            attachments: [],
+            modelSelection: selection,
+            dispatchMode: { type: "start_immediately" },
+          });
+        const wait = (ordinal: number) =>
+          orchestrator.streamStoredEvents.pipe(
+            Stream.filter(
+              ({ event }) =>
+                event.type === "run.updated" &&
+                event.payload.ordinal === ordinal &&
+                (event.payload.status === "completed" || event.payload.status === "failed"),
+            ),
+            Stream.runHead,
+            Effect.andThen(worker.drain()),
+          );
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("retry:create"),
+          threadId,
+          projectId,
+          createdBy: "user",
+          creationSource: "web",
+          title: "Handoff retry wake",
+          modelSelection: CODEX_MODEL_SELECTION,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+        });
+        yield* dispatch(1, "Original request with constraints", CODEX_MODEL_SELECTION);
+        yield* wait(1);
+        yield* dispatch(2, "First target request", CLAUDE_MODEL_SELECTION);
+        yield* wait(2);
+        const failed = yield* orchestrator.getThreadProjection(threadId);
+        const target = failed.providerThreads.find(
+          (thread) => thread.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId,
+        )!;
+        yield* (yield* EventSink.EventSinkV2).write({
+          events: [
+            {
+              id: EventId.make("exhausted-retry-wake-usage"),
+              type: "provider-thread.updated",
+              threadId,
+              occurredAt: yield* DateTime.now,
+              payload: { ...target, contextUsage: { usedTokens: 30_000, maxTokens: 32_000 } },
+            },
+          ],
+        });
+        assert.equal(yield* Ref.get(generation), 1);
+
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("retry:3"),
+          threadId,
+          messageId: MessageId.make("retry:3"),
+          createdBy: "agent",
+          creationSource: "provider",
+          text: "Background activity updated",
+          notification: {
+            source: { kind: "background_task" },
+            outcome: "updated",
+            summary: "Background activity updated",
+          },
+          attachments: [],
+          dispatchMode: { type: "queue_after_active" },
+        });
+        // Queued while the wake runs: a failed wake must not hold it.
+        const historyBeforeFollowup = (yield* Ref.get(injectedHistory)).length;
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("retry:4"),
+          threadId,
+          messageId: MessageId.make("retry:4"),
+          createdBy: "user",
+          creationSource: "web",
+          text: "Follow-up request",
+          attachments: [],
+          modelSelection: CLAUDE_MODEL_SELECTION,
+          dispatchMode: { type: "queue_after_active" },
+        });
+        yield* wait(4);
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        const wake = after.runs.find((run) => run.userMessageId === MessageId.make("retry:3"))!;
+        const followup = after.runs.find((run) => run.userMessageId === MessageId.make("retry:4"))!;
+        assert.equal(wake.status, "completed");
+        assert.equal(followup.status, "completed");
+        assert.equal((yield* Ref.get(capturedTurns)).at(-1)!.text, "Follow-up request");
+        // The wake stayed on the native thread it drains. The prompted follow-up is the run that
+        // moved into a fresh session, carrying the thread's history.
+        const recovered = after.turnItems.filter(
+          (item) => item.type === "handoff" && item.title === "Recovered context",
+        );
+        assert.isAbove(recovered.length, 0);
+        for (const item of recovered) assert.equal(item.runId, followup.id);
+        assert.equal(yield* Ref.get(generation), 2);
+        assert.include(
+          yield* encodeJson((yield* Ref.get(injectedHistory)).slice(historyBeforeFollowup)),
+          "Original request with constraints",
+        );
+      }).pipe(
+        Effect.provide(
+          ProviderReplayHarness.layerWithRegistry(
+            {
+              name: "handoff-retry-wake",
+              runtimePolicyOverride: {
+                cwd,
+                approvalPolicy: "never",
+                sandboxPolicy: { type: "readOnly" },
+              },
+            },
+            layerRegistry,
+          ),
+        ),
+      );
+    }),
+  );
+
+  it.live("hands a wake's provider-switch history to the next prompted turn", () =>
+    Effect.gen(function* () {
+      const cwd = yield* checkpointWorkspace("handoff-wake-target");
+      const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+      const injectedHistory = yield* Ref.make<ReadonlyArray<unknown>>([]);
+      const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+        makeTestAdapter({
+          instanceId: CODEX_MODEL_SELECTION.instanceId,
+          driver: CODEX_DRIVER,
+          capabilities: CodexProviderCapabilitiesV2,
+          modelSelection: CODEX_MODEL_SELECTION,
+          responseByRunOrdinal: { 1: "Original partial work" },
+          capturedTurns,
+        }),
+        makeTestAdapter({
+          instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+          driver: CLAUDE_DRIVER,
+          capabilities: ClaudeProviderCapabilitiesV2,
+          modelSelection: CLAUDE_MODEL_SELECTION,
+          responseByRunOrdinal: {},
+          capturedTurns,
+          injectedHistory,
+        }),
+      ]);
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const wait = (ordinal: number) =>
+          orchestrator.streamStoredEvents.pipe(
+            Stream.filter(
+              ({ event }) =>
+                event.type === "run.updated" &&
+                event.payload.ordinal === ordinal &&
+                (event.payload.status === "completed" || event.payload.status === "failed"),
+            ),
+            Stream.runHead,
+            Effect.andThen(worker.drain()),
+          );
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("wake-target:create"),
+          threadId,
+          projectId,
+          createdBy: "user",
+          creationSource: "web",
+          title: "Wake handoff target",
+          modelSelection: CODEX_MODEL_SELECTION,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("wake-target:1"),
+          threadId,
+          messageId: MessageId.make("wake-target:1"),
+          createdBy: "user",
+          creationSource: "web",
+          text: "Original request with constraints",
+          attachments: [],
+          modelSelection: CODEX_MODEL_SELECTION,
+          dispatchMode: { type: "start_immediately" },
+        });
+        yield* wait(1);
+        // The wake is the run that switches the thread to Claude, so the handoff targets it.
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("wake-target:2"),
+          threadId,
+          messageId: MessageId.make("wake-target:2"),
+          createdBy: "agent",
+          creationSource: "provider",
+          text: "Background activity updated",
+          notification: {
+            source: { kind: "background_task" },
+            outcome: "updated",
+            summary: "Background activity updated",
+          },
+          attachments: [],
+          modelSelection: CLAUDE_MODEL_SELECTION,
+          dispatchMode: { type: "queue_after_active" },
+        });
+        yield* wait(2);
+        const afterWake = yield* orchestrator.getThreadProjection(threadId);
+        const wake = afterWake.runs.find(
+          (run) => run.userMessageId === MessageId.make("wake-target:2"),
+        )!;
+        assert.equal(wake.status, "completed");
+        const handoff = afterWake.contextHandoffs.find((entry) => entry.targetRunId === wake.id);
+        assert.isDefined(handoff);
+        assert.isUndefined(handoff?.delivery);
+
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("wake-target:3"),
+          threadId,
+          messageId: MessageId.make("wake-target:3"),
+          createdBy: "user",
+          creationSource: "web",
+          text: "Follow-up request",
+          attachments: [],
+          modelSelection: CLAUDE_MODEL_SELECTION,
+          dispatchMode: { type: "queue_after_active" },
+        });
+        yield* wait(3);
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(after.runs.at(-1)?.status, "completed");
+        const turn = (yield* Ref.get(capturedTurns)).at(-1)!;
+        assert.include(turn.text, "Follow-up request");
+        const delivered = yield* encodeJson({ history: yield* Ref.get(injectedHistory), turn });
+        assert.include(delivered, "Original request with constraints");
+        assert.isDefined(after.contextHandoffs.find((entry) => entry.id === handoff!.id)?.delivery);
+      }).pipe(
+        Effect.provide(
+          ProviderReplayHarness.layerWithRegistry(
+            {
+              name: "handoff-wake-target",
+              runtimePolicyOverride: {
+                cwd,
+                approvalPolicy: "never",
+                sandboxPolicy: { type: "readOnly" },
+              },
+            },
+            layerRegistry,
+          ),
+        ),
+      );
+    }),
+  );
+
   it.live("keeps a native session whose stored prose is far below an unreported window", () =>
     Effect.gen(function* () {
       const cwd = yield* checkpointWorkspace("handoff-estimate-headroom");

@@ -5682,7 +5682,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               attempts,
               providerTurns,
             });
-            const messageIds = [run, unsentSource].flatMap((source) =>
+            // A completed run that left a handoff undelivered deferred it (a slash command or a
+            // buffered wake); its message tells turn start that the handoff is still pending.
+            const deferredSources = contextHandoffs.flatMap((handoff) => {
+              if (handoff.status !== "ready" || handoff.delivery !== undefined) return [];
+              const source = runs.find((candidate) => candidate.id === handoff.targetRunId);
+              return source?.status === "completed" ? [source] : [];
+            });
+            const messageIds = [run, unsentSource, ...deferredSources].flatMap((source) =>
               source === undefined ? [] : [source.userMessageId],
             );
             // Earlier slash command turns defer context too; isSlashCommandMessage narrows the match.
