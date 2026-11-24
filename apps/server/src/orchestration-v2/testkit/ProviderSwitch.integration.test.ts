@@ -5005,7 +5005,10 @@ describe("orchestration v2 provider switching", () => {
             });
             yield* send(1);
             yield* worker.drain();
-            const idle = yield* waitForIdle(waitingThreadId);
+            yield* waitForIdle(waitingThreadId);
+            // The run completes before its checkpoint capture; let the capture finish first.
+            yield* worker.drain();
+            const idle = yield* orchestrator.getThreadProjection(waitingThreadId);
             const firstSession = idle.providerSessions.find(
               (session) => session.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId,
             )!;
@@ -5186,7 +5189,10 @@ describe("orchestration v2 provider switching", () => {
             });
             yield* send(1, CLAUDE_MODEL_SELECTION);
             yield* worker.drain();
-            const idle = yield* waitForIdle(threadId);
+            yield* waitForIdle(threadId);
+            // The run completes before its checkpoint capture; let the capture finish first.
+            yield* worker.drain();
+            const idle = yield* orchestrator.getThreadProjection(threadId);
             const firstSession = idle.providerSessions.find(
               (session) => session.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId,
             )!;
@@ -5354,7 +5360,10 @@ describe("orchestration v2 provider switching", () => {
               dispatchMode: { type: "start_immediately" },
             });
             yield* worker.drain();
-            const idle = yield* waitForIdle(threadId);
+            yield* waitForIdle(threadId);
+            // The run completes before its checkpoint capture; let the capture finish first.
+            yield* worker.drain();
+            const idle = yield* orchestrator.getThreadProjection(threadId);
             const firstSession = idle.providerSessions[0]!;
             const run = idle.runs[0]!;
             const now = yield* DateTime.now;
