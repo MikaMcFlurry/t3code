@@ -101,7 +101,7 @@ export interface ComputerUseLinuxUpstreamDependencies {
     command: string,
     platform: NodeJS.Platform,
     environment: NodeJS.ProcessEnv,
-  ) => string | undefined;
+  ) => string | undefined | Promise<string | undefined>;
   readonly transportFactory?: (parameters: StdioServerParameters) => StdioClientTransport;
 }
 
@@ -134,7 +134,7 @@ export function makeComputerUseLinuxUpstreamFactory(
       }
       const hostEnvironment = dependencies.environment ?? process.env;
       const command = windows ? WINDOWS_EXECUTABLE : EXECUTABLE;
-      const executable = dependencies.resolveExecutable(
+      const executable = await dependencies.resolveExecutable(
         command,
         dependencies.platform,
         hostEnvironment,
@@ -142,6 +142,14 @@ export function makeComputerUseLinuxUpstreamFactory(
       if (executable === undefined) {
         throw new ComputerUseLinuxExecutableUnavailableError({ command });
       }
+      const gnomeScreenshot =
+        !windows && controlledEnvironment.COMPUTER_USE_LINUX_SCREENSHOT_BACKEND === "portal"
+          ? await dependencies.resolveExecutable(
+              "gnome-screenshot",
+              dependencies.platform,
+              hostEnvironment,
+            )
+          : undefined;
       const transport = (
         dependencies.transportFactory ?? ((parameters) => new StdioClientTransport(parameters))
       )({
@@ -155,12 +163,7 @@ export function makeComputerUseLinuxUpstreamFactory(
               // GNOME's Screenshot portal asks on every call for a caller without an app ID,
               // such as a system service, and rejects it when another app has focus.
               // gnome-screenshot is the route meant for background services.
-              ...(controlledEnvironment.COMPUTER_USE_LINUX_SCREENSHOT_BACKEND === "portal" &&
-              dependencies.resolveExecutable(
-                "gnome-screenshot",
-                dependencies.platform,
-                hostEnvironment,
-              ) !== undefined
+              ...(gnomeScreenshot !== undefined
                 ? { COMPUTER_USE_LINUX_SCREENSHOT_BACKEND: "gnome-screenshot" }
                 : {}),
             },
@@ -172,6 +175,8 @@ export function makeComputerUseLinuxUpstreamFactory(
         dependencies.clientFactory?.() ??
         new Client({ name: "t3-code-computer-use-linux", version: "1.0.0" });
       try {
+        // The executable lookup is async: an abort during it never reaches connect's listener.
+        signal?.throwIfAborted();
         await client.connect(transport, signal === undefined ? undefined : { signal });
       } catch (cause) {
         await Promise.allSettled([client.close(), transport.close()]);
