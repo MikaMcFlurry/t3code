@@ -5244,6 +5244,8 @@ describe("orchestration v2 provider switching", () => {
           yield* send(1, CLAUDE_MODEL_SELECTION);
           yield* worker.drain();
           yield* waitForIdle(threadId);
+          // The run completes before its checkpoint capture; let the capture finish first.
+          yield* worker.drain();
 
           yield* Ref.set(armed, true);
           // Never bounced: the send is accepted and waits queued, written exactly once.
@@ -5758,6 +5760,8 @@ describe("orchestration v2 provider switching", () => {
             yield* send(1, CLAUDE_MODEL_SELECTION);
             yield* worker.drain();
             yield* waitForIdle(threadId);
+            // The run completes before its checkpoint capture; let the capture finish first.
+            yield* worker.drain();
 
             // While the session is idle, Claude runs a wake turn to its result.
             yield* Queue.offerAll(sdkMessages, [
@@ -6170,6 +6174,8 @@ describe("orchestration v2 provider switching", () => {
           yield* send(1, CLAUDE_MODEL_SELECTION);
           yield* worker.drain();
           yield* waitForIdle(threadId);
+          // The run completes before its checkpoint capture; let the capture finish first.
+          yield* worker.drain();
 
           const runStatus = (index: number) =>
             orchestrator.streamStoredEvents.pipe(
