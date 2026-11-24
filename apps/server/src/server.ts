@@ -607,7 +607,12 @@ const layerMcpHttpServer = Layer.unwrap(
   Effect.gen(function* () {
     return COMPUTER_USE_PLATFORMS.has(yield* HostProcess.Platform)
       ? McpHttpServer.layerMcpTransport(
-          Layer.mergeAll(McpHttpServer.layerTools, ComputerUseLinuxDeployment.layer),
+          Layer.mergeAll(
+            McpHttpServer.layerTools,
+            McpHttpServer.layerToolSearch,
+            McpHttpServer.layerMilestoneEvents,
+            ComputerUseLinuxDeployment.layer,
+          ),
         )
       : McpHttpServer.layer;
   }),
