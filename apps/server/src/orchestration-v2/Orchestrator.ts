@@ -14,6 +14,7 @@ import {
   usageLimitBlockedRun,
 } from "@t3tools/shared/orchestrationV2ThreadError";
 import { threadIssueKeysEqual } from "@t3tools/contracts";
+import { sameModelSelection } from "@t3tools/shared/usageLimits";
 import { canonicalizeGitCafePullRequestUrl } from "@t3tools/source-control-definitions/registry";
 import { threadPullRequestsOf } from "../sourceControl/threadPullRequests.ts";
 import {
@@ -1098,6 +1099,44 @@ function followsCurrentConversation(
   );
 }
 
+/** Some usage-limit switch (UsageLimitRecoveryWorker's `limit-switch:` message) left this account. */
+function limitSwitchLeftAccount(
+  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
+  instanceId: ModelSelection["instanceId"],
+): boolean {
+  const prefix = `limit-switch:${projection.thread.id}:`;
+  return projection.runs.some(
+    (candidate) =>
+      candidate.userMessageId.startsWith(prefix) &&
+      projection.runs.find((origin) => origin.id === candidate.userMessageId.slice(prefix.length))
+        ?.modelSelection.instanceId === instanceId,
+  );
+}
+
+/**
+ * A buffered wake of an account a usage-limit switch left, while that account is still out of
+ * usage. Only its own session can replay it, so waiting at the queue head held every send behind
+ * it until the reset.
+ */
+function isLimitSwitchedWake(
+  projection: Pick<
+    OrchestrationV2ThreadProjection,
+    "thread" | "runs" | "messages" | "turnItems" | "providerSessions"
+  >,
+  run: OrchestrationV2Run,
+  now: DateTime.Utc,
+): boolean {
+  const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
+  const instanceId = run.modelSelection.instanceId;
+  return (
+    message !== undefined &&
+    isBufferedProviderNotification(message) &&
+    projection.thread.modelSelection.instanceId !== instanceId &&
+    limitSwitchLeftAccount(projection, instanceId) &&
+    usageLimitHoldsQueue(projection, instanceId, now)
+  );
+}
+
 function queuedRunModelSelection(
   projection: Pick<OrchestrationV2ThreadProjection, "thread" | "messages">,
   run: OrchestrationV2Run,
@@ -1106,6 +1145,35 @@ function queuedRunModelSelection(
   return followsCurrentConversation(message)
     ? projection.thread.modelSelection
     : run.modelSelection;
+}
+
+/**
+ * Where a usage-limit switch moves a run already queued on the account it leaves, or undefined to
+ * leave it. The run was queued before anyone knew that account was out of usage. With the same
+ * model only the account changes; a run that had exactly the limited run's selection takes the
+ * switch's. Another model picked for that one message, wakes and runs that follow the thread stay.
+ */
+function limitSwitchQueuedRunSelection(input: {
+  readonly run: OrchestrationV2Run;
+  readonly message: OrchestrationV2ConversationMessage | undefined;
+  readonly limited: ModelSelection;
+  readonly switchedTo: ModelSelection;
+}): ModelSelection | undefined {
+  const { run, message, limited, switchedTo } = input;
+  if (
+    run.status !== "queued" ||
+    message === undefined ||
+    followsCurrentConversation(message) ||
+    isBufferedProviderNotification(message) ||
+    run.modelSelection.instanceId !== limited.instanceId ||
+    switchedTo.instanceId === limited.instanceId
+  ) {
+    return undefined;
+  }
+  if (run.modelSelection.model === switchedTo.model) {
+    return { ...run.modelSelection, instanceId: switchedTo.instanceId };
+  }
+  return sameModelSelection(run.modelSelection, limited) ? switchedTo : undefined;
 }
 
 /** The selection the thread will be on once every queued run has started. */
@@ -2617,6 +2685,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const runId = storedQueuedRun.id;
         projection = yield* readCommandProjection(threadId);
         storedQueuedRun = projection.runs.find((run) => run.id === runId);
+      }
+      // A wake stranded on an account a limit switch left waits for that account without holding
+      // the sends behind it. It is skipped, not dropped: its buffer may hold a subagent's result.
+      if (storedQueuedRun !== undefined && options?.queuedRunId === undefined) {
+        const queueCheckedAt = yield* DateTime.now;
+        if (isLimitSwitchedWake(projection, storedQueuedRun, queueCheckedAt)) {
+          storedQueuedRun = queuedRunsInDeliveryOrder(projection).find(
+            (run) =>
+              run.queueHeld !== true &&
+              !isStalePullRequestWatchWake(projection, run) &&
+              !isLimitSwitchedWake(projection, run, queueCheckedAt),
+          );
+        }
       }
       if (storedQueuedRun === undefined) {
         return;
@@ -8146,6 +8227,49 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ? projection.runs.filter((run) => run.status === "queued" && run.queueHeld === true)
         : [];
     const releasedAt = yield* DateTime.now;
+    // UsageLimitRecoveryWorker's switch takes the runs it strands on the limited account along.
+    // Recorded on the runs, so a later edit or pick for one of them still wins.
+    const limitedRun =
+      command.manualContinuationOfRunId !== undefined &&
+      command.messageId === `limit-switch:${command.threadId}:${command.manualContinuationOfRunId}`
+        ? projection.runs.find((run) => run.id === command.manualContinuationOfRunId)
+        : undefined;
+    const strandedRuns =
+      limitedRun === undefined || !startsOrQueuesRun
+        ? []
+        : projection.runs.filter(
+            (run) =>
+              run.status === "queued" &&
+              run.modelSelection.instanceId === limitedRun.modelSelection.instanceId,
+          );
+    if (limitedRun !== undefined && strandedRuns.length > 0) {
+      const strandedMessages = yield* projectionStore
+        .getMessagesById(
+          command.threadId,
+          strandedRuns.map((run) => run.userMessageId),
+        )
+        .pipe(mapDispatchError(command));
+      for (const queued of strandedRuns) {
+        const moved = limitSwitchQueuedRunSelection({
+          run: queued,
+          message: strandedMessages.get(queued.userMessageId),
+          limited: limitedRun.modelSelection,
+          switchedTo: modelSelection,
+        });
+        if (moved === undefined) continue;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "run.updated",
+          threadId: command.threadId,
+          runId: queued.id,
+          providerInstanceId: moved.instanceId,
+          occurredAt: releasedAt,
+          payload: { ...queued, modelSelection: moved, providerInstanceId: moved.instanceId },
+        });
+      }
+    }
     for (const held of heldRunsToRelease) {
       yield* emit(
         events,
