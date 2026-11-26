@@ -2959,13 +2959,26 @@ const make = Effect.gen(function* () {
         operation: "delegate-task",
       });
       const isRetryOfAcceptedDelegation = yield* threadManagement.hasReceipt(commandId);
-      const target = yield* resolveTargetRechecking({
+      const resolvedTarget = yield* resolveTargetRechecking({
         parent,
         target: input.target,
         providers,
         cwd: yield* parentWorkspaceCwd(parent),
         skipProjectEnablementFilter: isRetryOfAcceptedDelegation,
       });
+      // A replayed command keeps the account it was accepted on.
+      const target: ResolvedTarget = isRetryOfAcceptedDelegation
+        ? resolvedTarget
+        : {
+            ...resolvedTarget,
+            modelSelection: yield* ThreadMessageIntake.availableDelegationAccount(
+              resolvedTarget.modelSelection,
+              parent.thread.projectId,
+            ).pipe(
+              Effect.provideService(ServerSettings.ServerSettingsService, serverSettings),
+              Effect.provideService(ProviderRegistry.ProviderRegistry, providerRegistry),
+            ),
+          };
       const runtimeMode = yield* resolveRuntimeMode(
         parent.thread.runtimeMode,
         input.runtimeMode,

@@ -2717,6 +2717,113 @@ describe("OrchestratorMcpService provider resolution", () => {
     }),
   );
 
+  it.effect.each([true, false])(
+    "starts a delegated task on another account of its model when out of usage (fallback %s)",
+    (fallbackToAvailableAccounts) =>
+      Effect.gen(function* () {
+        const claudeDriver = ProviderDriverKind.make("claudeAgent");
+        const usage = (usedPercent: number) => ({
+          checkedAt: "2026-09-13T00:00:00.000Z",
+          windows: [
+            {
+              id: "five_hour",
+              kind: "session" as const,
+              label: "Session",
+              usedPercent,
+              resetsAt: "2099-01-01T00:00:00.000Z",
+            },
+          ],
+        });
+        const claude = (id: string, model: string, usedPercent: number): ServerProvider => ({
+          ...providerSnapshot({
+            instanceId: ProviderInstanceId.make(id),
+            driver: claudeDriver,
+            model,
+          }),
+          usageLimits: usage(usedPercent),
+        });
+        // An unused account of another model ranks first but must not take an agent's pick.
+        const providers = [
+          claude("claude_sonnet", "claude-sonnet-5", 0),
+          claude("claude_work", "claude-opus-5-5", 100),
+          claude("claude_personal", "claude-opus-5-5", 30),
+          {
+            ...providerSnapshot({
+              instanceId: codexInstanceId,
+              driver: ProviderDriverKind.make("codex"),
+              model: "gpt-5.4",
+            }),
+            usageLimits: usage(0),
+          },
+        ];
+        const instanceIds = providers.map((provider) => provider.instanceId);
+        const commands: Array<unknown> = [];
+        const task = {
+          id: taskId,
+          threadId: parentThreadId,
+          origin: "app_owned",
+          childThreadId,
+          providerInstanceId: ProviderInstanceId.make("claude_personal"),
+          model: "claude-opus-5-5",
+          status: "running",
+          result: null,
+        };
+        const dependencies = Layer.mergeAll(
+          NodeServices.layer,
+          NodeCrypto.layer,
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            hasReceipt: () => Effect.succeed(false),
+            getThreadRecords: (threadId) =>
+              Effect.succeed(
+                threadId === parentThreadId
+                  ? parentProjection(commands.length > 0 ? [task] : [])
+                  : childProjection,
+              ),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                commands.push(command);
+                return {
+                  sequence: 1,
+                  storedEvents: [{ event: { type: "subagent.updated", payload: task } }],
+                } as never;
+              }),
+          }),
+          ServerSettings.layerTest({
+            fallbackToAvailableAccounts,
+            providerInstances: Object.fromEntries(
+              providers.map((provider) => [
+                provider.instanceId,
+                { driver: provider.driver, enabled: true },
+              ]),
+            ),
+          }),
+          providerRegistryLayer(providers),
+          adapterRegistryLayer(instanceIds),
+          Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        );
+        yield* Effect.gen(function* () {
+          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+          yield* service.delegateTask(scope, {
+            task: "Review the change.",
+            target: {
+              providerInstanceId: ProviderInstanceId.make("claude_work"),
+              model: "claude-opus-5-5",
+            },
+            mode: "async",
+            clientRequestId: `exhausted-account-${fallbackToAvailableAccounts}`,
+          });
+          assert.equal(commands.length, 1);
+          assert.deepEqual((commands[0] as { modelSelection: unknown }).modelSelection, {
+            instanceId: fallbackToAvailableAccounts ? "claude_personal" : "claude_work",
+            model: "claude-opus-5-5",
+          });
+        }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))));
+      }),
+  );
+
   it.effect("gives a worktree child in a project whose folder holds several repositories", () =>
     Effect.gen(function* () {
       // A plain project folder: Git finds no repository at its root, only in a/ and b/.

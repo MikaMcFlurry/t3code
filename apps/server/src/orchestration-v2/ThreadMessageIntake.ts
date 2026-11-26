@@ -190,6 +190,14 @@ export const withAvailableLaunchAccount = Effect.fn(
   return modelSelection === input.modelSelection ? input : { ...input, modelSelection };
 });
 
+/** A task an agent delegates starts on an account with usage left, of the model it picked. */
+export const availableDelegationAccount = Effect.fn(
+  "ThreadMessageIntake.availableDelegationAccount",
+)(function* (selection: ModelSelection, projectId: ProjectId) {
+  const choose = yield* readAccountChoice();
+  return choose === null ? selection : choose(selection, projectId, true);
+});
+
 /**
  * The account a usage-limit switch moved this thread away from, once it has usage again. Only
  * for a turn that starts now: never while a run is active or queued, so no turn is cut off.
