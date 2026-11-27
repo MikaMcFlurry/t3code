@@ -516,6 +516,12 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
 
   {
+    id: "model-picker-usage",
+    title: msg("Usage in the model picker"),
+    to: "/settings/labs",
+    searchTerms: [msg("beta limits 5 hour weekly quota reset countdown account headroom rings")],
+  },
+  {
     id: "tool-call-visibility",
     title: msg("Tool calls in chat"),
     to: "/settings/chat",

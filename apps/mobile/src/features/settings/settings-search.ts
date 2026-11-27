@@ -160,6 +160,8 @@ const SETTINGS_SEARCH_TERMS = {
     msg("fast worktree checkout", { $context: "settings search keyword" }),
     msg("clone cache", { $context: "settings search keyword" }),
     msg("agent feedback", { $context: "settings search keyword" }),
+    msg("usage in the model sheet", { $context: "settings search keyword" }),
+    msg("5 hour weekly limits", { $context: "settings search keyword" }),
   ],
   SettingsEnvironmentMaintenance: [
     msg("updates", { $context: "settings search keyword" }),

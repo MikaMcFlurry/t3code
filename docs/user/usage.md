@@ -157,6 +157,19 @@ row to see when it resets and your pace. Turn on **Context window** to also show
 context use against the model's limit. A tick on the bar marks where the provider compacts
 automatically, when it reports that point.
 
+To compare accounts while you pick one, turn on **Settings → Labs → Usage in the model picker**
+(web and desktop) or **Settings → Labs → Usage in the model sheet** (mobile). Each Claude and Codex
+account then shows how much is left, e.g. `5h 72% →2h10m | all: 41% • fable: 18% →3d4h`: the
+5-hour window, the weekly window for all models, any one-model weekly pool such as Fable, and the
+time until each reset. The percentage turns amber with ▲ when usage runs ahead of the time left
+and red with ! when it is nearly used up. On web the provider rail also draws the 5-hour and weekly
+windows as two rings around each account icon. A reset counts as a refill only when it passed
+after the last reading; an older reset time is hidden until Limits reads the account again.
+On web and desktop, search results and Favorites show the same text on each model row, read for
+that model: a model pool such as Fable appears only on Fable models. Antigravity meters Gemini and
+Claude/GPT apart, so its rows show their own family's 5-hour and weekly (`week`) windows instead of
+an account line. A model whose 5-hour or weekly window is used up is dimmed but stays selectable.
+
 OpenCode Go reports its session, weekly, and monthly allowance when OpenCode runs locally in
 the environment. T3 cannot report limits for external OpenCode servers because their credentials
 belong to the remote server. Limits need an OpenCode Go API key, or an OpenCode Console connected

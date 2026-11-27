@@ -28,6 +28,7 @@ export function LabsSettingsPanel() {
     <SettingsPageContainer>
       <SettingsSection id="beta" title={gt("Beta")}>
         <BoringSidebarRow />
+        <ModelPickerUsageRow />
         {/* Clerk is only mounted when this build has T3 Connect. */}
         {hasCloudPublicConfig() ? <GuestLinksRowWithSignIn /> : <GuestLinksRow />}
         <LinkedEnvironmentsRow />
@@ -88,6 +89,30 @@ function BoringSidebarMultilineRow() {
             updateSettings({ boringSidebarMultilineRows: Boolean(checked) })
           }
           aria-label={gt("Two-line folder rows")}
+        />
+      }
+    />
+  );
+}
+
+function ModelPickerUsageRow() {
+  const searchableSetting = useSearchableSetting();
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  const gt = useGT();
+  return (
+    <SettingsRow
+      {...searchableSetting("model-picker-usage")}
+      description={gt(
+        "Show each account's remaining 5-hour and weekly limits in the model picker, with a countdown to each reset.",
+      )}
+      control={
+        <Switch
+          checked={settings.modelPickerUsageEnabled}
+          onCheckedChange={(checked) =>
+            updateSettings({ modelPickerUsageEnabled: Boolean(checked) })
+          }
+          aria-label={gt("Usage in the model picker")}
         />
       }
     />
