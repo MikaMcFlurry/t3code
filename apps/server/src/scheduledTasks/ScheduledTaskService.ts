@@ -728,6 +728,8 @@ export const layer = Layer.effect(
         readonly secret: string | null;
         readonly secretChanged: boolean;
       },
+      /** The save left routing out: keep whatever the row holds when it writes. */
+      keepRouting: boolean,
     ) =>
       sql<{ task_id: string }>`
         INSERT INTO scheduled_tasks (
@@ -797,7 +799,17 @@ export const layer = Layer.effect(
           END,
           thread_mode = excluded.thread_mode,
           workspace_strategy_json = excluded.workspace_strategy_json,
-          model_selection_json = excluded.model_selection_json,
+          -- A save that left the routing out keeps the row's, even one saved while it ran.
+          model_selection_json = CASE
+            WHEN ${keepRouting ? 0 : 1} = 1 THEN excluded.model_selection_json
+            WHEN json_type(scheduled_tasks.model_selection_json, ${`$.${MODEL_ROUTING_KEY}`}) IS NULL
+            THEN json_remove(excluded.model_selection_json, ${`$.${MODEL_ROUTING_KEY}`})
+            ELSE json_set(
+              excluded.model_selection_json,
+              ${`$.${MODEL_ROUTING_KEY}`},
+              json(json_extract(scheduled_tasks.model_selection_json, ${`$.${MODEL_ROUTING_KEY}`}))
+            )
+          END,
           runtime_mode = excluded.runtime_mode,
           interaction_mode = excluded.interaction_mode,
           creation_source = excluded.creation_source,
@@ -1707,6 +1719,7 @@ export const layer = Layer.effect(
         scheduleUnchanged ? existingTask.schedule : null,
         threadId === null && input.unbindThread === true ? (existingTask?.threadId ?? null) : null,
         webhook,
+        input.modelRouting === undefined,
       );
       yield* notifyChanged;
       return { task: (yield* findTask(id)) ?? task };

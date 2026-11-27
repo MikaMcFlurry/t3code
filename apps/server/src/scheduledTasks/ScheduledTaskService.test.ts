@@ -1358,6 +1358,8 @@ describe("per-task model routing", () => {
     providers: Ref.Ref<ReadonlyArray<ServerProvider>>,
     launched: Ref.Ref<ReadonlyArray<ThreadLaunchService.ThreadLaunchInput>>,
     autoRoutingAllowed: ReadonlyArray<string> = [],
+    /** Runs inside a worktree save, between its read and its write. */
+    duringSave: Effect.Effect<void> = Effect.void,
   ) =>
     ScheduledTaskService.layer.pipe(
       Layer.provide(
@@ -1373,7 +1375,7 @@ describe("per-task model routing", () => {
           Layer.mock(SecretRequests.SecretRequests)({}),
           Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
             namedProjectsRoot: "/projects",
-            isScratchProject: () => Effect.succeed(false),
+            isScratchProject: () => duringSave.pipe(Effect.as(true)),
           }),
           Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Ref.get(providers) }),
           ServerSettings.layerTest({
@@ -1510,5 +1512,44 @@ describe("per-task model routing", () => {
           assert.equal(yield* lastLaunch(launched), "claude_a");
         }).pipe(Effect.provide(serviceLayer(providers, launched)));
       }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect("a save that leaves the routing out keeps a routing saved while it ran", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const providers = yield* Ref.make<ReadonlyArray<ServerProvider>>([]);
+      const launched = yield* Ref.make<ReadonlyArray<ThreadLaunchService.ThreadLaunchInput>>([]);
+      const concurrent = yield* Ref.make<Effect.Effect<void>>(Effect.void);
+      const writeRow = (json: string) =>
+        sql`UPDATE scheduled_tasks SET model_selection_json = ${json}`.pipe(
+          Effect.asVoid,
+          Effect.orDie,
+        );
+      const other = { candidates: ["codex"], minUsageLeftPercent: 50 };
+      const worktree = { type: "worktree", baseRef: "main" } as const;
+      yield* Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        yield* service.upsert(taskInput({ modelRouting: routing }));
+        // Another save stores other routing after this one read the task.
+        yield* Ref.set(
+          concurrent,
+          writeRow(JSON.stringify({ ...stored, scheduledTaskRouting: other })),
+        );
+        const renamed = yield* service.upsert(
+          taskInput({ title: "Renamed", workspaceStrategy: worktree }),
+        );
+        assert.deepEqual(renamed.task.modelRouting, other);
+        assert.equal(renamed.task.title, "Renamed");
+        // ...or clears it.
+        yield* Ref.set(concurrent, writeRow(JSON.stringify(stored)));
+        const cleared = yield* service.upsert(
+          taskInput({ title: "Again", workspaceStrategy: worktree }),
+        );
+        assert.isUndefined(cleared.task.modelRouting);
+        assert.deepEqual(cleared.task.modelSelection, stored);
+      }).pipe(
+        Effect.provide(serviceLayer(providers, launched, [], Effect.flatten(Ref.get(concurrent)))),
+      );
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
   );
 });

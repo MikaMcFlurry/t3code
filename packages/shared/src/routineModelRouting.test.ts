@@ -357,14 +357,62 @@ describe("routineModelRouting", () => {
       ).toBe("claude-1");
     });
 
-    it("lets an account without usage data pass the threshold", () => {
+    it("tries an account without usage data after every account that shows enough left", () => {
       const { usageLimits: _omitted, ...unknown } = provider("codex-1", 0);
+      const routing = (minUsageLeftPercent: number) => ({
+        candidates: ["codex-1", "claude-1", "claude-2"],
+        minUsageLeftPercent,
+      });
+      const list = [provider("claude-1", 90), provider("claude-2", 20), unknown];
+      expect(resolve({ providers: list, routing: routing(20) }).selection.instanceId).toBe(
+        "claude-2",
+      );
+      // Nobody shows enough left: the account that might have it beats the most-headroom fallback.
+      expect(resolve({ providers: list, routing: routing(95) }).selection.instanceId).toBe(
+        "codex-1",
+      );
+      // Without a threshold the list order alone decides.
+      expect(resolve({ providers: list, routing: routing(0) }).selection.instanceId).toBe(
+        "codex-1",
+      );
+    });
+
+    it("counts a Claude model-scoped window and the spend cap only where they apply", () => {
+      const claude = (
+        instanceId: string,
+        extra: ServerProvider["usageLimits"],
+      ): ServerProvider => ({
+        ...provider(instanceId, 10),
+        ...(extra ? { usageLimits: extra } : {}),
+      });
+      const windows = (spent: string) => ({
+        checkedAt: "2026-09-03T11:00:00.000Z",
+        windows: [
+          { id: "five_hour", kind: "session" as const, label: "Session", usedPercent: 10 },
+          { id: "seven_day", kind: "weekly" as const, label: "Weekly", usedPercent: 10 },
+          { id: spent, kind: "weekly" as const, label: "Scoped", usedPercent: 100 },
+        ],
+      });
+      // Shaped like the Claude adapter's windows: no modelIds, scope in the id.
+      const list = [
+        claude("claude-1", windows("seven_day_fable")),
+        claude("claude-2", windows("monthly_spend")),
+      ];
+      const routing = (candidates: string[]) => ({ candidates, minUsageLeftPercent: 20 });
+      expect(resolve({ providers: list, routing: routing(["claude-1"]) }).selection).toEqual(
+        stored,
+      );
       expect(
-        resolve({
-          providers: [provider("claude-1", 90), unknown],
-          routing: { candidates: ["claude-1", "codex-1"], minUsageLeftPercent: 20 },
-        }).selection.instanceId,
-      ).toBe("codex-1");
+        resolve({ providers: list, routing: routing(["claude-2"]) }).selection.instanceId,
+      ).toBe("claude-2");
+      const fable = list.map((entry) => ({
+        ...entry,
+        models: [...entry.models, model("claude-fable-5", "effort")],
+      }));
+      expect(
+        resolve({ providers: fable, routing: routing(["claude-1/claude-fable-5", "claude-2"]) })
+          .selection.instanceId,
+      ).toBe("claude-2");
     });
 
     it("tries a driver entry's accounts with the most usage left first", () => {
@@ -374,16 +422,43 @@ describe("routineModelRouting", () => {
       ).toEqual({ ...stored, instanceId: "claude-2" });
     });
 
-    it("leaves a webhook's explicit model and fixed routing in charge of their run", () => {
-      const routing = { candidates: ["codex-1"] };
+    it("bounds a webhook's model and fixed routing by the task's list and usage", () => {
+      const routing = { candidates: ["codex-1", "claude-2"] };
+      // Outside the task's list: the list decides.
+      expect(
+        resolve({ routing, body: { t3: { model: "claude-1/claude-haiku-5-5" } } }).selection
+          .instanceId,
+      ).toBe("codex-1");
+      expect(resolve({ routing, body: { t3: { routing: "fixed" } } }).selection.instanceId).toBe(
+        "codex-1",
+      );
+      // Inside it and usable: the webhook's choice runs.
       expect(
         resolve({ routing, body: { t3: { model: "claude-2/claude-haiku-5-5" } } }).selection,
       ).toMatchObject({ instanceId: "claude-2", model: "claude-haiku-5-5" });
-      expect(resolve({ routing, body: { t3: { routing: "fixed" } } }).selection).toEqual(stored);
+      const withStored = { candidates: ["codex-1", "claude-1"] };
+      expect(
+        resolve({ routing: withStored, body: { t3: { routing: "fixed" } } }).selection,
+      ).toEqual(stored);
+      // Inside it but out of usage: the list decides.
+      const spent = providers.map((entry) =>
+        entry.instanceId === "claude-1" ? provider("claude-1", 100) : entry,
+      );
+      expect(
+        resolve({ providers: spent, routing: withStored, body: { t3: { routing: "fixed" } } })
+          .selection.instanceId,
+      ).toBe("codex-1");
+      expect(
+        resolve({
+          providers: spent,
+          routing: withStored,
+          body: { t3: { model: "claude-1/claude-opus-5-5" } },
+        }).selection.instanceId,
+      ).toBe("codex-1");
       // routing: "auto" and the global account setting give way to the task's list.
       expect(
         resolve({
-          routing,
+          routing: { candidates: ["codex-1"] },
           body: { t3: { routing: "auto" } },
           settings: settings({ autoModelSelection: "any-provider" }),
         }).selection.instanceId,

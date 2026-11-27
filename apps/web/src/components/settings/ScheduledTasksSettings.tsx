@@ -1486,6 +1486,9 @@ function ScheduledTaskEditorForm({
     task?.schedule.type === "once";
   const offersThreadModes =
     environment?.serverConfig?.environment.capabilities.scheduledTaskThreadModes === true;
+  // Older servers drop the field, so offer it only where it saves.
+  const offersModelRouting =
+    environment?.serverConfig?.environment.capabilities.scheduledTaskModelRouting === true;
   const connected =
     environment?.connection.phase === "connected" && environment.serverConfig !== null;
   const tasksQuery = useEnvironmentQuery(
@@ -1658,7 +1661,7 @@ function ScheduledTaskEditorForm({
       );
       return;
     }
-    const routing = modelRoutingFromDraft(draft);
+    const routing = offersModelRouting ? modelRoutingFromDraft(draft) : { modelRouting: undefined };
     if ("error" in routing) {
       reportFailure(
         gt("Invalid model priority"),
@@ -1995,7 +1998,7 @@ function ScheduledTaskEditorForm({
             </div>
           </Field>
 
-          {draft.threadId === "" ? (
+          {offersModelRouting && draft.threadId === "" && draft.threadMode === "new_thread" ? (
             <Field
               label={gt("Model priority")}
               hint={gt("Optional")}
@@ -2031,9 +2034,10 @@ function ScheduledTaskEditorForm({
               </div>
               <p className="text-xs text-muted-foreground">
                 <T>
-                  Each run starts on the first listed account or model with at least this much usage
-                  left, or on the one with the most left when none has. Entries: account,
-                  account/model or driver:kind. Empty uses the model above.
+                  Each run starts its thread on the first listed account or model with at least this
+                  much usage left, or on the one with the most left when none has. Entries: account,
+                  account/model or driver:kind. Empty: the model above, with the automatic account
+                  settings.
                 </T>
               </p>
             </Field>

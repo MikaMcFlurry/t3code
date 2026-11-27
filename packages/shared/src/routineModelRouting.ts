@@ -109,15 +109,42 @@ function windowLeft(window: ServerProviderUsageWindow, now: number) {
   return Number.isFinite(resetsAt) && resetsAt <= now ? 100 : 100 - (window.usedPercent ?? 0);
 }
 
+const CLAUDE_SCOPED_WINDOW_PREFIX = "seven_day_";
+
+/**
+ * The account as `model` sees it: Claude's model-scoped weekly window counts only for its own
+ * model and the monthly spend cap only without plan windows (upstream's `windowLimitsModel`).
+ * Where `exhaustedUsageWindow` already applies these rules, this changes nothing.
+ */
+function forModel(provider: ServerProvider, model: string): ServerProvider {
+  const limits = provider.usageLimits;
+  if (provider.driver !== "claudeAgent" || !limits) return provider;
+  const plan = limits.windows.some(
+    (window) => window.id === "five_hour" || window.id === "seven_day",
+  );
+  const token = model.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  const windows = limits.windows.filter((window) =>
+    window.id === "monthly_spend"
+      ? !plan
+      : !window.id.startsWith(CLAUDE_SCOPED_WINDOW_PREFIX) ||
+        token.includes(window.id.slice(CLAUDE_SCOPED_WINDOW_PREFIX.length)),
+  );
+  return windows.length === limits.windows.length
+    ? provider
+    : { ...provider, usageLimits: { ...limits, windows } };
+}
+
 /**
  * Percent left for `model`: the least any window that can stop it has left, by
  * `exhaustedUsageWindow`'s rule (model scopes, pools, credit caps), asked per level as "would
  * spending every window with at most this much left stop it?" 100 if none applies; null if no data.
  */
-function modelUsageLeft(provider: ServerProvider, now: number, model: string) {
+function modelUsageLeft(account: ServerProvider, now: number, model: string) {
+  if ((account.usageLimits?.windows ?? []).length === 0) return null;
+  const provider = forModel(account, model);
   const limits = provider.usageLimits;
   const windows = limits?.windows ?? [];
-  if (!limits || windows.length === 0) return null;
+  if (!limits) return null;
   const levels = [...new Set(windows.map((window) => windowLeft(window, now)))].sort(
     (a, b) => a - b,
   );
@@ -132,6 +159,9 @@ function modelUsageLeft(provider: ServerProvider, now: number, model: string) {
   }
   return 100;
 }
+
+const usableFor = (provider: ServerProvider, model: string, context: AutoModelRoutingContext) =>
+  isUsable(forModel(provider, model), model, context);
 
 interface PriorityCandidate {
   readonly entry: string;
@@ -226,9 +256,9 @@ const describeLeft = (left: number | null) =>
 
 /**
  * A task's own routing: the first usable candidate whose model has at least the threshold
- * left. When none has, the usable candidate with the most left (earlier entries win ties):
- * a run on the account with the most room beats a run that never starts. Not startable only
- * when no candidate is usable at all.
+ * left, then the first without usage data. When none, the usable one with the most left
+ * (earlier entries win ties): a run with the most room beats one that never starts. Not
+ * startable only when no candidate is usable at all.
  */
 function routeByPriority(
   routing: ScheduledTaskModelRouting,
@@ -240,13 +270,17 @@ function routeByPriority(
   const threshold = routing.minUsageLeftPercent ?? 0;
   const candidates = priorityCandidates(routing, allowed, stored, storedProvider, context.now);
   const usable = candidates.filter((candidate) =>
-    isUsable(candidate.provider, candidate.selection.model, context),
+    usableFor(candidate.provider, candidate.selection.model, context),
   );
   const label = (candidate: PriorityCandidate) =>
     `${candidate.selection.instanceId}/${candidate.selection.model}`;
-  const passing = usable.find(
-    (candidate) => candidate.left === null || candidate.left >= threshold,
-  );
+  // Without usage data nothing shows a threshold is met, so such an account comes after every
+  // one that shows it; with no threshold the list order alone decides.
+  const passing =
+    threshold === 0
+      ? usable[0]
+      : (usable.find((candidate) => candidate.left !== null && candidate.left >= threshold) ??
+        usable.find((candidate) => candidate.left === null));
   if (passing) {
     return {
       startable: true,
@@ -280,10 +314,9 @@ function routeByPriority(
 }
 
 /**
- * Model for a scheduled or webhook run: an explicit `model`, then the task's own routing
- * (unless the webhook asks for `routing: "fixed"`), then `routing: "auto"`, then the automatic
- * account setting, then the stored selection. A stored selection outside an allowed list never
- * runs; without an allowed replacement the run is not startable.
+ * Model for a scheduled or webhook run. A task's own list joins the allowed lists and picks,
+ * unless a webhook's usable `model` or `routing: "fixed"` names a model in it. Otherwise: `model`,
+ * `routing: "auto"`, the automatic account setting, the stored model, never outside allowed lists.
  */
 export function resolveRoutineModelSelection(input: {
   readonly stored: ModelSelection;
@@ -296,18 +329,26 @@ export function resolveRoutineModelSelection(input: {
   /** The task's own priority list and threshold, when it has one. */
   readonly taskRouting?: ScheduledTaskModelRouting | undefined;
 }): RoutineModelRoute {
-  const { directive, settings } = input;
-  const lists = [settings.autoRoutingAllowed, directive?.allowed ?? []];
+  const { directive, settings, taskRouting } = input;
+  const lists = [
+    settings.autoRoutingAllowed,
+    directive?.allowed ?? [],
+    taskRouting?.candidates ?? [],
+  ];
   const allowed = filterAllowedProviders(input.providers, lists);
   const context = { providers: allowed, settings, projectId: input.projectId, now: input.now };
   const effort = (selection: ModelSelection) => withEffort(selection, allowed, directive?.effort);
+  const allowedProvider = (instanceId: string, model: string) => {
+    const provider = allowed.find((candidate) => candidate.instanceId === instanceId);
+    return provider?.models.some((candidate) => candidate.slug === model) ? provider : undefined;
+  };
 
   if (directive?.model) {
     const cut = directive.model.indexOf("/");
-    const instanceId = directive.model.slice(0, cut);
     const model = directive.model.slice(cut + 1);
-    const provider = allowed.find((candidate) => candidate.instanceId === instanceId);
-    if (provider?.models.some((candidate) => candidate.slug === model)) {
+    const provider = allowedProvider(directive.model.slice(0, cut), model);
+    // A task with its own list runs a requested model only while it can start.
+    if (provider && (!taskRouting || usableFor(provider, model, context))) {
       return {
         startable: true,
         selection: effort(createModelSelection(provider.instanceId, model, null)),
@@ -316,9 +357,17 @@ export function resolveRoutineModelSelection(input: {
     }
   }
 
-  if (input.taskRouting && directive?.routing !== "fixed") {
+  if (taskRouting) {
+    const storedProvider = allowedProvider(input.stored.instanceId, input.stored.model);
+    if (
+      directive?.routing === "fixed" &&
+      storedProvider &&
+      usableFor(storedProvider, input.stored.model, context)
+    ) {
+      return { startable: true, selection: effort(input.stored), reason: "Stored model." };
+    }
     const route = routeByPriority(
-      input.taskRouting,
+      taskRouting,
       allowed,
       input.stored,
       input.providers.find((provider) => provider.instanceId === input.stored.instanceId),

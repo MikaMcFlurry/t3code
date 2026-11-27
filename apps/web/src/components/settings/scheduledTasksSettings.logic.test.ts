@@ -473,10 +473,15 @@ it("shows schedule times in the Time format setting", () => {
 });
 
 describe("modelRoutingFromDraft", () => {
-  const draft = (routingCandidates: string, routingMinUsageLeft = "", savedRouting = false) => ({
+  const draft = (
+    routingCandidates: string,
+    routingMinUsageLeft = "",
+    saved: { readonly candidates?: string; readonly minUsageLeft?: string } = {},
+  ) => ({
     routingCandidates,
     routingMinUsageLeft,
-    savedRouting,
+    savedRoutingCandidates: saved.candidates ?? "",
+    savedRoutingMinUsageLeft: saved.minUsageLeft ?? "",
   });
 
   it("reads the entries in order and the threshold", () => {
@@ -493,9 +498,16 @@ describe("modelRoutingFromDraft", () => {
     });
   });
 
-  it("leaves routing out when there is none, and clears a stored one", () => {
-    expect(modelRoutingFromDraft(draft("", "20"))).toEqual({ modelRouting: undefined });
-    expect(modelRoutingFromDraft(draft(" , ", "", true))).toEqual({ modelRouting: null });
+  it("sends nothing while the fields are as the form opened them, and null to clear", () => {
+    expect(modelRoutingFromDraft(draft(""))).toEqual({ modelRouting: undefined });
+    const saved = { candidates: "claude-2, codex", minUsageLeft: "20" };
+    expect(modelRoutingFromDraft(draft("claude-2,codex", " 20", saved))).toEqual({
+      modelRouting: undefined,
+    });
+    expect(modelRoutingFromDraft(draft(" , ", "20", saved))).toEqual({ modelRouting: null });
+    expect(modelRoutingFromDraft(draft("claude-2, codex", "30", saved))).toEqual({
+      modelRouting: { candidates: ["claude-2", "codex"], minUsageLeftPercent: 30 },
+    });
   });
 
   it("refuses a threshold outside 0 to 100 or not a whole number", () => {
@@ -517,8 +529,9 @@ describe("modelRoutingFromDraft", () => {
     expect(routed).toMatchObject({
       routingCandidates: "claude-2, driver:codex",
       routingMinUsageLeft: "20",
-      savedRouting: true,
+      savedRoutingCandidates: "claude-2, driver:codex",
     });
-    expect(taskToDraft(legacyTask)).toMatchObject({ routingCandidates: "", savedRouting: false });
+    expect(modelRoutingFromDraft(routed)).toEqual({ modelRouting: undefined });
+    expect(taskToDraft(legacyTask)).toMatchObject({ routingCandidates: "" });
   });
 });
