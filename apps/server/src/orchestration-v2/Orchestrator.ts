@@ -14,6 +14,7 @@ import {
   usageLimitBlockedRun,
 } from "@t3tools/shared/orchestrationV2ThreadError";
 import { threadIssueKeysEqual } from "@t3tools/contracts";
+import { sameModelSelection } from "@t3tools/shared/usageLimits";
 import { canonicalizeGitCafePullRequestUrl } from "@t3tools/source-control-definitions/registry";
 import { threadPullRequestsOf } from "../sourceControl/threadPullRequests.ts";
 import {
@@ -183,6 +184,7 @@ import {
   applyToProjection,
   emptyProjection,
   threadShellFromProjection,
+  type ProjectionLimitSwitch,
   ProjectionStoreV2,
   type ProjectionRecordField,
   type ProjectionTimelinePage,
@@ -407,6 +409,22 @@ export interface OrchestratorV2DispatchResult {
   readonly replayed?: true;
 }
 
+type MessageDispatchServerCommand = Extract<
+  OrchestrationV2ServerCommand,
+  { readonly type: "message.dispatch" }
+>;
+
+export interface OrchestratorV2DispatchOptions<E = never> {
+  /**
+   * Picks a message's model selection under the thread's dispatch lock, right before the
+   * command is decided, so it sees every send that committed first. Undefined keeps the
+   * command's own. Other command types ignore it.
+   */
+  readonly resolveModelSelection?:
+    | ((command: MessageDispatchServerCommand) => Effect.Effect<ModelSelection | undefined, E>)
+    | undefined;
+}
+
 export interface OrchestratorV2Shape {
   readonly resumeQueuedRuns: Effect.Effect<number, OrchestratorV2Error>;
   readonly recoverDelegatedTasks: Effect.Effect<void>;
@@ -430,9 +448,10 @@ export interface OrchestratorV2Shape {
   readonly restartContinuationPending: (run: OrchestrationV2Run) => Effect.Effect<boolean>;
   /** Declined continuations emit no thread event; this still wakes waiters. */
   readonly awaitRestartContinuation: (run: OrchestrationV2Run) => Effect.Effect<void>;
-  readonly dispatch: (
+  readonly dispatch: <E = never>(
     command: OrchestrationV2ServerCommand,
-  ) => Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>;
+    options?: OrchestratorV2DispatchOptions<E>,
+  ) => Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error | E>;
   readonly autoArmLimitRecovery: (input: {
     readonly commandId: CommandId;
     readonly threadId: ThreadId;
@@ -477,6 +496,9 @@ export interface OrchestratorV2Shape {
     fields: ReadonlyArray<K>,
     filter?: ProjectionRecordFilter,
   ) => Effect.Effect<ProjectionRecords<K>, OrchestratorV2Error>;
+  readonly getLatestLimitSwitch: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ProjectionLimitSwitch | null, OrchestratorV2Error>;
   readonly listAppOwnedChildThreadIds: (
     threadId: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ThreadId>, OrchestratorV2Error>;
@@ -862,6 +884,9 @@ function threadCreateInitialMessage(
     creationSource: command.creationSource,
   };
 }
+/** Appended to the failed result of a child the usage-limit account switch will continue. */
+const LIMIT_SWITCH_TASK_NOTE =
+  'T3 Code: this child stopped at a usage limit, not because the task failed. With "switch to an account with usage left" on, T3 continues it on another account with usage left if there is one, and that run reports back to you as a follow-up task. Do not restart it: read the child thread or wait for that follow-up first.';
 
 // Provider wakes can start follow-up work; monitor updates only report progress.
 // Dispatch takes the parent's lock for follow-ups because intake writes the parent.
@@ -878,7 +903,8 @@ function mayStartSubagentFollowup(
   return (
     command.createdBy === "user" ||
     command.creationSource === "mcp" ||
-    command.usageLimitContinuationOfRunId !== undefined
+    command.usageLimitContinuationOfRunId !== undefined ||
+    command.manualContinuationOfRunId !== undefined
   );
 }
 
@@ -1067,6 +1093,44 @@ function followsCurrentConversation(
   );
 }
 
+/** Some usage-limit switch (UsageLimitRecoveryWorker's `limit-switch:` message) left this account. */
+function limitSwitchLeftAccount(
+  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
+  instanceId: ModelSelection["instanceId"],
+): boolean {
+  const prefix = `limit-switch:${projection.thread.id}:`;
+  return projection.runs.some(
+    (candidate) =>
+      candidate.userMessageId.startsWith(prefix) &&
+      projection.runs.find((origin) => origin.id === candidate.userMessageId.slice(prefix.length))
+        ?.modelSelection.instanceId === instanceId,
+  );
+}
+
+/**
+ * A buffered wake of an account a usage-limit switch left, while that account is still out of
+ * usage. Only its own session can replay it, so waiting at the queue head held every send behind
+ * it until the reset.
+ */
+function isLimitSwitchedWake(
+  projection: Pick<
+    OrchestrationV2ThreadProjection,
+    "thread" | "runs" | "messages" | "turnItems" | "providerSessions"
+  >,
+  run: OrchestrationV2Run,
+  now: DateTime.Utc,
+): boolean {
+  const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
+  const instanceId = run.modelSelection.instanceId;
+  return (
+    message !== undefined &&
+    isBufferedProviderNotification(message) &&
+    projection.thread.modelSelection.instanceId !== instanceId &&
+    limitSwitchLeftAccount(projection, instanceId) &&
+    usageLimitHoldsQueue(projection, instanceId, now)
+  );
+}
+
 function queuedRunModelSelection(
   projection: Pick<OrchestrationV2ThreadProjection, "thread" | "messages">,
   run: OrchestrationV2Run,
@@ -1075,6 +1139,35 @@ function queuedRunModelSelection(
   return followsCurrentConversation(message)
     ? projection.thread.modelSelection
     : run.modelSelection;
+}
+
+/**
+ * Where a usage-limit switch moves a run already queued on the account it leaves, or undefined to
+ * leave it. The run was queued before anyone knew that account was out of usage. With the same
+ * model only the account changes; a run that had exactly the limited run's selection takes the
+ * switch's. Another model picked for that one message, wakes and runs that follow the thread stay.
+ */
+function limitSwitchQueuedRunSelection(input: {
+  readonly run: OrchestrationV2Run;
+  readonly message: OrchestrationV2ConversationMessage | undefined;
+  readonly limited: ModelSelection;
+  readonly switchedTo: ModelSelection;
+}): ModelSelection | undefined {
+  const { run, message, limited, switchedTo } = input;
+  if (
+    run.status !== "queued" ||
+    message === undefined ||
+    followsCurrentConversation(message) ||
+    isBufferedProviderNotification(message) ||
+    run.modelSelection.instanceId !== limited.instanceId ||
+    switchedTo.instanceId === limited.instanceId
+  ) {
+    return undefined;
+  }
+  if (run.modelSelection.model === switchedTo.model) {
+    return { ...run.modelSelection, instanceId: switchedTo.instanceId };
+  }
+  return sameModelSelection(run.modelSelection, limited) ? switchedTo : undefined;
 }
 
 /** The selection the thread will be on once every queued run has started. */
@@ -2587,6 +2680,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         projection = yield* readCommandProjection(threadId);
         storedQueuedRun = projection.runs.find((run) => run.id === runId);
       }
+      // A wake stranded on an account a limit switch left waits for that account without holding
+      // the sends behind it. It is skipped, not dropped: its buffer may hold a subagent's result.
+      if (storedQueuedRun !== undefined && options?.queuedRunId === undefined) {
+        const queueCheckedAt = yield* DateTime.now;
+        if (isLimitSwitchedWake(projection, storedQueuedRun, queueCheckedAt)) {
+          storedQueuedRun = queuedRunsInDeliveryOrder(projection).find(
+            (run) =>
+              run.queueHeld !== true &&
+              !isStalePullRequestWatchWake(projection, run) &&
+              !isLimitSwitchedWake(projection, run, queueCheckedAt),
+          );
+        }
+      }
       if (storedQueuedRun === undefined) {
         return;
       }
@@ -2645,9 +2751,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         projectOverride !== undefined
           ? !projectOverride
           : machineInstance !== undefined && !resolveProviderInstanceEnabled(machineInstance);
+      // A buffered wake prompted nothing: a provider error replaying it (a native session it could
+      // not resume) says nothing about the next prompted run, which can recover. Usage limits,
+      // access and transport failures still hold.
+      const failedMessage =
+        failedRun == null
+          ? undefined
+          : projection.messages.find((candidate) => candidate.id === failedRun.userMessageId);
       const providerFailed =
         failureClass !== undefined &&
         failureClass !== "validation_error" &&
+        !(
+          (failureClass === "provider_error" || failureClass === "unknown") &&
+          failedMessage !== undefined &&
+          isBufferedProviderNotification(failedMessage)
+        ) &&
         failedRun?.providerInstanceId === queuedRun.providerInstanceId;
       if (worktreeMissing || instanceDisabledForProject || providerFailed) {
         // A buffered wake prompts nothing: it replays output the CLI already produced.
@@ -8115,6 +8233,49 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ? projection.runs.filter((run) => run.status === "queued" && run.queueHeld === true)
         : [];
     const releasedAt = yield* DateTime.now;
+    // UsageLimitRecoveryWorker's switch takes the runs it strands on the limited account along.
+    // Recorded on the runs, so a later edit or pick for one of them still wins.
+    const limitedRun =
+      command.manualContinuationOfRunId !== undefined &&
+      command.messageId === `limit-switch:${command.threadId}:${command.manualContinuationOfRunId}`
+        ? projection.runs.find((run) => run.id === command.manualContinuationOfRunId)
+        : undefined;
+    const strandedRuns =
+      limitedRun === undefined || !startsOrQueuesRun
+        ? []
+        : projection.runs.filter(
+            (run) =>
+              run.status === "queued" &&
+              run.modelSelection.instanceId === limitedRun.modelSelection.instanceId,
+          );
+    if (limitedRun !== undefined && strandedRuns.length > 0) {
+      const strandedMessages = yield* projectionStore
+        .getMessagesById(
+          command.threadId,
+          strandedRuns.map((run) => run.userMessageId),
+        )
+        .pipe(mapDispatchError(command));
+      for (const queued of strandedRuns) {
+        const moved = limitSwitchQueuedRunSelection({
+          run: queued,
+          message: strandedMessages.get(queued.userMessageId),
+          limited: limitedRun.modelSelection,
+          switchedTo: modelSelection,
+        });
+        if (moved === undefined) continue;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "run.updated",
+          threadId: command.threadId,
+          runId: queued.id,
+          providerInstanceId: moved.instanceId,
+          occurredAt: releasedAt,
+          payload: { ...queued, modelSelection: moved, providerInstanceId: moved.instanceId },
+        });
+      }
+    }
     for (const held of heldRunsToRelease) {
       yield* emit(
         events,
@@ -10340,6 +10501,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       (command.notification === undefined &&
         command.createdBy !== "user" &&
         command.usageLimitContinuationOfRunId === undefined &&
+        command.manualContinuationOfRunId === undefined &&
         command.senderThreadId !== undefined &&
         command.senderThreadId !== parentThreadId)
     )
@@ -15520,7 +15682,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
 
       const now = yield* DateTime.now;
-      const result = subagentResultForRun(childProjection, { ...childRun, status: outcome });
+      const reported = subagentResultForRun(childProjection, { ...childRun, status: outcome });
+      // A child stopped by a usage limit is continued on another account by the limit switch,
+      // whose run reports back as a follow-up task. Say so, or the parent restarts it and two
+      // agents end up writing the same checkout.
+      const switchesAccount =
+        latestRootProviderFailure(childRun, childResult.turnItems)?.class === "usage_limit" &&
+        (yield* serverSettings.getSettings.pipe(
+          Effect.map((settings) => settings.fallbackToAvailableAccounts === true),
+          Effect.orElseSucceed(() => false),
+        ));
+      const result = switchesAccount
+        ? { ...reported, text: `${reported.text}\n\n${LIMIT_SWITCH_TASK_NOTE}`.trim() }
+        : reported;
       const { parentRun, ...parentProjection } = yield* readDelegatedCompletionPlanRecords(
         parentThreadId,
         task,
@@ -16771,7 +16945,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
 
   // dispatchWithReceiptEffect owns the dispatch span; this wrapper selects the thread locks.
-  const dispatchWithReceipt = Effect.fnUntraced(function* (command: OrchestrationV2ServerCommand) {
+  const dispatchWithReceipt = Effect.fnUntraced(function* <E = never>(
+    command: OrchestrationV2ServerCommand,
+    options?: OrchestratorV2DispatchOptions<E>,
+  ) {
     // The latest stable run is the one with a checkpoint. Wait for a just-completed run's capture,
     // outside the locks its commit takes, so a fork right after a turn starts from that turn.
     if (
@@ -16780,9 +16957,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ) {
       yield* awaitLatestRunCapture(command.sourceThreadId);
     }
+    const resolveModelSelection = options?.resolveModelSelection;
     const dispatch = threadDispatch.withLock(
       commandThreadId(command),
-      dispatchWithReceiptEffect(command),
+      command.type !== "message.dispatch" || resolveModelSelection === undefined
+        ? dispatchWithReceiptEffect(command)
+        : resolveModelSelection(command).pipe(
+            Effect.flatMap((modelSelection) =>
+              dispatchWithReceiptEffect(
+                modelSelection === undefined ? command : { ...command, modelSelection },
+              ),
+            ),
+          ),
     );
     // A fork holds its source's lock, so a source deletion and its fork never interleave. A
     // parent's lock comes before its side chats' locks. A side chat fork from a side chat or a
@@ -17473,6 +17659,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
       },
     ),
+    getLatestLimitSwitch: Effect.fn("OrchestratorV2.getLatestLimitSwitch")(function (threadId) {
+      return projectionStore
+        .getLatestLimitSwitch(threadId)
+        .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
+    }),
     listAppOwnedChildThreadIds: Effect.fn("OrchestratorV2.listAppOwnedChildThreadIds")(
       function (threadId) {
         return projectionStore

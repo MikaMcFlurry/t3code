@@ -10003,6 +10003,199 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       }),
   );
 
+  // TrackManiac Owner-Chat 30 (2026-11-24): a wake and a send queued on an account just before it
+  // hit its usage limit held the thread's queue for 1.5 h after the limit switch moved it on, then
+  // switched it back. The send moves with the switch; the wake, which only its own session can
+  // replay, is dropped while that account is out of usage.
+  it.effect.each(["the same model", "another model"] as const)(
+    "queued runs of an account a usage-limit switch left move with it to %s",
+    (target) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const threadId = ThreadId.make(
+          `runtime-layer-queue-follows-limit-switch-${target.replaceAll(" ", "-")}`,
+        );
+        const switchedSelection = {
+          instanceId: alternateInstanceId,
+          model: target === "the same model" ? modelSelection.model : "gpt-5.5",
+        };
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`${threadId}:create`),
+          threadId,
+          createdBy: "user",
+          creationSource: "web",
+          projectId: ProjectId.make(`${threadId}:project`),
+          title: "Limit switch follow",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: process.cwd(),
+        });
+        const send = (name: string, type: "start_immediately" | "queue_after_active") =>
+          orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`${threadId}:${name}`),
+            threadId,
+            messageId: MessageId.make(`${threadId}:${name}`),
+            text: name,
+            attachments: [],
+            createdBy: "user",
+            creationSource: "web",
+            modelSelection,
+            dispatchMode: { type },
+          });
+        yield* send("limited", "start_immediately");
+        // The limited session's CLI asks to replay background output, then the user sends again.
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`${threadId}:wake`),
+          threadId,
+          messageId: MessageId.make(`${threadId}:wake`),
+          text: "Background activity updated",
+          notification: {
+            source: { kind: "background_task" },
+            outcome: "updated",
+            summary: "Background activity updated",
+          },
+          attachments: [],
+          createdBy: "agent",
+          creationSource: "provider",
+          dispatchMode: { type: "queue_after_active" },
+        });
+        yield* send("queued", "queue_after_active");
+        const [limited, wake, queued] = (yield* orchestrator.getThreadProjection(threadId)).runs;
+        assert.isDefined(limited);
+        assert.isDefined(wake);
+        assert.isDefined(queued);
+        assert.equal(wake.status, "queued");
+        assert.deepEqual(wake.modelSelection, modelSelection);
+        const now = yield* DateTime.now;
+        yield* eventSink.write({
+          events: [
+            {
+              id: EventId.make(`${threadId}:error`),
+              type: "turn-item.updated",
+              threadId,
+              runId: limited.id,
+              nodeId: limited.rootNodeId!,
+              providerInstanceId: limited.providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: TurnItemId.make(`${threadId}:error`),
+                type: "error",
+                threadId,
+                runId: limited.id,
+                nodeId: limited.rootNodeId!,
+                providerThreadId: limited.providerThreadId,
+                providerTurnId: null,
+                nativeItemRef: null,
+                parentItemId: null,
+                ordinal: 2,
+                status: "failed",
+                title: "Usage limit",
+                startedAt: now,
+                completedAt: now,
+                updatedAt: now,
+                failure: {
+                  class: "usage_limit",
+                  message: "Usage limit reached",
+                  code: "usage_limit",
+                  retryable: null,
+                  resetAt: DateTime.formatIso(DateTime.add(now, { hours: 1 })),
+                },
+              },
+            },
+            {
+              id: EventId.make(`${threadId}:failed`),
+              type: "run.updated",
+              threadId,
+              runId: limited.id,
+              providerInstanceId: limited.providerInstanceId,
+              occurredAt: now,
+              payload: { ...limited, status: "failed", completedAt: now },
+            },
+          ],
+        });
+
+        // UsageLimitRecoveryWorker.limitSwitchCommand: the same model on another account.
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`limit-switch:${threadId}:${limited.id}`),
+          messageId: MessageId.make(`limit-switch:${threadId}:${limited.id}`),
+          threadId,
+          manualContinuationOfRunId: limited.id,
+          modelSelection: switchedSelection,
+          text: "Continue where you left off.",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "agent",
+          creationSource: "server",
+        });
+        const switched = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+          (run) => run.userMessageId === MessageId.make(`limit-switch:${threadId}:${limited.id}`),
+        );
+        assert.equal(switched?.status, "starting");
+        // Recorded on the run at the switch, so an edit or a later pick still wins.
+        const moved = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+          (run) => run.id === queued.id,
+        );
+        assert.equal(moved?.status, "queued");
+        assert.deepEqual(moved?.modelSelection, switchedSelection);
+        // Sent after the switch, the account is the user's own pick for this message.
+        yield* send("picked", "queue_after_active");
+        yield* eventSink.write({
+          events: [
+            {
+              id: EventId.make(`${threadId}:switch:completed`),
+              type: "run.updated",
+              threadId,
+              runId: switched!.id,
+              providerInstanceId: switched!.providerInstanceId,
+              occurredAt: now,
+              payload: { ...switched!, status: "completed", completedAt: now },
+            },
+          ],
+        });
+
+        yield* orchestrator.resumeQueuedRuns;
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        // Skipped, not dropped: its buffer may hold output nobody has seen.
+        assert.equal(after.runs.find((run) => run.id === wake.id)?.status, "queued");
+        const followed = after.runs.find((run) => run.id === queued.id);
+        assert.equal(followed?.status, "starting");
+        assert.deepEqual(followed?.modelSelection, switchedSelection);
+        assert.deepEqual(after.thread.modelSelection, switchedSelection);
+        const picked = after.runs.find(
+          (run) => run.userMessageId === MessageId.make(`${threadId}:picked`),
+        );
+        assert.equal(picked?.status, "queued");
+        assert.deepEqual(picked?.modelSelection, modelSelection);
+
+        // Once the limited account resets, the wake replays there, ahead of the later pick.
+        yield* eventSink.write({
+          events: [
+            {
+              id: EventId.make(`${threadId}:followed:completed`),
+              type: "run.updated",
+              threadId,
+              runId: followed!.id,
+              providerInstanceId: followed!.providerInstanceId,
+              occurredAt: now,
+              payload: { ...followed!, status: "completed", completedAt: now },
+            },
+          ],
+        });
+        yield* TestClock.adjust("61 minutes");
+        yield* orchestrator.resumeQueuedRuns;
+        const reset = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(reset.runs.find((run) => run.id === wake.id)?.status, "starting");
+        assert.equal(reset.runs.find((run) => run.id === picked!.id)?.status, "queued");
+      }),
+  );
+
   it.effect.each([
     ["server", modelSelection],
     ["provider", modelSelection],

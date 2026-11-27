@@ -413,6 +413,14 @@ export type ThreadManagementError = typeof ThreadManagementError.Type;
 
 type ThreadManagementFailure = ThreadManagementError | Orchestrator.OrchestratorV2Error;
 
+export interface ThreadManagementDispatchOptions {
+  /**
+   * Picks a message's account under the thread's dispatch lock (see
+   * Orchestrator.OrchestratorV2DispatchOptions). Another instance is checked for being enabled.
+   */
+  readonly resolveModelSelection?: Orchestrator.OrchestratorV2DispatchOptions["resolveModelSelection"];
+}
+
 export interface ThreadManagementServiceShape {
   readonly searchThreadStream: (
     input: OrchestrationV2SearchThreadInput,
@@ -425,6 +433,7 @@ export interface ThreadManagementServiceShape {
   ) => Effect.Effect<void, LegacyV1ThreadImporter.LegacyV1ThreadImportError>;
   readonly dispatch: (
     command: OrchestrationV2ServerCommand,
+    options?: ThreadManagementDispatchOptions,
   ) => Effect.Effect<
     Orchestrator.OrchestratorV2DispatchResult,
     Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
@@ -452,6 +461,7 @@ export interface ThreadManagementServiceShape {
     ServerEnvironment.ServerEnvironmentIdentity
   >;
   readonly getThreadSnapshotWindow: Orchestrator.OrchestratorV2["Service"]["getThreadSnapshotWindow"];
+  readonly getLatestLimitSwitch: Orchestrator.OrchestratorV2["Service"]["getLatestLimitSwitch"];
   readonly getProjectThreadRecords: <K extends ProjectionRecordField>(
     input: { readonly projectId: ProjectId; readonly threadId: ThreadId },
     fields: ReadonlyArray<K>,
@@ -488,6 +498,7 @@ export interface ThreadManagementServiceShape {
   }) => Effect.Effect<ReadonlyArray<ActiveThreadListEntry>, ThreadManagementError>;
   readonly sendToThread: (
     input: ThreadManagementSendInput,
+    options?: ThreadManagementDispatchOptions,
   ) => Effect.Effect<ThreadManagementSendResult, ThreadManagementFailure>;
   /** Stores what the thread's running turn returns, once it fits the schema that turn declared. */
   readonly submitRunOutput: (input: {
@@ -842,11 +853,27 @@ const make = Effect.gen(function* () {
     }
   };
 
-  const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
-    ensureCommandTranscripts(command).pipe(
+  const dispatch: ThreadManagementServiceShape["dispatch"] = (command, options) => {
+    const resolve = options?.resolveModelSelection;
+    return ensureCommandTranscripts(command).pipe(
       Effect.andThen(assertDispatchTargetEnabled(command)),
-      Effect.andThen(orchestrator.dispatch(command)),
+      Effect.andThen(
+        resolve === undefined
+          ? orchestrator.dispatch(command)
+          : orchestrator.dispatch(command, {
+              resolveModelSelection: (message) =>
+                resolve(message).pipe(
+                  Effect.tap((modelSelection) =>
+                    modelSelection === undefined ||
+                    modelSelection.instanceId === message.modelSelection?.instanceId
+                      ? Effect.void
+                      : assertDispatchTargetEnabled({ ...message, modelSelection }),
+                  ),
+                ),
+            }),
+      ),
     );
+  };
 
   const getProjectThreadRecords: ThreadManagementServiceShape["getProjectThreadRecords"] = (
     input,
@@ -900,7 +927,7 @@ const make = Effect.gen(function* () {
 
   const sendToThread: ThreadManagementServiceShape["sendToThread"] = Effect.fn(
     "ThreadManagementService.sendToThread",
-  )(function* (input) {
+  )(function* (input, options?: ThreadManagementDispatchOptions) {
     const target = yield* getProjectThreadRecords(input, ["runs", "providerTurns"]);
     if (target.thread.archivedAt !== null) {
       return yield* new ThreadManagementThreadArchivedError({
@@ -967,24 +994,27 @@ const make = Effect.gen(function* () {
         );
     }
 
-    const dispatched = yield* dispatch({
-      type: "message.dispatch",
-      commandId: input.commandId,
-      threadId: input.threadId,
-      messageId: input.messageId,
-      ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
-      ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
-      ...(input.linkedSender === undefined ? {} : { linkedSender: input.linkedSender }),
-      text: input.text,
-      attachments: input.attachments,
-      ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-      ...(input.freshContext ? { freshContext: true } : {}),
-      ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }),
-      dispatchMode,
-      ...(mode === "auto" ? { deliveryIntent: "auto" } : {}),
-      createdBy: input.createdBy,
-      creationSource: input.creationSource,
-    });
+    const dispatched = yield* dispatch(
+      {
+        type: "message.dispatch",
+        commandId: input.commandId,
+        threadId: input.threadId,
+        messageId: input.messageId,
+        ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
+        ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
+        ...(input.linkedSender === undefined ? {} : { linkedSender: input.linkedSender }),
+        text: input.text,
+        attachments: input.attachments,
+        ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+        ...(input.freshContext ? { freshContext: true } : {}),
+        ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }),
+        dispatchMode,
+        ...(mode === "auto" ? { deliveryIntent: "auto" } : {}),
+        createdBy: input.createdBy,
+        creationSource: input.creationSource,
+      },
+      options,
+    );
     const projection = yield* getProjectThreadRecords(input, ["runs", "messages", "turnItems"], {
       messageIds: [input.messageId],
       turnItemTypes: ["user_message"],
@@ -1882,6 +1912,7 @@ const make = Effect.gen(function* () {
     getThreadSnapshot,
     getThreadTranscript,
     getThreadSnapshotWindow,
+    getLatestLimitSwitch: orchestrator.getLatestLimitSwitch,
     getProjectThreadRecords,
     getAgentAwarenessSnapshot: orchestrator.getAgentAwarenessSnapshot,
     getShellSnapshot: orchestrator.getShellSnapshot,
