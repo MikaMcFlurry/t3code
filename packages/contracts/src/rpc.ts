@@ -345,6 +345,13 @@ import {
   PreviewSessionSnapshot,
 } from "./preview.ts";
 import {
+  CentralSkillInstallInput,
+  CentralSkillNameInput,
+  CentralSkillSetEnabledInput,
+  CentralSkillsError,
+  CentralSkillsListResult,
+} from "./centralSkills.ts";
+import {
   DeviceActionInput,
   DeviceCloseInput,
   DeviceConfigureInput,
@@ -642,6 +649,10 @@ export const WS_METHODS = {
   workflowsGetDefinition: "workflows.getDefinition",
   workflowsSaveDefinition: "workflows.saveDefinition",
   workflowsDeleteDefinition: "workflows.deleteDefinition",
+  centralSkillsList: "centralSkills.list",
+  centralSkillsInstall: "centralSkills.install",
+  centralSkillsRemove: "centralSkills.remove",
+  centralSkillsSetEnabled: "centralSkills.setEnabled",
 
   scheduledTasksSubscribe: "scheduledTasks.subscribe",
   scheduledTasksUpsert: "scheduledTasks.upsert",
@@ -2365,6 +2376,30 @@ const WsWorkflowsDeleteDefinitionRpc = Rpc.make(WS_METHODS.workflowsDeleteDefini
   error: EnvironmentAuthorizationError,
 });
 
+const WsCentralSkillsListRpc = Rpc.make(WS_METHODS.centralSkillsList, {
+  payload: Schema.Struct({}),
+  success: CentralSkillsListResult,
+  error: Schema.Union([CentralSkillsError, EnvironmentAuthorizationError]),
+});
+
+const WsCentralSkillsInstallRpc = Rpc.make(WS_METHODS.centralSkillsInstall, {
+  payload: CentralSkillInstallInput,
+  success: CentralSkillsListResult,
+  error: Schema.Union([CentralSkillsError, EnvironmentAuthorizationError]),
+});
+
+const WsCentralSkillsRemoveRpc = Rpc.make(WS_METHODS.centralSkillsRemove, {
+  payload: CentralSkillNameInput,
+  success: CentralSkillsListResult,
+  error: Schema.Union([CentralSkillsError, EnvironmentAuthorizationError]),
+});
+
+const WsCentralSkillsSetEnabledRpc = Rpc.make(WS_METHODS.centralSkillsSetEnabled, {
+  payload: CentralSkillSetEnabledInput,
+  success: CentralSkillsListResult,
+  error: Schema.Union([CentralSkillsError, EnvironmentAuthorizationError]),
+});
+
 const WsScheduledTasksSubscribeRpc = Rpc.make(WS_METHODS.scheduledTasksSubscribe, {
   payload: ScheduledTaskListInput,
   success: ScheduledTaskListResult,
@@ -2678,6 +2713,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribePreviewEventsRpc,
   WsPreviewStopLocalServerRpc,
   WsSubscribeDiscoveredLocalServersRpc,
+  WsCentralSkillsListRpc,
+  WsCentralSkillsInstallRpc,
+  WsCentralSkillsRemoveRpc,
+  WsCentralSkillsSetEnabledRpc,
   WsDeviceConfigureRpc,
   WsDeviceListRpc,
   WsDeviceTestHostRpc,
