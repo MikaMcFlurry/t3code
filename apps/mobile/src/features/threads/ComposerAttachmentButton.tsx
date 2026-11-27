@@ -6,16 +6,17 @@ import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSi
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { Menu } from "../../components/ui/Menu";
 
-const ATTACHMENT_MENU_ACTIONS: MenuAction[] = [
+const MEDIA_MENU_ACTIONS: MenuAction[] = [
+  { id: "camera", title: msg("Take Photo"), image: "camera" },
   { id: "photos", title: msg("Photo Library"), image: "photo" },
-  { id: "files", title: msg("Choose Files"), image: "folder" },
 ];
+const FILES_MENU_ACTION: MenuAction = { id: "files", title: msg("Choose Files"), image: "folder" };
 
 export function ComposerAttachmentButton(props: {
   readonly disabled?: boolean;
   readonly size?: "regular" | "large";
   readonly supportsFiles: boolean;
-  readonly onPickMedia: () => Promise<void>;
+  readonly onPickMedia: (source?: "library" | "camera") => Promise<void>;
   readonly onPickFiles: () => Promise<void>;
 }) {
   const gt = useGT();
@@ -28,7 +29,6 @@ export function ComposerAttachmentButton(props: {
       accessibilityState={{ disabled: props.disabled }}
       className="size-[44px] shrink-0 items-center justify-center rounded-full active:opacity-70 disabled:opacity-50"
       disabled={props.disabled}
-      onPress={props.supportsFiles ? undefined : () => void props.onPickMedia()}
     >
       <SymbolView
         name="plus"
@@ -40,7 +40,7 @@ export function ComposerAttachmentButton(props: {
     </Pressable>
   );
 
-  if (props.disabled || !props.supportsFiles) {
+  if (props.disabled) {
     return button;
   }
 
@@ -49,9 +49,14 @@ export function ComposerAttachmentButton(props: {
       accessible
       accessibilityLabel={gt("Add attachment")}
       accessibilityRole="button"
-      actions={ATTACHMENT_MENU_ACTIONS.map((action) => ({ ...action, title: m(action.title) }))}
+      actions={(props.supportsFiles
+        ? [...MEDIA_MENU_ACTIONS, FILES_MENU_ACTION]
+        : MEDIA_MENU_ACTIONS
+      ).map((action) => ({ ...action, title: m(action.title) }))}
       onPressAction={({ nativeEvent }) => {
-        if (nativeEvent.event === "photos") {
+        if (nativeEvent.event === "camera") {
+          void props.onPickMedia("camera");
+        } else if (nativeEvent.event === "photos") {
           void props.onPickMedia();
         } else if (nativeEvent.event === "files") {
           void props.onPickFiles();

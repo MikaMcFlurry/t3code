@@ -84,6 +84,7 @@ export async function pickQuestionAttachments(
   input: QuestionAttachmentScope & {
     readonly key: string;
     readonly kind: "media" | "files";
+    readonly source?: "library" | "camera" | undefined;
     readonly maxUploadBytes?: number | undefined;
   },
 ): Promise<{ error: string | null; rejected: number }> {
@@ -101,6 +102,7 @@ export async function pickQuestionAttachments(
         : await pickComposerMedia({
             existingCount,
             maxVideoBytes: input.maxUploadBytes,
+            source: input.source,
             acceptSelection,
           });
     const attachments = "files" in result ? result.files : result.attachments;

@@ -140,12 +140,13 @@ export function QuestionAttachments(props: {
     props.question.id,
   );
   const attachments = drafts[key]?.attachments ?? [];
-  const pick = async (kind: "media" | "files") => {
+  const pick = async (kind: "media" | "files", source?: "library" | "camera") => {
     const scope = pickerScope.current;
     const picked = await settlePromise(async () => {
       const result = await pickQuestionAttachments({
         key,
         kind,
+        source,
         maxUploadBytes: capabilities?.fileAttachments?.maxUploadBytes,
         isActive: () => scope.active,
         append: (attachments) => append(key, attachments),
@@ -164,7 +165,7 @@ export function QuestionAttachments(props: {
         <ComposerAttachmentButton
           disabled={props.disabled}
           supportsFiles
-          onPickMedia={() => pick("media")}
+          onPickMedia={(source) => pick("media", source)}
           onPickFiles={() => pick("files")}
         />
       ) : null}
