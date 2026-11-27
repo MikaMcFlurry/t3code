@@ -10237,7 +10237,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             current?.providerTurnId === input.context.providerTurnId ? null : current,
           );
           yield* clearUnansweredRequestWatch(input.context);
-          if (input.status === "completed") {
+          // Late child outcomes need a context while the failed parent's query is still alive.
+          if (
+            input.status === "completed" ||
+            (input.status === "failed" &&
+              liveQuery?.nativeThreadId === input.context.nativeThreadId &&
+              !liveQuery.stopping)
+          ) {
             settledTurnByNativeThread.set(input.context.nativeThreadId, input.context);
           } else {
             settledTurnByNativeThread.delete(input.context.nativeThreadId);
