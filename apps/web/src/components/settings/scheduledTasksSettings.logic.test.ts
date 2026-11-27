@@ -23,6 +23,7 @@ import {
   matchesScheduledTaskScope,
   scheduleFromDraft,
   scheduleLabel,
+  modelRoutingFromDraft,
   taskToDraft,
   unbindDraftFromThread,
 } from "./scheduledTasksSettings.logic";
@@ -469,4 +470,55 @@ it("shows schedule times in the Time format setting", () => {
     }).format(runAt);
     expect(scheduleLabel(once, hour12 ? "12-hour" : "24-hour")).toBe(`Once, ${dateTime}`);
   }
+});
+
+describe("modelRoutingFromDraft", () => {
+  const draft = (routingCandidates: string, routingMinUsageLeft = "", savedRouting = false) => ({
+    routingCandidates,
+    routingMinUsageLeft,
+    savedRouting,
+  });
+
+  it("reads the entries in order and the threshold", () => {
+    expect(modelRoutingFromDraft(draft(" claude-2,\ndriver:codex ,, codex-1/gpt-6", "20"))).toEqual(
+      {
+        modelRouting: {
+          candidates: ["claude-2", "driver:codex", "codex-1/gpt-6"],
+          minUsageLeftPercent: 20,
+        },
+      },
+    );
+    expect(modelRoutingFromDraft(draft("claude-2"))).toEqual({
+      modelRouting: { candidates: ["claude-2"] },
+    });
+  });
+
+  it("leaves routing out when there is none, and clears a stored one", () => {
+    expect(modelRoutingFromDraft(draft("", "20"))).toEqual({ modelRouting: undefined });
+    expect(modelRoutingFromDraft(draft(" , ", "", true))).toEqual({ modelRouting: null });
+  });
+
+  it("refuses a threshold outside 0 to 100 or not a whole number", () => {
+    for (const percent of ["-1", "101", "12.5", "lots"]) {
+      expect(modelRoutingFromDraft(draft("claude-2", percent))).toEqual({
+        error: "invalid-percent",
+      });
+    }
+    expect(
+      modelRoutingFromDraft(draft(Array.from({ length: 17 }, (_, i) => `a${i}`).join(","))),
+    ).toEqual({ error: "too-many" });
+  });
+
+  it("opens a task's routing in the form", () => {
+    const routed = taskToDraft({
+      ...legacyTask,
+      modelRouting: { candidates: ["claude-2", "driver:codex"], minUsageLeftPercent: 20 },
+    });
+    expect(routed).toMatchObject({
+      routingCandidates: "claude-2, driver:codex",
+      routingMinUsageLeft: "20",
+      savedRouting: true,
+    });
+    expect(taskToDraft(legacyTask)).toMatchObject({ routingCandidates: "", savedRouting: false });
+  });
 });

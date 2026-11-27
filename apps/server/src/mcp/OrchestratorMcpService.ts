@@ -307,6 +307,7 @@ function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): Orchestrato
       ? {}
       : { webhookSignature: task.webhook.hasSecret ? "set" : "none" }),
     ...(task.blockedByPolicy === undefined ? {} : { blockedByPolicy: task.blockedByPolicy }),
+    ...(task.modelRouting === undefined ? {} : { modelRouting: task.modelRouting }),
   };
 }
 
@@ -2478,6 +2479,8 @@ const make = Effect.gen(function* () {
             : "new_thread",
         workspaceStrategy: yield* scheduledTaskWorkspaceStrategy(bindToCurrentThread, projectId),
         modelSelection,
+        // A replayed create keeps the routing it set unless this call names one.
+        ...(input.modelRouting === undefined ? {} : { modelRouting: input.modelRouting }),
         runtimeMode: limits.runtimeMode,
         interactionMode: limits.interactionMode,
         createdBy: "agent",
@@ -2591,6 +2594,7 @@ const make = Effect.gen(function* () {
                   : "continue",
           workspaceStrategy,
           modelSelection: existing.modelSelection,
+          ...(input.modelRouting === undefined ? {} : { modelRouting: input.modelRouting }),
           runtimeMode: existing.runtimeMode,
           interactionMode: existing.interactionMode,
           createdBy: existing.createdBy,

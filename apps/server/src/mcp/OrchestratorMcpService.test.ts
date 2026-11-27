@@ -4359,6 +4359,45 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
     );
 
+    it.effect(
+      "passes a task's model routing through on create, and keeps or clears it on update",
+      () =>
+        Effect.gen(function* () {
+          const routing = { candidates: ["claude-2", "driver:codex"], minUsageLeftPercent: 20 };
+          const inputs = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+          const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+            Effect.provide(
+              service(
+                masterRepository,
+                yield* Ref.make<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>([]),
+                existing,
+                inputs,
+              ),
+            ),
+          );
+          yield* mcp.scheduleTask(client, {
+            projectId,
+            prompt: "Check the build",
+            schedule,
+            modelRouting: routing,
+          });
+          yield* mcp.updateScheduledTask(client, {
+            scheduledTaskId: existing.id,
+            title: "Renamed",
+          });
+          yield* mcp.updateScheduledTask(client, {
+            scheduledTaskId: existing.id,
+            modelRouting: null,
+          });
+          assert.deepEqual(
+            (yield* Ref.get(inputs)).map((input) =>
+              "modelRouting" in input ? input.modelRouting : "kept",
+            ),
+            [routing, "kept", null],
+          );
+        }),
+    );
+
     it.effect("keeps one thread when fresh sessions are turned off before the first run", () =>
       Effect.gen(function* () {
         const inputs = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);

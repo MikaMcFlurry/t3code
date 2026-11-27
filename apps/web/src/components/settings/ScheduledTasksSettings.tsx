@@ -95,6 +95,8 @@ import { SettingsGroup } from "./SettingsGroup";
 import { settingsScopeEnvironmentLabel, settingsScopeEnvironmentLabels } from "./settingsScopeAxis";
 import {
   WEBHOOK_SIGNATURE_DEFAULTS,
+  EMPTY_ROUTING_DRAFT,
+  modelRoutingFromDraft,
   changeDraftProject,
   moveDraftToThread,
   scheduleDraftErrors,
@@ -166,6 +168,9 @@ const WEEKDAY_SHORT = [
   msg("Sa", { $context: "two-letter Saturday" }),
 ] as const;
 
+// Entry syntax, the same in every language.
+const MODEL_PRIORITY_EXAMPLE = "claude-2, codex/gpt-5.4, driver:codex";
+
 // Thread ids are trimmed, so the leading space keeps this from matching one.
 const NEW_THREAD_DESTINATION = " new-thread";
 
@@ -202,6 +207,7 @@ const EMPTY_DRAFT: DraftState = {
   startFromOrigin: true,
   existingWorktreePath: "",
   modelSelection: null,
+  ...EMPTY_ROUTING_DRAFT,
   runtimeMode: "full-access",
   interactionMode: "default",
   signatureEnabled: false,
@@ -1652,6 +1658,16 @@ function ScheduledTaskEditorForm({
       );
       return;
     }
+    const routing = modelRoutingFromDraft(draft);
+    if ("error" in routing) {
+      reportFailure(
+        gt("Invalid model priority"),
+        routing.error === "too-many"
+          ? gt("List at most 16 models.")
+          : gt("Enter a whole number from 0 to 100 for the minimum usage left."),
+      );
+      return;
+    }
     if (draft.workspaceMode === "existing_worktree" && !draft.existingWorktreePath.trim()) {
       reportFailure(
         gt("Checkout path is required"),
@@ -1681,6 +1697,7 @@ function ScheduledTaskEditorForm({
       ...(offersThreadModes ? { threadMode: draft.threadMode } : {}),
       workspaceStrategy,
       modelSelection: selection,
+      ...(routing.modelRouting === undefined ? {} : { modelRouting: routing.modelRouting }),
       // Tasks have no mode picker; a mode above the administrator's ceiling would fail every run.
       runtimeMode:
         clampManagedRuntimeMode(environment?.serverConfig?.managedPolicy, draft.runtimeMode) ??
@@ -1977,6 +1994,50 @@ function ScheduledTaskEditorForm({
               ) : null}
             </div>
           </Field>
+
+          {draft.threadId === "" ? (
+            <Field
+              label={gt("Model priority")}
+              hint={gt("Optional")}
+              htmlFor="scheduled-task-model-priority"
+            >
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Input
+                  id="scheduled-task-model-priority"
+                  className="min-w-0 flex-1"
+                  placeholder={MODEL_PRIORITY_EXAMPLE}
+                  value={draft.routingCandidates}
+                  onChange={(event) =>
+                    setDraft((current) => ({ ...current, routingCandidates: event.target.value }))
+                  }
+                />
+                <Input
+                  type="number"
+                  nativeInput
+                  min={0}
+                  max={100}
+                  step={1}
+                  className="w-28"
+                  aria-label={gt("Minimum usage left in percent")}
+                  placeholder={gt("Min. % left")}
+                  value={draft.routingMinUsageLeft}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      routingMinUsageLeft: event.target.value,
+                    }))
+                  }
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                <T>
+                  Each run starts on the first listed account or model with at least this much usage
+                  left, or on the one with the most left when none has. Entries: account,
+                  account/model or driver:kind. Empty uses the model above.
+                </T>
+              </p>
+            </Field>
+          ) : null}
 
           <div className="space-y-3">
             {task?.schedule.type === "interval" &&

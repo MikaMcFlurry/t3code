@@ -2,17 +2,24 @@ import type {
   ModelSelection,
   ProjectId,
   ProviderOptionSelection,
+  ScheduledTaskModelRouting,
   ServerProvider,
+  ServerProviderUsageWindow,
   ServerSettings,
 } from "@t3tools/contracts";
 
 import { inferTaskProfileFromPrompt } from "./autoLaunchPlan.ts";
 import {
+  type AutoModelRoutingContext,
   chooseModelForTask,
   filterAllowedProviders,
+  inferTaskProfile,
+  isUsable,
+  modelForTaskProfile,
   routeModelSelection,
 } from "./autoModelRouting.ts";
 import { createModelSelection } from "./model.ts";
+import { exhaustedUsageWindow } from "./usageLimits.ts";
 
 /** What a webhook body may ask for under its `t3` key. Every field is optional. */
 export interface RoutineRoutingDirective {
@@ -97,10 +104,186 @@ function withEffort(
   return createModelSelection(selection.instanceId, selection.model, options);
 }
 
+function windowLeft(window: ServerProviderUsageWindow, now: number) {
+  const resetsAt = window.resetsAt ? Date.parse(window.resetsAt) : Number.NaN;
+  return Number.isFinite(resetsAt) && resetsAt <= now ? 100 : 100 - (window.usedPercent ?? 0);
+}
+
 /**
- * Model for a scheduled or webhook run: an explicit `model`, then `routing: "auto"`, then the
- * automatic account setting, then the stored selection. A stored selection outside an allowed
- * list never runs; without an allowed replacement the run is not startable.
+ * Percent left for `model`: the least any window that can stop it has left, by
+ * `exhaustedUsageWindow`'s rule (model scopes, pools, credit caps), asked per level as "would
+ * spending every window with at most this much left stop it?" 100 if none applies; null if no data.
+ */
+function modelUsageLeft(provider: ServerProvider, now: number, model: string) {
+  const limits = provider.usageLimits;
+  const windows = limits?.windows ?? [];
+  if (!limits || windows.length === 0) return null;
+  const levels = [...new Set(windows.map((window) => windowLeft(window, now)))].sort(
+    (a, b) => a - b,
+  );
+  for (const level of levels) {
+    const spent = windows.map((window) =>
+      windowLeft(window, now) <= level ? { ...window, usedPercent: 100 } : window,
+    );
+    if (
+      exhaustedUsageWindow({ ...provider, usageLimits: { ...limits, windows: spent } }, now, model)
+    )
+      return Math.max(0, level);
+  }
+  return 100;
+}
+
+interface PriorityCandidate {
+  readonly entry: string;
+  readonly provider: ServerProvider;
+  readonly selection: ModelSelection;
+  /** Null without usage data. */
+  readonly left: number | null;
+}
+
+/**
+ * The selection one account gives a candidate entry: `model` when named, else the task's model
+ * when the account offers it (with its options on the same driver), else the account's model
+ * for the task's profile.
+ */
+function candidateSelection(
+  provider: ServerProvider,
+  model: string | null,
+  stored: ModelSelection,
+  storedProvider: ServerProvider | undefined,
+): ModelSelection | null {
+  const offers = (slug: string) => provider.models.some((entry) => entry.slug === slug);
+  const sameDriver = storedProvider?.driver === provider.driver;
+  if (model !== null) {
+    if (!offers(model)) return null;
+    return createModelSelection(
+      provider.instanceId,
+      model,
+      model === stored.model && sameDriver ? (stored.options ?? null) : null,
+    );
+  }
+  if (offers(stored.model)) {
+    return createModelSelection(
+      provider.instanceId,
+      stored.model,
+      sameDriver ? (stored.options ?? null) : null,
+    );
+  }
+  const profile = storedProvider ? inferTaskProfile(storedProvider, stored) : "standard";
+  return modelForTaskProfile(provider, profile);
+}
+
+/** Expands entries in order; a `driver:` entry lists its accounts with the most left first. */
+function priorityCandidates(
+  routing: ScheduledTaskModelRouting,
+  allowed: ReadonlyArray<ServerProvider>,
+  stored: ModelSelection,
+  storedProvider: ServerProvider | undefined,
+  now: number,
+): PriorityCandidate[] {
+  const seen = new Set<string>();
+  const result: PriorityCandidate[] = [];
+  for (const raw of routing.candidates) {
+    const entry = raw.trim();
+    let matches: ReadonlyArray<{ provider: ServerProvider; model: string | null }>;
+    if (entry.startsWith("driver:")) {
+      const driver = entry.slice("driver:".length);
+      matches = allowed
+        .filter((provider) => provider.driver === driver)
+        .map((provider) => ({ provider, model: null }));
+    } else {
+      const cut = entry.indexOf("/");
+      const instanceId = cut < 0 ? entry : entry.slice(0, cut);
+      const provider = allowed.find((candidate) => candidate.instanceId === instanceId);
+      matches = provider ? [{ provider, model: cut < 0 ? null : entry.slice(cut + 1).trim() }] : [];
+    }
+    const group = matches.flatMap(({ provider, model }) => {
+      const selection = candidateSelection(provider, model, stored, storedProvider);
+      return selection
+        ? [{ entry, provider, selection, left: modelUsageLeft(provider, now, selection.model) }]
+        : [];
+    });
+    if (entry.startsWith("driver:")) {
+      // Most left first; accounts without usage data after those that report it.
+      group.sort(
+        (a, b) =>
+          (b.left ?? -1) - (a.left ?? -1) ||
+          a.provider.instanceId.localeCompare(b.provider.instanceId),
+      );
+    }
+    for (const candidate of group) {
+      const key = `${candidate.selection.instanceId}/${candidate.selection.model}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(candidate);
+    }
+  }
+  return result;
+}
+
+const describeLeft = (left: number | null) =>
+  left === null ? "no usage data" : `${Math.round(left)}% left`;
+
+/**
+ * A task's own routing: the first usable candidate whose model has at least the threshold
+ * left. When none has, the usable candidate with the most left (earlier entries win ties):
+ * a run on the account with the most room beats a run that never starts. Not startable only
+ * when no candidate is usable at all.
+ */
+function routeByPriority(
+  routing: ScheduledTaskModelRouting,
+  allowed: ReadonlyArray<ServerProvider>,
+  stored: ModelSelection,
+  storedProvider: ServerProvider | undefined,
+  context: AutoModelRoutingContext,
+): RoutineModelRoute {
+  const threshold = routing.minUsageLeftPercent ?? 0;
+  const candidates = priorityCandidates(routing, allowed, stored, storedProvider, context.now);
+  const usable = candidates.filter((candidate) =>
+    isUsable(candidate.provider, candidate.selection.model, context),
+  );
+  const label = (candidate: PriorityCandidate) =>
+    `${candidate.selection.instanceId}/${candidate.selection.model}`;
+  const passing = usable.find(
+    (candidate) => candidate.left === null || candidate.left >= threshold,
+  );
+  if (passing) {
+    return {
+      startable: true,
+      selection: passing.selection,
+      reason: `Task routing: ${label(passing)} (${describeLeft(passing.left)}), entry ${passing.entry}.`,
+    };
+  }
+  let most: PriorityCandidate | undefined;
+  for (const candidate of usable) {
+    if (!most || (candidate.left ?? 0) > (most.left ?? 0)) most = candidate;
+  }
+  if (most) {
+    return {
+      startable: true,
+      selection: most.selection,
+      reason: `Task routing: no candidate has ${threshold}% left; ${label(most)} has the most usage left (${describeLeft(most.left)}).`,
+    };
+  }
+  const entries = routing.candidates.join(", ");
+  return candidates.length === 0
+    ? {
+        startable: false,
+        code: "no-allowed-model",
+        reason: `Not started: the task's models (${entries}) match no configured account and model within the allowed models.`,
+      }
+    : {
+        startable: false,
+        code: "no-allowed-model-available",
+        reason: `Not started: none of the task's models (${entries}) is available right now.`,
+      };
+}
+
+/**
+ * Model for a scheduled or webhook run: an explicit `model`, then the task's own routing
+ * (unless the webhook asks for `routing: "fixed"`), then `routing: "auto"`, then the automatic
+ * account setting, then the stored selection. A stored selection outside an allowed list never
+ * runs; without an allowed replacement the run is not startable.
  */
 export function resolveRoutineModelSelection(input: {
   readonly stored: ModelSelection;
@@ -110,6 +293,8 @@ export function resolveRoutineModelSelection(input: {
   readonly settings: ServerSettings;
   readonly projectId: ProjectId | null;
   readonly now: number;
+  /** The task's own priority list and threshold, when it has one. */
+  readonly taskRouting?: ScheduledTaskModelRouting | undefined;
 }): RoutineModelRoute {
   const { directive, settings } = input;
   const lists = [settings.autoRoutingAllowed, directive?.allowed ?? []];
@@ -129,6 +314,17 @@ export function resolveRoutineModelSelection(input: {
         reason: `Requested ${directive.model}.`,
       };
     }
+  }
+
+  if (input.taskRouting && directive?.routing !== "fixed") {
+    const route = routeByPriority(
+      input.taskRouting,
+      allowed,
+      input.stored,
+      input.providers.find((provider) => provider.instanceId === input.stored.instanceId),
+      context,
+    );
+    return route.startable ? { ...route, selection: effort(route.selection) } : route;
   }
 
   const byProfile = () =>

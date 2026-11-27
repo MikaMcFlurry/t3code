@@ -84,7 +84,12 @@ function headroomScore(provider: ServerProvider, now: number) {
   return 0.8 * Math.min(...remaining) + 0.2 * mean;
 }
 
-function isUsable(provider: ServerProvider, model: string, context: AutoModelRoutingContext) {
+/** Enabled, signed in, allowed in the project and not out of usage for `model`. */
+export function isUsable(
+  provider: ServerProvider,
+  model: string,
+  context: AutoModelRoutingContext,
+) {
   return (
     provider.enabled &&
     provider.installed &&
@@ -142,7 +147,7 @@ export function modelForTaskProfile(
   return createModelSelection(provider.instanceId, model.slug, effort ? [effort] : null);
 }
 
-function inferTaskProfile(provider: ServerProvider, selection: ModelSelection): TaskProfile {
+export function inferTaskProfile(provider: ServerProvider, selection: ModelSelection): TaskProfile {
   if (selection.model === DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER[provider.driver]) {
     return "light";
   }
