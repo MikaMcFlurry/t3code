@@ -33,6 +33,7 @@ import {
 } from "../../provider/codexUsageLimits.ts";
 import {
   type AgentFeedbackMode,
+  type CentralMcpServer,
   CodexSettings,
   defaultInstanceIdForDriver,
   isOrchestrationV2WorkActive,
@@ -134,8 +135,10 @@ import {
 } from "../../provider/EventNdjsonLogger.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "../../provider/codexLaunchArgs.ts";
+import * as ServerSettings from "../../serverSettings.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
+import { centralMcpServersForSession } from "@t3tools/provider-core/server/centralMcpServerScope";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import {
   MCP_APP_EXTENSION_ID,
@@ -1699,10 +1702,32 @@ function codexStdioMcpServerNames(mcpServers: unknown): ReadonlyArray<string> {
     .map(([name]) => name);
 }
 
+/** Central MCP servers as `mcp_servers.<name>` config overrides; disabled ones are left out. */
+export function codexCentralMcpConfig(
+  servers: ReadonlyArray<CentralMcpServer> | undefined,
+  sessionEnvironment: Readonly<Record<string, string>> = {},
+): Record<string, Schema.Json> {
+  return Object.fromEntries(
+    (servers ?? [])
+      .filter((server) => server.enabled)
+      .map((server) => [
+        `mcp_servers.${server.name}`,
+        server.transport.type === "stdio"
+          ? {
+              command: server.transport.command,
+              args: [...server.transport.args],
+              env: { ...sessionEnvironment, ...server.transport.env },
+            }
+          : { url: server.transport.url, http_headers: { ...server.transport.headers } },
+      ]),
+  );
+}
+
 function codexThreadRuntimeParams(input: {
   readonly threadId: ThreadId | null;
   readonly mcpSession: McpProviderSession.McpProviderSessionConfig | undefined;
   readonly stdioMcpServers?: ReadonlyArray<string>;
+  readonly centralMcpServers?: ReadonlyArray<CentralMcpServer>;
   readonly modelSelection?: { readonly model: string };
   readonly runtimePolicy?: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
 }): {
@@ -1724,6 +1749,10 @@ function codexThreadRuntimeParams(input: {
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
     config: {
       ...CODEX_THREAD_CONFIG,
+      ...codexCentralMcpConfig(
+        centralMcpServersForSession(input.centralMcpServers, mcpSession),
+        McpProviderSession.sharedMcpSessionEnvironment("codex", input.mcpSession),
+      ),
       // One app-server serves many threads, so the id goes in per-thread shell config, not its env.
       ...(input.threadId === null
         ? {}
@@ -2134,6 +2163,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
   const readMcpSession = (threadId: ThreadId | null) =>
     threadId === null ? Effect.undefined : mcpSessions.read(threadId);
+  const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
+  const readCentralMcpServers = Option.isSome(serverSettings)
+    ? serverSettings.value.getSettings.pipe(
+        Effect.map((settings) => settings.centralMcpServers),
+        Effect.orElseSucceed((): ReadonlyArray<CentralMcpServer> => []),
+      )
+    : Effect.succeed<ReadonlyArray<CentralMcpServer>>([]);
   const { clientFactory, digest, fileSystem, idAllocator, serverConfig } = adapterOptions;
   const continuationRequests = adapterOptions.continuationRequests;
 
@@ -8287,14 +8323,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 Effect.all([
                   mcpSessions.read(threadInput.threadId),
                   readStdioMcpServers(threadInput.runtimePolicy.cwd),
+                  readCentralMcpServers,
                 ]),
               ),
-              Effect.flatMap(([mcpSession, stdioMcpServers]) =>
+              Effect.flatMap(([mcpSession, stdioMcpServers, centralMcpServers]) =>
                 client.request("thread/start", {
                   ...codexThreadRuntimeParams({
                     threadId: threadInput.threadId,
                     mcpSession,
                     stdioMcpServers,
+                    centralMcpServers,
                     modelSelection: threadInput.modelSelection,
                     runtimePolicy: threadInput.runtimePolicy,
                   }),
@@ -8335,6 +8373,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   threadId: appThreadId,
                   mcpSession: yield* readMcpSession(appThreadId),
                   stdioMcpServers: yield* readStdioMcpServers(threadInput.runtimePolicy?.cwd),
+                  centralMcpServers: yield* readCentralMcpServers,
                   ...(threadInput.modelSelection === undefined
                     ? {}
                     : { modelSelection: threadInput.modelSelection }),
@@ -9347,6 +9386,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     threadId: threadInput.providerThread.appThreadId,
                     mcpSession: yield* readMcpSession(threadInput.providerThread.appThreadId),
                     stdioMcpServers: yield* readStdioMcpServers(undefined),
+                    centralMcpServers: yield* readCentralMcpServers,
                   }),
                 });
               }
@@ -9395,6 +9435,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   threadId: threadInput.targetThreadId,
                   mcpSession: yield* mcpSessions.read(threadInput.targetThreadId),
                   stdioMcpServers: yield* readStdioMcpServers(threadInput.runtimePolicy?.cwd),
+                  centralMcpServers: yield* readCentralMcpServers,
                   ...(threadInput.modelSelection === undefined
                     ? {}
                     : { modelSelection: threadInput.modelSelection }),

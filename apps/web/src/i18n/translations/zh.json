@@ -5235,6 +5235,23 @@
   "c752acb0b7088295": "已连接",
   "a097631b7acab9d8": "等待批准…",
   "aabd9632196ee7e5": "正在重新连接…",
+  "d92d1201f3aa424b": "(no arguments)",
+  "cb85d4a9792068d5": "Allow desktop control?",
+  "d026764631290844": [
+    "Thread ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    " wants to run the desktop action \"",
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
+    "\". Review the exact input before allowing it. It is shown only for this pending decision and is not saved by the approval broker."
+  ],
   "a80895f122d7020f": "无法打开链接",
   "2a1758375b2701f3": "无法添加后端",
   "6730fa8ae68fad99": "无法添加后端。",
@@ -7889,6 +7906,18 @@
     "中移除快捷键以释放按键。"
   ],
   "4bf700ad94c0c486": "我已添加快捷键",
+  "cd8b2ce90e80cde0": "Use letters, digits, '-' or '_' for the name (not {reserved}).",
+  "8ebf3adb0f891620": "Enter a command or an http(s) URL.",
+  "f0627d5688813066": "Use letters, digits and '_' for the variable name, not starting with a digit.",
+  "cfda3d436e4cc36b": "Enter a valid header name, such as {example}.",
+  "579f1b2443c89764": "A central MCP server named {name} already exists.",
+  "eee915b379b9f69c": "Central MCP servers",
+  "4c8673b974aff74c": "Add MCP server",
+  "97510438f04dfe7b": "Added to every Claude and Codex session on this machine, whichever account runs it. Environment variables and headers are kept in the secret store.",
+  "cf7afbf31b268493": "name",
+  "66c75b8da6b4f481": "MCP server name",
+  "4326673a7ebc8a63": "Command ({example} …) or {scheme} URL",
+  "1ad96dd87d239d14": "MCP server command or URL",
   "bcdea6ebe1a65e63": "要连接的 ChatGPT 账户",
   "b0f535667fb1e651": "重新连接 ChatGPT",
   "0060cf3253f851c6": "请在 OpenAI 页面使用此处选择的账户登录。",
@@ -8100,6 +8129,7 @@
     "。仅当你面前的设备显示此验证码时才批准。"
   ],
   "7c5eb60743d53f71": "拒绝",
+  "65947ad9a6cae20d": "Allow once",
   "0ecf3435b0434d1b": [
     "信任自",
     " ",
@@ -8655,6 +8685,9 @@
   "3a22541b4b44214b": "响应式",
   "80726ab1cdc0fba1": "你的默认浏览器",
   "f6b11bd9aea5e75e": "自定义",
+  "b7696998059e07cc": "Ask every time",
+  "9f31362c726e9d69": "Not in full access",
+  "338adc52f3ecfbdb": "Never ask",
   "a4808b3447bea046": "你和智能体使用的标签页尺寸。“填满面板”会适应面板大小；其他尺寸会显示设备工具栏。",
   "f26f3869603e5918": "重置默认浏览器视口为默认值",
   "2aa17f5ea670658e": "默认浏览器视口",
@@ -8697,6 +8730,11 @@
   "a6a6dc235b108747": "允许智能体使用共享浏览器。项目可以覆盖此设置。",
   "ea5fed973bfc1aca": "重置默认浏览器访问权限为默认值",
   "19e1f74805f4a1fb": "智能体浏览器访问",
+  "a58f115b3fd97146": "Reset agent desktop control to default",
+  "5df0fe31bd236071": "Agent desktop control",
+  "36dd8189b115f566": "When an agent's desktop actions wait for your approval. Not in full access: full-access threads act without asking. Never ask: a standing approval for every thread. Stop or a new session ends it.",
+  "3986789c00214bc4": "Reset agent desktop approval to default",
+  "e1941f5c6591dc23": "Desktop approval",
   "b395b88284e3bca2": "智能体打开浏览器或设备时显示浮动预览，除非智能体另有要求。",
   "6aadfd59cf60b4b5": "重置自动显示浮动预览为默认值",
   "e4a7ec61190bc1f9": "自动显示浮动预览",
@@ -8734,6 +8772,37 @@
       "t": "DeviceToolVersions",
       "i": 1
     }
+  ],
+  "a90e1527a54348e0": [
+    "Let agents in this project see and control this machine's desktop. Linux needs",
+    " ",
+    {
+      "t": "code",
+      "i": 1,
+      "c": "computer-use-linux"
+    },
+    " on PATH, Windows needs ",
+    {
+      "t": "code",
+      "i": 2,
+      "c": "uv"
+    },
+    ". Shell and file tools stay off. Applies to new sessions."
+  ],
+  "6a69b1f6c7e050ab": [
+    "Let agents see and control this machine's desktop; projects can override it. Linux needs ",
+    {
+      "t": "code",
+      "i": 1,
+      "c": "computer-use-linux"
+    },
+    " on PATH, Windows needs ",
+    {
+      "t": "code",
+      "i": 2,
+      "c": "uv"
+    },
+    ". Shell and file tools stay off. Applies to new sessions."
   ],
   "093c68324c1b1280": "添加浏览器配置",
   "1f404c456e5b2a0b": "空白浏览器配置",
@@ -9213,6 +9282,7 @@
   "111a44209dc6e701": "移除",
   "daafb41c2b3c066f": "在工作区文件中",
   "2c5c798252f91fdc": "添加",
+  "b7088cd1c566d9c9": "Replace",
   "7e4d1ce9725c2327": "跟踪此项目所在机器上任意位置的仓库或文件夹。",
   "477d4252dc7c3df4": "文件夹路径",
   "d00aa47a947923ee": "正在加载文件夹…",
@@ -10038,6 +10108,17 @@
   "183b2599d9617750": "关闭",
   "302410fc09c914ad": "{count, plural, other {{count} 天}}",
   "9fec8d8f72a0de4d": "空",
+  "cfb73ebda2de1d8a": "New value for environment variable {key}",
+  "94fe9d83e662b195": "New value for header {key}",
+  "f6b97822695f5292": "Remove environment variable {key}",
+  "12ef2c045f999d80": "Remove header {key}",
+  "a930747996f6c32c": "New environment variable name for {name}",
+  "fad6bccc299c65a1": "New header name for {name}",
+  "f045efc0656c1a9f": "Value",
+  "0affc8f64b4f4345": "New environment variable value for {name}",
+  "39085e9a2d8d8531": "New header value for {name}",
+  "7bad08db36f4ddc0": "Add variable",
+  "30470edfa7b01663": "Add header",
   "5ea3612df785efd2": "{count, plural, other {{count} 项}}",
   "7f11b5e6dfa0bc56": "自定义",
   "aea25315995268e1": "继承上层设置",
@@ -11222,6 +11303,8 @@
   "1d32dad13ca765db": "关闭 · ",
   "1ece6e9c15a13601": "{name} 的更多操作",
   "ebffe4dabf52835f": "启用 {name}",
+  "00eb29a4e0136973": "{key} is already set; type a new value in its row to replace it.",
+  "ed9d6a125a8ba5f9": "Saved; type to replace",
   "b663e2e129c61493": "添加文本生成器",
   "149ffa363168a419": "无需启动编程智能体即可撰写会话标题、提交信息等短文本。你的 API 密钥存储在此环境中。",
   "1e0a645ef3661af3": "服务",
@@ -11964,6 +12047,9 @@
   "f2b07faba1229ce7": "健康检查间隔",
   "5c9dc9970db79fe2": "刷新 可用性 版本 认证状态 模型 后台 探测 秒 关闭",
   "056ba6a180d114b5": "允许 禁用 启用 打开 操控 预览 工具 智能体会话 项目 覆盖",
+  "e55879a6a62fd41a": "computer use linux ubuntu gnome wayland windows screen mouse keyboard screenshot click type approve",
+  "05495b9974333523": "Agent desktop approval",
+  "eb04997423c85584": "computer use approve ask every time full access standing never ask desktop control",
   "345075be6cacc171": "设备 主机 ssh 远程 mac mini 身份 密钥 连接 eas expo 云 simlock 池 网关 本地 模拟器",
   "a6b742430b05d6cc": "允许智能体使用设备",
   "1d5d7418a83575c2": "允许 模拟器 ios android 操控 工具 智能体会话",

@@ -79,3 +79,4 @@ export * from "./agentFeedback.ts";
 export * from "./secretReference.ts";
 export * from "./settingsSecretValue.ts";
 export * from "./clientRpcPermissions.ts";
+export * from "./desktopApproval.ts";

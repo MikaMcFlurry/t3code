@@ -1129,6 +1129,25 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: [msg("allow disable enable open drive preview tools sessions project override")],
   },
   {
+    id: "agent-desktop-access",
+    title: msg("Agent desktop control"),
+    to: "/settings/browser",
+    scope: "project-defaults",
+    searchTerms: [
+      msg(
+        "computer use linux ubuntu gnome wayland windows screen mouse keyboard screenshot click type approve",
+      ),
+    ],
+  },
+  {
+    id: "agent-desktop-approval",
+    title: msg("Agent desktop approval"),
+    to: "/settings/browser",
+    searchTerms: [
+      msg("computer use approve ask every time full access standing never ask desktop control"),
+    ],
+  },
+  {
     id: "device-sources",
     title: msg("Device sources"),
     to: "/settings/devices",

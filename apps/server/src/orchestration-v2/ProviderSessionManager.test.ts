@@ -56,6 +56,10 @@ import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import {
+  ComputerUseLinuxApprovalRevocation,
+  ComputerUseLinuxDeploymentEnabled,
+} from "../desktop/ComputerUseLinuxAvailability.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ProviderInstallationGate from "../provider/ProviderInstallationGate.ts";
@@ -859,6 +863,8 @@ function runBrowserAccessScenario(input: {
   readonly deviceOverride?: boolean;
   readonly enableAgentDeviceAccess?: boolean;
   readonly enableDeviceSupport?: boolean;
+  readonly desktopOverride?: boolean;
+  readonly desktopDeploymentEnabled?: boolean;
   readonly createThread?: boolean;
   readonly projectExists?: boolean;
   readonly delegatedBy?: ThreadId;
@@ -925,10 +931,20 @@ function runBrowserAccessScenario(input: {
                 ...(input.deviceOverride === undefined
                   ? {}
                   : { enableAgentDeviceAccess: input.deviceOverride }),
+                ...(input.desktopOverride === undefined
+                  ? {}
+                  : { enableAgentDesktopAccess: input.desktopOverride }),
               },
             },
           }),
-        }),
+        }).pipe(
+          Layer.provide(
+            Layer.succeed(
+              ComputerUseLinuxDeploymentEnabled,
+              input.desktopDeploymentEnabled ?? true,
+            ),
+          ),
+        ),
       ),
     );
 
@@ -2699,6 +2715,21 @@ it.effect(
       const mcpConfigs = yield* Ref.make<
         ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
       >([]);
+      const revokedDesktopSessions: Array<string> = [];
+      const layerDesktopApprovalRevocation = Layer.succeed(
+        ComputerUseLinuxApprovalRevocation,
+        ComputerUseLinuxApprovalRevocation.of({
+          activateSession: () => undefined,
+          registerSession: () => ({ revoked: false, unregister: () => undefined }),
+          revokeSession: async (providerSessionId) => {
+            revokedDesktopSessions.push(providerSessionId);
+          },
+          revokeThread: async () => undefined,
+          interruptThread: async () => undefined,
+          resumeThread: () => undefined,
+          generation: () => 0,
+        }),
+      );
       const effect = Effect.gen(function* () {
         const eventSink = yield* EventSink.EventSinkV2;
         const idAllocator = yield* IdAllocator.IdAllocatorV2;
@@ -2741,6 +2772,7 @@ it.effect(
         yield* manager.close(providerSessionId);
         assert.isUndefined(yield* mcpSessions.read(threadId));
         assert.isUndefined(yield* registry.resolve(token!));
+        assert.deepEqual(revokedDesktopSessions, [captured?.providerSessionId]);
       });
 
       yield* effect.pipe(
@@ -2749,7 +2781,7 @@ it.effect(
             state,
             idleTimeoutMs: 1_000,
             mcpConfigs,
-          }),
+          }).pipe(Layer.provide(layerDesktopApprovalRevocation)),
         ),
       );
     }),
@@ -6126,6 +6158,39 @@ it.effect("ProviderSessionManagerV2 withholds device tools while device support 
       "agent device access granted device tools with device support off for a missing project",
     );
   }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 issues desktop capability only for an explicit project opt-in",
+  () =>
+    Effect.gen(function* () {
+      const enabled = yield* runBrowserAccessScenario({
+        enableAgentBrowserAccess: false,
+        projectOverride: false,
+        desktopOverride: true,
+      });
+      assert.isTrue(enabled?.capabilities?.has("desktop"));
+      assert.isFalse(enabled?.browserToolsAvailable);
+      const defaultDenied = yield* runBrowserAccessScenario({
+        enableAgentBrowserAccess: false,
+        projectOverride: false,
+      });
+      assert.isFalse(defaultDenied?.capabilities?.has("desktop"));
+      const deploymentDenied = yield* runBrowserAccessScenario({
+        enableAgentBrowserAccess: false,
+        projectOverride: false,
+        desktopOverride: true,
+        desktopDeploymentEnabled: false,
+      });
+      assert.isFalse(deploymentDenied?.capabilities?.has("desktop"));
+      const missingProject = yield* runBrowserAccessScenario({
+        enableAgentBrowserAccess: false,
+        projectOverride: false,
+        desktopOverride: true,
+        projectExists: false,
+      });
+      assert.isFalse(missingProject?.capabilities?.has("desktop"));
+    }),
 );
 
 // Device instructions reach delegated children only because their own sessions hold `device`.
