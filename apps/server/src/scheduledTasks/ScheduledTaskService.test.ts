@@ -2,15 +2,18 @@ import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as NodeUtil from "node:util";
 
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
-import { assert, it, vi } from "@effect/vitest";
+import { assert, describe, it, vi } from "@effect/vitest";
 import {
   CommandId,
+  ModelSelection,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ScheduledTaskError,
   ScheduledTaskId,
   type ScheduledTaskUpsertInput,
   SecretRef,
+  type ServerProvider,
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -29,6 +32,8 @@ import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { OrchestratorDispatchError } from "../orchestration-v2/Orchestrator.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
@@ -38,6 +43,9 @@ import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 
 const isScheduledTaskError = Schema.is(ScheduledTaskError);
+const decodeStoredModelSelection = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(ModelSelection),
+);
 
 const threadShell = (
   projectId: ProjectId,
@@ -1226,3 +1234,363 @@ it.effect("a run interrupted right after it reserves the task does not block the
     }).pipe(Effect.provide(layer));
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
+
+it.effect("a run whose stored model is outside the allowed list fails instead of starting", () =>
+  Effect.gen(function* () {
+    const launches = yield* Ref.make(0);
+    const codex = (instanceId: string, status: "ready" | "error"): ServerProvider => ({
+      instanceId: ProviderInstanceId.make(instanceId),
+      driver: ProviderDriverKind.make("codex"),
+      enabled: true,
+      installed: true,
+      version: null,
+      status,
+      auth: { status: "authenticated" },
+      checkedAt: "2026-09-13T00:00:00.000Z",
+      models: [{ slug: "gpt-5.4", name: "GPT-5.4", isCustom: false, capabilities: null }],
+      slashCommands: [],
+      skills: [],
+    });
+    const run = (autoRoutingAllowed: ReadonlyArray<string>) => {
+      const layer = ScheduledTaskService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            ManagedPolicy.layerTest(),
+            Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+              launch: () =>
+                Ref.update(launches, (n) => n + 1).pipe(
+                  Effect.as({ threadId: ThreadId.make("thread:routed"), resumed: false } as never),
+                ),
+            }),
+            Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+            Layer.mock(SecretRequests.SecretRequests)({}),
+            Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+              namedProjectsRoot: "/projects",
+              isScratchProject: () => Effect.succeed(false),
+            }),
+            // The stored account is ready; the only allowed one is down.
+            Layer.mock(ProviderRegistry.ProviderRegistry)({
+              getProviders: Effect.succeed([codex("codex", "ready"), codex("codex_team", "error")]),
+            }),
+            ServerSettings.layerTest({ autoRoutingAllowed: [...autoRoutingAllowed] }),
+            NodeCrypto.layer,
+            Layer.succeed(Scheduler.Scheduler, { register: () => Effect.void }),
+          ),
+        ),
+      );
+      return Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        const id = ScheduledTaskId.make(`task:allowlist:${autoRoutingAllowed.join(",")}`);
+        yield* service.upsert({
+          id,
+          title: "Nightly",
+          prompt: "Check the contact forms",
+          enabled: true,
+          schedule: { type: "interval", everyMs: 60_000 },
+          projectId: ProjectId.make("project:test"),
+          workspaceStrategy: { type: "root" },
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+        });
+        return yield* service.runNow({ id });
+      }).pipe(Effect.provide(layer));
+    };
+
+    const refused = yield* run(["codex_team"]);
+    assert.equal(yield* Ref.get(launches), 0);
+    assert.isNull(refused.threadId);
+    assert.equal(refused.task.lastRunStatus, "failed");
+    assert.include(refused.task.lastRunError ?? "", "Not started");
+    assert.include(refused.task.lastRunError ?? "", "codex_team");
+
+    // An allowed list that names no configured account refuses the run the same way.
+    const unmatched = yield* run(["claudeAgent"]);
+    assert.equal(yield* Ref.get(launches), 0);
+    assert.equal(unmatched.task.lastRunStatus, "failed");
+    assert.include(unmatched.task.lastRunError ?? "", "match no configured");
+
+    // Without a list the stored model runs as before.
+    const unrestricted = yield* run([]);
+    assert.equal(yield* Ref.get(launches), 1);
+    assert.equal(unrestricted.task.lastRunStatus, "succeeded");
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+describe("per-task model routing", () => {
+  const account = (
+    instanceId: string,
+    driver: "codex" | "claudeAgent",
+    usedPercent: number,
+  ): ServerProvider => ({
+    instanceId: ProviderInstanceId.make(instanceId),
+    driver: ProviderDriverKind.make(driver),
+    enabled: true,
+    installed: true,
+    version: null,
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt: "2026-09-13T00:00:00.000Z",
+    models:
+      driver === "codex"
+        ? [{ slug: "gpt-5.4", name: "GPT-5.4", isCustom: false, capabilities: null }]
+        : [{ slug: "claude-opus-5-5", name: "Opus", isCustom: false, capabilities: null }],
+    slashCommands: [],
+    skills: [],
+    usageLimits: {
+      checkedAt: "2026-09-13T00:00:00.000Z",
+      windows: [
+        {
+          id: "five_hour",
+          kind: "session",
+          label: "Session",
+          usedPercent,
+          resetsAt: "2099-01-01T00:00:00.000Z",
+        },
+      ],
+    },
+  });
+  const stored = { instanceId: ProviderInstanceId.make("claude_a"), model: "claude-opus-5-5" };
+  const routing = { candidates: ["claude_a", "claude_b", "codex"], minUsageLeftPercent: 20 };
+
+  /** A fresh service over the test's database, as after a restart. */
+  const serviceLayer = (
+    providers: Ref.Ref<ReadonlyArray<ServerProvider>>,
+    launched: Ref.Ref<ReadonlyArray<ThreadLaunchService.ThreadLaunchInput>>,
+    autoRoutingAllowed: ReadonlyArray<string> = [],
+    /** Runs inside a worktree save, between its read and its write. */
+    duringSave: Effect.Effect<void> = Effect.void,
+  ) =>
+    ScheduledTaskService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          ManagedPolicy.layerTest(),
+          Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+            launch: (input) =>
+              Ref.update(launched, (all) => [...all, input]).pipe(
+                Effect.as({ threadId: ThreadId.make("thread:routed"), resumed: false } as never),
+              ),
+          }),
+          Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+            namedProjectsRoot: "/projects",
+            isScratchProject: () => duringSave.pipe(Effect.as(true)),
+          }),
+          Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Ref.get(providers) }),
+          ServerSettings.layerTest({
+            autoRoutingAllowed: [...autoRoutingAllowed],
+            // Named instances run only when configured, as on a real server.
+            providerInstances: {
+              claude_a: { driver: "claudeAgent", enabled: true, config: {} },
+              claude_b: { driver: "claudeAgent", enabled: true, config: {} },
+            },
+          } as never),
+          NodeCrypto.layer,
+          Layer.succeed(Scheduler.Scheduler, { register: () => Effect.void }),
+        ),
+      ),
+    );
+  const taskInput = (patch: Partial<ScheduledTaskUpsertInput> = {}): ScheduledTaskUpsertInput => ({
+    id: ScheduledTaskId.make("task:routing"),
+    title: "Morning routine",
+    prompt: "Summarise the inbox",
+    enabled: true,
+    schedule: { type: "interval", everyMs: 60_000 },
+    projectId: ProjectId.make("project:test"),
+    workspaceStrategy: { type: "root" },
+    modelSelection: stored,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    ...patch,
+  });
+  const lastLaunch = (launched: Ref.Ref<ReadonlyArray<ThreadLaunchService.ThreadLaunchInput>>) =>
+    Ref.get(launched).pipe(Effect.map((all) => all.at(-1)?.modelSelection.instanceId));
+
+  it.effect("starts each run on the first listed account with enough usage left", () =>
+    Effect.gen(function* () {
+      const providers = yield* Ref.make<ReadonlyArray<ServerProvider>>([
+        account("claude_a", "claudeAgent", 85),
+        account("claude_b", "claudeAgent", 30),
+        account("codex", "codex", 0),
+      ]);
+      const launched = yield* Ref.make<ReadonlyArray<ThreadLaunchService.ThreadLaunchInput>>([]);
+      yield* Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        const { task } = yield* service.upsert(taskInput({ modelRouting: routing }));
+        assert.deepEqual(task.modelRouting, routing);
+
+        // claude_a has 15% left, below the threshold: the run goes to claude_b, the next one.
+        yield* service.runNow({ id: task.id });
+        assert.equal(yield* lastLaunch(launched), "claude_b");
+
+        // claude_b drops below too; codex is next in the list.
+        yield* Ref.update(providers, (all) =>
+          all.map((entry) =>
+            entry.instanceId === "claude_b" ? account("claude_b", "claudeAgent", 90) : entry,
+          ),
+        );
+        yield* service.runNow({ id: task.id });
+        assert.equal(yield* lastLaunch(launched), "codex");
+
+        // Every account below the threshold: the one with the most left runs instead of none.
+        yield* Ref.set(providers, [
+          account("claude_a", "claudeAgent", 95),
+          account("claude_b", "claudeAgent", 85),
+          account("codex", "codex", 90),
+        ]);
+        const fallback = yield* service.runNow({ id: task.id });
+        assert.equal(yield* lastLaunch(launched), "claude_b");
+        assert.equal(fallback.task.lastRunStatus, "succeeded");
+      }).pipe(Effect.provide(serviceLayer(providers, launched)));
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect("never routes outside the global allowed list", () =>
+    Effect.gen(function* () {
+      const providers = yield* Ref.make<ReadonlyArray<ServerProvider>>([
+        account("claude_a", "claudeAgent", 0),
+        account("claude_b", "claudeAgent", 50),
+        account("codex", "codex", 0),
+      ]);
+      const launched = yield* Ref.make<ReadonlyArray<ThreadLaunchService.ThreadLaunchInput>>([]);
+      yield* Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        // codex comes first, but the setting allows only Claude accounts.
+        const { task } = yield* service.upsert(
+          taskInput({ modelRouting: { candidates: ["codex", "claude_b", "claude_a"] } }),
+        );
+        yield* service.runNow({ id: task.id });
+        assert.equal(yield* lastLaunch(launched), "claude_b");
+      }).pipe(Effect.provide(serviceLayer(providers, launched, ["driver:claudeAgent"])));
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect(
+    "keeps the routing across replayed and older saves and a restart, and clears it on null",
+    () =>
+      Effect.gen(function* () {
+        const providers = yield* Ref.make<ReadonlyArray<ServerProvider>>([
+          account("claude_a", "claudeAgent", 90),
+          account("claude_b", "claudeAgent", 10),
+          account("codex", "codex", 0),
+        ]);
+        const launched = yield* Ref.make<ReadonlyArray<ThreadLaunchService.ThreadLaunchInput>>([]);
+        const commandId = CommandId.make("cmd:routing-create");
+        const created = yield* Effect.gen(function* () {
+          const service = yield* ScheduledTaskService.ScheduledTaskService;
+          const first = yield* service.upsert(
+            taskInput({ id: undefined, commandId, modelRouting: routing }),
+          );
+          // The same create replayed, and an edit from a client that does not know the field.
+          const replayed = yield* service.upsert(
+            taskInput({ id: undefined, commandId, modelRouting: routing }),
+          );
+          assert.equal(replayed.task.id, first.task.id);
+          const older = yield* service.upsert(taskInput({ id: first.task.id, title: "Renamed" }));
+          assert.deepEqual(older.task.modelRouting, routing);
+          return first.task;
+        }).pipe(Effect.provide(serviceLayer(providers, launched)));
+
+        // Stored beside the model selection, which still decodes as a plain one.
+        const sql = yield* SqlClient.SqlClient;
+        const [row] = yield* sql<{
+          model_selection_json: string;
+        }>`SELECT model_selection_json FROM scheduled_tasks WHERE task_id = ${created.id}`;
+        assert.deepEqual(yield* decodeStoredModelSelection(row?.model_selection_json), stored);
+
+        yield* Effect.gen(function* () {
+          const service = yield* ScheduledTaskService.ScheduledTaskService;
+          const { tasks } = yield* service.list();
+          assert.deepEqual(tasks.find((task) => task.id === created.id)?.modelRouting, routing);
+          yield* service.runNow({ id: created.id });
+          assert.equal(yield* lastLaunch(launched), "claude_b");
+
+          const cleared = yield* service.upsert(taskInput({ id: created.id, modelRouting: null }));
+          assert.isUndefined(cleared.task.modelRouting);
+          yield* service.runNow({ id: created.id });
+          assert.equal(yield* lastLaunch(launched), "claude_a");
+        }).pipe(Effect.provide(serviceLayer(providers, launched)));
+      }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect("a save that leaves the routing out keeps a routing saved while it ran", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const providers = yield* Ref.make<ReadonlyArray<ServerProvider>>([]);
+      const launched = yield* Ref.make<ReadonlyArray<ThreadLaunchService.ThreadLaunchInput>>([]);
+      const concurrent = yield* Ref.make<Effect.Effect<void>>(Effect.void);
+      const writeRow = (json: string) =>
+        sql`UPDATE scheduled_tasks SET model_selection_json = ${json}`.pipe(
+          Effect.asVoid,
+          Effect.orDie,
+        );
+      const other = { candidates: ["codex"], minUsageLeftPercent: 50 };
+      const worktree = { type: "worktree", baseRef: "main" } as const;
+      yield* Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        yield* service.upsert(taskInput({ modelRouting: routing }));
+        // Another save stores other routing after this one read the task.
+        yield* Ref.set(
+          concurrent,
+          writeRow(JSON.stringify({ ...stored, scheduledTaskRouting: other })),
+        );
+        const renamed = yield* service.upsert(
+          taskInput({ title: "Renamed", workspaceStrategy: worktree }),
+        );
+        assert.deepEqual(renamed.task.modelRouting, other);
+        assert.equal(renamed.task.title, "Renamed");
+        // ...or clears it.
+        yield* Ref.set(concurrent, writeRow(JSON.stringify(stored)));
+        const cleared = yield* service.upsert(
+          taskInput({ title: "Again", workspaceStrategy: worktree }),
+        );
+        assert.isUndefined(cleared.task.modelRouting);
+        assert.deepEqual(cleared.task.modelSelection, stored);
+      }).pipe(
+        Effect.provide(serviceLayer(providers, launched, [], Effect.flatten(Ref.get(concurrent)))),
+      );
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect("keeps routing only on tasks that start a new thread per run", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const providers = yield* Ref.make<ReadonlyArray<ServerProvider>>([]);
+      const launched = yield* Ref.make<ReadonlyArray<ThreadLaunchService.ThreadLaunchInput>>([]);
+      yield* Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        const refused = yield* service
+          .upsert(taskInput({ threadMode: "fresh_session", modelRouting: routing }))
+          .pipe(Effect.flip);
+        assert.include(refused.message, "new thread");
+        yield* service.upsert(taskInput({ modelRouting: routing }));
+        // Moving the task to one thread drops the routing its runs would no longer use.
+        const moved = yield* service.upsert(taskInput({ threadMode: "fresh_session" }));
+        assert.isUndefined(moved.task.modelRouting);
+        const [row] = yield* sql<{
+          model_selection_json: string;
+        }>`SELECT model_selection_json FROM scheduled_tasks`;
+        assert.notInclude(row?.model_selection_json ?? "", "scheduledTaskRouting");
+      }).pipe(Effect.provide(serviceLayer(providers, launched)));
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect("a malformed stored routing reads as none and does not block a save", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const providers = yield* Ref.make<ReadonlyArray<ServerProvider>>([]);
+      const launched = yield* Ref.make<ReadonlyArray<ThreadLaunchService.ThreadLaunchInput>>([]);
+      yield* Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        const { task } = yield* service.upsert(taskInput());
+        yield* sql`UPDATE scheduled_tasks SET model_selection_json = ${JSON.stringify({ ...stored, scheduledTaskRouting: "bad" })}`;
+        const { tasks } = yield* service.list();
+        assert.isUndefined(tasks.find((entry) => entry.id === task.id)?.modelRouting);
+        const saved = yield* service.upsert(taskInput({ title: "Renamed" }));
+        assert.equal(saved.task.title, "Renamed");
+        assert.deepEqual(saved.task.modelSelection, stored);
+      }).pipe(Effect.provide(serviceLayer(providers, launched)));
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+});

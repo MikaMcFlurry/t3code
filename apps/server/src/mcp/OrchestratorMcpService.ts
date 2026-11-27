@@ -288,6 +288,9 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+const ROUTING_NEEDS_NEW_THREADS =
+  "modelRouting picks the model for runs that start a new thread, so it cannot be combined with bindToCurrentThread or freshSession. Pass modelRouting: null to keep runs in one thread.";
+
 function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): OrchestratorMcpScheduledTask {
   return {
     scheduledTaskId: task.id,
@@ -307,6 +310,7 @@ function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): Orchestrato
       ? {}
       : { webhookSignature: task.webhook.hasSecret ? "set" : "none" }),
     ...(task.blockedByPolicy === undefined ? {} : { blockedByPolicy: task.blockedByPolicy }),
+    ...(task.modelRouting === undefined ? {} : { modelRouting: task.modelRouting }),
   };
 }
 
@@ -2436,9 +2440,14 @@ const make = Effect.gen(function* () {
       const projectId = yield* resolveProjectTarget(parent, input.projectId);
       yield* assertLiveCallerForOtherProject(scope, parent, projectId);
       const project = yield* requireProject(projectId);
+      const routed = input.modelRouting != null;
+      if (routed && (input.bindToCurrentThread === true || input.freshSession === true)) {
+        return yield* failure("invalid_request", ROUTING_NEEDS_NEW_THREADS);
+      }
+      // A routed task starts a thread per run by default; a bound one would never route.
       const bindToCurrentThread =
         input.bindToCurrentThread ??
-        (parent !== undefined && parent.thread.projectId === projectId);
+        (!routed && parent !== undefined && parent.thread.projectId === projectId);
       if (bindToCurrentThread && (parent === undefined || parent.thread.projectId !== projectId)) {
         return yield* failure(
           "invalid_request",
@@ -2478,6 +2487,8 @@ const make = Effect.gen(function* () {
             : "new_thread",
         workspaceStrategy: yield* scheduledTaskWorkspaceStrategy(bindToCurrentThread, projectId),
         modelSelection,
+        // A replayed create keeps the routing it set unless this call names one.
+        ...(input.modelRouting === undefined ? {} : { modelRouting: input.modelRouting }),
         runtimeMode: limits.runtimeMode,
         interactionMode: limits.interactionMode,
         createdBy: "agent",
@@ -2568,6 +2579,23 @@ const make = Effect.gen(function* () {
           (threadId === null) === (existing.threadId === null)
             ? existing.workspaceStrategy
             : yield* scheduledTaskWorkspaceStrategy(threadId !== null, existing.projectId);
+        const threadMode =
+          input.freshSession === undefined && input.bindToCurrentThread === undefined
+            ? scheduledTaskThreadMode(existing)
+            : (input.freshSession ??
+                (input.bindToCurrentThread !== false &&
+                  scheduledTaskThreadMode(existing) === "fresh_session"))
+              ? "fresh_session"
+              : threadId === null &&
+                  (input.bindToCurrentThread === false ||
+                    scheduledTaskThreadMode(existing) === "new_thread")
+                ? "new_thread"
+                : "continue";
+        const routing =
+          input.modelRouting === undefined ? existing.modelRouting : input.modelRouting;
+        if (routing != null && threadMode !== "new_thread") {
+          return yield* failure("invalid_request", ROUTING_NEEDS_NEW_THREADS);
+        }
         const upsertInput: ScheduledTaskUpsertInput = {
           id: existing.id,
           requireExisting: true,
@@ -2577,20 +2605,10 @@ const make = Effect.gen(function* () {
           schedule: input.schedule ?? existing.schedule,
           projectId: existing.projectId,
           threadId,
-          threadMode:
-            input.freshSession === undefined && input.bindToCurrentThread === undefined
-              ? scheduledTaskThreadMode(existing)
-              : (input.freshSession ??
-                  (input.bindToCurrentThread !== false &&
-                    scheduledTaskThreadMode(existing) === "fresh_session"))
-                ? "fresh_session"
-                : threadId === null &&
-                    (input.bindToCurrentThread === false ||
-                      scheduledTaskThreadMode(existing) === "new_thread")
-                  ? "new_thread"
-                  : "continue",
+          threadMode,
           workspaceStrategy,
           modelSelection: existing.modelSelection,
+          ...(input.modelRouting === undefined ? {} : { modelRouting: input.modelRouting }),
           runtimeMode: existing.runtimeMode,
           interactionMode: existing.interactionMode,
           createdBy: existing.createdBy,

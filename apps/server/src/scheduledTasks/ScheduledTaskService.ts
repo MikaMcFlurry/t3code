@@ -6,6 +6,7 @@ import {
   ScheduledTask,
   ScheduledTaskError,
   ScheduledTaskId,
+  ScheduledTaskModelRouting,
   ThreadId,
   ScheduledTaskWebhookDeliveryId,
   type ScheduledTaskDeleteInput,
@@ -51,6 +52,13 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import {
+  parseRoutineRoutingDirective,
+  resolveRoutineModelSelection,
+  type RoutineRoutingDirective,
+} from "@t3tools/shared/routineModelRouting";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as Metrics from "../observability/Metrics.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -202,6 +210,26 @@ const decodeWorkspaceStrategyJson = Schema.decodeUnknownEffect(
 const decodeModelSelectionJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(ScheduledTask.fields.modelSelection),
 );
+/**
+ * A task's own model routing rides in `model_selection_json` under this key rather than in a
+ * column of its own: ModelSelection decoding drops unknown keys, so builds without it read the
+ * row unchanged, and no migration id can collide with upstream's.
+ */
+const MODEL_ROUTING_KEY = "scheduledTaskRouting";
+const decodeModelRoutingJson = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({ [MODEL_ROUTING_KEY]: Schema.optional(ScheduledTaskModelRouting) }),
+  ),
+);
+/** A malformed routing value reads as none, so it cannot make the task unreadable. */
+const modelRoutingFromJson = (json: string): ScheduledTaskModelRouting | undefined =>
+  Option.getOrUndefined(decodeModelRoutingJson(json))?.[MODEL_ROUTING_KEY];
+const encodeModelSelectionJson = (task: ScheduledTask) =>
+  JSON.stringify(
+    task.modelRouting === undefined
+      ? task.modelSelection
+      : { ...task.modelSelection, [MODEL_ROUTING_KEY]: task.modelRouting },
+  );
 const HeadersJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.String));
 const MissingFieldsJson = Schema.fromJsonString(Schema.Array(Schema.String));
 const decodeHeadersJson = Schema.decodeUnknownOption(HeadersJson);
@@ -413,6 +441,7 @@ const decodeRow = Effect.fnUntraced(
     const webhook = schedule.type === "webhook" ? webhookEndpoint(row, origin) : undefined;
     const workspaceStrategy = yield* decodeWorkspaceStrategyJson(row.workspace_strategy_json);
     const modelSelection = yield* decodeModelSelectionJson(row.model_selection_json);
+    const modelRouting = modelRoutingFromJson(row.model_selection_json);
     return yield* decodeTask({
       id: row.task_id,
       title: row.title,
@@ -424,6 +453,7 @@ const decodeRow = Effect.fnUntraced(
       threadMode: row.thread_mode,
       workspaceStrategy,
       modelSelection,
+      ...(modelRouting === undefined ? {} : { modelRouting }),
       runtimeMode: row.runtime_mode,
       interactionMode: row.interaction_mode,
       createdBy: row.created_by,
@@ -508,6 +538,47 @@ export const layer = Layer.effect(
       webhookPolicyBlock !== undefined && task.schedule.type === "webhook"
         ? { ...task, blockedByPolicy: webhookPolicyBlock }
         : task;
+    const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
+    const providerRegistry = yield* Effect.serviceOption(ProviderRegistry.ProviderRegistry);
+    /**
+     * New-thread runs: a webhook's `t3` routing, the task's own list, then the automatic account
+     * setting, within the allowed models. The stored model runs only when settings or providers
+     * cannot be read; a run no allowed model can take fails with the reason instead of starting.
+     */
+    const routedModelSelection = Effect.fn("ScheduledTaskService.routedModelSelection")(function* (
+      task: ScheduledTask,
+      prompt: string,
+      routing: RoutineRoutingDirective | null,
+    ) {
+      if (Option.isNone(serverSettings) || Option.isNone(providerRegistry)) {
+        return task.modelSelection;
+      }
+      const inputs = yield* Effect.all({
+        providers: providerRegistry.value.getProviders,
+        settings: serverSettings.value.getSettings,
+        now: DateTime.now,
+      }).pipe(Effect.option);
+      if (Option.isNone(inputs)) return task.modelSelection;
+      const route = resolveRoutineModelSelection({
+        stored: task.modelSelection,
+        taskRouting: task.modelRouting,
+        prompt,
+        directive: routing,
+        providers: inputs.value.providers,
+        settings: inputs.value.settings,
+        projectId: task.projectId,
+        now: DateTime.toEpochMillis(inputs.value.now),
+      });
+      yield* Effect.annotateCurrentSpan({ "scheduled_task.model_route": route.reason });
+      if (!route.startable) {
+        yield* Effect.logWarning("Scheduled task run not started: no allowed model", {
+          taskId: task.id,
+          code: route.code,
+        });
+        return yield* taskError(route.reason, { taskId: task.id });
+      }
+      return route.selection;
+    });
     const webhookPermits = yield* Ref.make<ReadonlyMap<ScheduledTaskId, Semaphore.Semaphore>>(
       new Map(),
     );
@@ -657,6 +728,8 @@ export const layer = Layer.effect(
         readonly secret: string | null;
         readonly secretChanged: boolean;
       },
+      /** The save left routing out: keep whatever the row holds when it writes. */
+      keepRouting: boolean,
     ) =>
       sql<{ task_id: string }>`
         INSERT INTO scheduled_tasks (
@@ -694,7 +767,7 @@ export const layer = Layer.effect(
           ${task.threadId},
           ${scheduledTaskThreadMode(task)},
           ${JSON.stringify(task.workspaceStrategy)},
-          ${JSON.stringify(task.modelSelection)},
+          ${encodeModelSelectionJson(task)},
           ${task.runtimeMode},
           ${task.interactionMode},
           ${task.createdBy},
@@ -726,7 +799,17 @@ export const layer = Layer.effect(
           END,
           thread_mode = excluded.thread_mode,
           workspace_strategy_json = excluded.workspace_strategy_json,
-          model_selection_json = excluded.model_selection_json,
+          -- A save that left the routing out keeps the row's, even one saved while it ran.
+          model_selection_json = CASE
+            WHEN ${keepRouting ? 0 : 1} = 1 THEN excluded.model_selection_json
+            WHEN json_type(scheduled_tasks.model_selection_json, ${`$.${MODEL_ROUTING_KEY}`}) = 'object'
+            THEN json_set(
+              excluded.model_selection_json,
+              ${`$.${MODEL_ROUTING_KEY}`},
+              json(json_extract(scheduled_tasks.model_selection_json, ${`$.${MODEL_ROUTING_KEY}`}))
+            )
+            ELSE json_remove(excluded.model_selection_json, ${`$.${MODEL_ROUTING_KEY}`})
+          END,
           runtime_mode = excluded.runtime_mode,
           interaction_mode = excluded.interaction_mode,
           creation_source = excluded.creation_source,
@@ -979,6 +1062,7 @@ export const layer = Layer.effect(
         readonly deliveryId: string;
         readonly prompt: string;
         readonly dispatched: Ref.Ref<boolean>;
+        readonly routing: RoutineRoutingDirective | null;
       },
     ) {
       // Read before reserving: nothing between the reservation and its release may fail.
@@ -1123,30 +1207,32 @@ export const layer = Layer.effect(
         const result =
           active.threadId === null
             ? yield* Effect.exit(
-                threadLaunch
-                  .launch({
-                    commandId,
-                    projectId: active.projectId,
-                    title: active.title,
-                    modelSelection: active.modelSelection,
-                    runtimeMode: active.runtimeMode,
-                    interactionMode: active.interactionMode,
-                    workspaceStrategy: active.workspaceStrategy,
-                    initialMessage: {
-                      messageId,
-                      scheduledTaskId: active.id,
-                      text: prompt,
-                      attachments: [],
-                    },
-                    createdBy: active.createdBy,
-                    creationSource: active.creationSource,
-                  })
-                  .pipe(
-                    Effect.map((launched) => launched.threadId),
-                    Effect.tap((threadId) =>
-                      threadMode === "new_thread" ? Effect.void : bindThread(active, threadId),
-                    ),
+                // Inside the exit: a run no allowed model can take is recorded as failed.
+                routedModelSelection(active, prompt, webhook?.routing ?? null).pipe(
+                  Effect.flatMap((modelSelection) =>
+                    threadLaunch.launch({
+                      commandId,
+                      projectId: active.projectId,
+                      title: active.title,
+                      modelSelection,
+                      runtimeMode: active.runtimeMode,
+                      interactionMode: active.interactionMode,
+                      workspaceStrategy: active.workspaceStrategy,
+                      initialMessage: {
+                        messageId,
+                        scheduledTaskId: active.id,
+                        text: prompt,
+                        attachments: [],
+                      },
+                      createdBy: active.createdBy,
+                      creationSource: active.creationSource,
+                    }),
                   ),
+                  Effect.map((launched) => launched.threadId),
+                  Effect.tap((threadId) =>
+                    threadMode === "new_thread" ? Effect.void : bindThread(active, threadId),
+                  ),
+                ),
               )
             : yield* Effect.exit(
                 // The stored selection only seeds fresh threads. A bound run
@@ -1492,6 +1578,15 @@ export const layer = Layer.effect(
       // of silently resetting an existing row.
       const existingTask = yield* findTask(id);
       const threadMode = resolveThreadMode(input, existingTask);
+      // Routing picks the model of a run that starts a thread, so only new-thread tasks keep it.
+      // Checked before the save consumes a webhook secret.
+      const routesRuns = threadMode === "new_thread";
+      if (!routesRuns && input.modelRouting != null) {
+        return yield* taskError(
+          "Model routing applies only to tasks that start a new thread for each run.",
+          { taskId: id },
+        );
+      }
       const keptThreadId =
         input.threadId ?? (input.unbindThread === true ? null : (existingTask?.threadId ?? null));
       // A bound thread belongs to its project, so moving the task leaves it for a new one.
@@ -1590,6 +1685,12 @@ export const layer = Layer.effect(
           (yield* threadLaunch.isNonGitProject(input.projectId)))
           ? { type: "root" }
           : input.workspaceStrategy;
+      // Omitted keeps the stored routing, so clients that predate it can re-save the task.
+      const modelRouting = !routesRuns
+        ? undefined
+        : input.modelRouting === undefined
+          ? existingTask?.modelRouting
+          : (input.modelRouting ?? undefined);
       const scheduleUnchanged =
         existingTask !== null &&
         existingTask.enabled === input.enabled &&
@@ -1607,6 +1708,7 @@ export const layer = Layer.effect(
         threadMode,
         workspaceStrategy,
         modelSelection: input.modelSelection,
+        ...(modelRouting === undefined ? {} : { modelRouting }),
         runtimeMode: input.runtimeMode,
         interactionMode: input.interactionMode,
         createdBy: existingTask?.createdBy ?? input.createdBy ?? "user",
@@ -1627,6 +1729,7 @@ export const layer = Layer.effect(
         scheduleUnchanged ? existingTask.schedule : null,
         threadId === null && input.unbindThread === true ? (existingTask?.threadId ?? null) : null,
         webhook,
+        routesRuns && input.modelRouting === undefined,
       );
       yield* notifyChanged;
       return { task: (yield* findTask(id)) ?? task };
@@ -2086,6 +2189,7 @@ export const layer = Layer.effect(
       task: ScheduledTask,
       deliveryId: string,
       prompt: string,
+      routing: RoutineRoutingDirective | null,
     ) {
       const runOutcome = (outcome: "started" | "skipped" | "failed") =>
         Effect.all([
@@ -2093,7 +2197,7 @@ export const layer = Layer.effect(
           Metrics.increment(Metrics.webhookRunsTotal, { outcome }),
         ]);
       const dispatched = yield* Ref.make(false);
-      return yield* runTask(task, "webhook", { deliveryId, prompt, dispatched }).pipe(
+      return yield* runTask(task, "webhook", { deliveryId, prompt, dispatched, routing }).pipe(
         Effect.flatMap(({ dispatchFailed }) =>
           dispatchFailed
             ? runOutcome("failed").pipe(
@@ -2550,11 +2654,12 @@ export const layer = Layer.effect(
           }
           yield* observe("accepted");
           const permit = yield* webhookPermit(task.id);
-          yield* runWebhookDelivery(task, deliveryId, rendered.prompt).pipe(
-            permit.withPermits(1),
-            Effect.ensuring(release),
-            Effect.forkIn(serviceScope),
-          );
+          yield* runWebhookDelivery(
+            task,
+            deliveryId,
+            rendered.prompt,
+            parseRoutineRoutingDirective(request.bodyText),
+          ).pipe(permit.withPermits(1), Effect.ensuring(release), Effect.forkIn(serviceScope));
           // Dispatch owns the accepted delivery now; retries must keep its claim.
           claimAcquired = false;
           return { _tag: "accepted" as const, deliveryId, outcome: "accepted" as const };
@@ -2628,6 +2733,7 @@ export const layer = Layer.effect(
                   task,
                   taskJson: task === snapshot ? null : yield* encodePendingTask(task),
                   rendered: renderWebhookPrompt(task.prompt, request, frameId),
+                  routing: parseRoutineRoutingDirective(request.bodyText),
                 };
               }).pipe(Effect.exit);
               if (Exit.isFailure(prepared)) {
@@ -2641,7 +2747,7 @@ export const layer = Layer.effect(
                 yield* remove;
                 continue;
               }
-              const { task, taskJson, rendered } = prepared.value;
+              const { task, taskJson, rendered, routing } = prepared.value;
               if (rendered.prompt.trim().length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS) {
                 yield* markDeliveryFailed(entry.delivery_id, PROMPT_TOO_LONG);
                 yield* releaseFailedDelivery(entry.delivery_id);
@@ -2649,7 +2755,8 @@ export const layer = Layer.effect(
                 if (taskJson !== null)
                   yield* sql`UPDATE scheduled_task_webhook_pending SET task_json = ${taskJson} WHERE delivery_id = ${entry.delivery_id}`;
                 yield* sql`UPDATE scheduled_task_webhook_deliveries SET outcome = 'accepted', error = NULL, rendered_prompt = ${loggedWebhookPrompt(rendered.prompt)}, missing_fields_json = ${encodeMissingFieldsJson(rendered.missing)} WHERE delivery_id = ${entry.delivery_id}`;
-                if (!(yield* runWebhookDelivery(task, entry.delivery_id, rendered.prompt))) return;
+                if (!(yield* runWebhookDelivery(task, entry.delivery_id, rendered.prompt, routing)))
+                  return;
               }
               yield* remove;
             }

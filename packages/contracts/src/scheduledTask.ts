@@ -17,6 +17,9 @@ import {
   OrchestrationV2ThreadLaunchWorkspaceStrategy,
 } from "./orchestrationV2.ts";
 import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
+import { ScheduledTaskModelRouting } from "./scheduledTaskRouting.ts";
+
+export * from "./scheduledTaskRouting.ts";
 
 const TimeOfDay = TrimmedNonEmptyString.check(
   Schema.isPattern(/^([01]?\d|2[0-3]):([0-5]\d)$/),
@@ -249,6 +252,8 @@ export const ScheduledTask = Schema.Struct({
   threadMode: Schema.optional(ScheduledTaskThreadMode),
   workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
   modelSelection: ModelSelection,
+  /** Absent: runs start on `modelSelection`, routed only by the global settings. */
+  modelRouting: Schema.optionalKey(ScheduledTaskModelRouting),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   createdBy: OrchestrationV2Actor,
@@ -296,6 +301,8 @@ export const ScheduledTaskUpsertInput = Schema.Struct({
   threadMode: Schema.optional(ScheduledTaskThreadMode),
   workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
   modelSelection: ModelSelection,
+  /** Omitted: keep the stored routing, so clients that predate it can re-save. null clears it. */
+  modelRouting: Schema.optional(Schema.NullOr(ScheduledTaskModelRouting)),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   createdBy: Schema.optional(OrchestrationV2Actor),

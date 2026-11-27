@@ -4359,6 +4359,97 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
     );
 
+    it.effect(
+      "passes a task's model routing through on create, and keeps or clears it on update",
+      () =>
+        Effect.gen(function* () {
+          const routing = { candidates: ["claude-2", "driver:codex"], minUsageLeftPercent: 20 };
+          const inputs = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+          const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+            Effect.provide(
+              service(
+                masterRepository,
+                yield* Ref.make<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>([]),
+                existing,
+                inputs,
+              ),
+            ),
+          );
+          yield* mcp.scheduleTask(client, {
+            projectId,
+            prompt: "Check the build",
+            schedule,
+            modelRouting: routing,
+          });
+          yield* mcp.updateScheduledTask(client, {
+            scheduledTaskId: existing.id,
+            title: "Renamed",
+          });
+          yield* mcp.updateScheduledTask(client, {
+            scheduledTaskId: existing.id,
+            modelRouting: null,
+          });
+          assert.deepEqual(
+            (yield* Ref.get(inputs)).map((input) =>
+              "modelRouting" in input ? input.modelRouting : "kept",
+            ),
+            [routing, "kept", null],
+          );
+        }),
+    );
+
+    it.effect("refuses model routing on tasks whose runs stay in one thread", () =>
+      Effect.gen(function* () {
+        const routing = { candidates: ["claude-2"] };
+        const inputs = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const withTask = (task: ScheduledTask) =>
+          OrchestratorMcpService.OrchestratorMcpService.pipe(
+            Effect.provide(
+              service(
+                masterRepository,
+                Ref.makeUnsafe<ReadonlyArray<ScheduledTask["workspaceStrategy"]>>([]),
+                task,
+                inputs,
+              ),
+            ),
+          );
+        const mcp = yield* withTask(existing);
+        const created = yield* mcp
+          .scheduleTask(client, {
+            projectId,
+            prompt: "Check the build",
+            schedule,
+            freshSession: true,
+            modelRouting: routing,
+          })
+          .pipe(Effect.flip);
+        assert.equal(created.code, "invalid_request");
+        const added = yield* mcp
+          .updateScheduledTask(client, {
+            scheduledTaskId: existing.id,
+            freshSession: true,
+            modelRouting: routing,
+          })
+          .pipe(Effect.flip);
+        assert.equal(added.code, "invalid_request");
+        // A routed task cannot move to one thread without dropping its routing.
+        const routed = yield* withTask({ ...existing, modelRouting: routing });
+        const moved = yield* routed
+          .updateScheduledTask(client, { scheduledTaskId: existing.id, freshSession: true })
+          .pipe(Effect.flip);
+        assert.include(moved.message, "modelRouting: null");
+        yield* routed.updateScheduledTask(client, {
+          scheduledTaskId: existing.id,
+          freshSession: true,
+          modelRouting: null,
+        });
+        assert.deepEqual(
+          (yield* Ref.get(inputs)).map((input) => [input.threadMode, input.modelRouting]),
+          [["fresh_session", null]],
+        );
+      }),
+    );
+
     it.effect("keeps one thread when fresh sessions are turned off before the first run", () =>
       Effect.gen(function* () {
         const inputs = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);

@@ -25,6 +25,10 @@ import {
   ScheduledTaskSchedule,
   ScheduledTaskUpsertSchedule,
 } from "./scheduledTask.ts";
+import {
+  ScheduledTaskModelRouting,
+  ScheduledTaskModelRoutingResult,
+} from "./scheduledTaskRouting.ts";
 import { ProviderInteractionMode, ProviderRequestKind, RuntimeMode } from "./providerPolicy.ts";
 import { PullRequestState } from "./pullRequest.ts";
 import {
@@ -731,7 +735,7 @@ export const OrchestratorMcpScheduleTaskInput = Schema.Struct({
   bindToCurrentThread: Schema.optional(
     Schema.Boolean.annotate({
       description:
-        "Post here, else new thread per run. Unset: true in own project, else false; updates keep it.",
+        "Post here, else new thread per run. Unset: true in own project without modelRouting, else false; updates keep it.",
     }),
   ),
   freshSession: Schema.optional(
@@ -740,6 +744,9 @@ export const OrchestratorMcpScheduleTaskInput = Schema.Struct({
         "Runs share one thread but each starts a fresh session. Unbound: the first run makes the thread.",
     }),
   ),
+  modelRouting: Schema.optional(Schema.NullOr(ScheduledTaskModelRouting)).annotate({
+    description: "Models for new-thread runs; first with enough usage wins. Update: null clears.",
+  }),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
 });
 export type OrchestratorMcpScheduleTaskInput = typeof OrchestratorMcpScheduleTaskInput.Type;
@@ -773,6 +780,7 @@ export const OrchestratorMcpScheduledTask = Schema.Struct({
   blockedByPolicy: Schema.optional(Schema.String).annotate({
     description: "Present when an administrator's policy stops this task from running.",
   }),
+  modelRouting: Schema.optional(ScheduledTaskModelRoutingResult),
 });
 export type OrchestratorMcpScheduledTask = typeof OrchestratorMcpScheduledTask.Type;
 
@@ -806,6 +814,7 @@ export const OrchestratorMcpUpdateScheduledTaskInput = Schema.Struct({
   enabled: Schema.optional(Schema.Boolean),
   bindToCurrentThread: Schema.optional(Schema.Boolean),
   freshSession: Schema.optional(Schema.Boolean),
+  modelRouting: Schema.optional(Schema.NullOr(ScheduledTaskModelRouting)),
 });
 export type OrchestratorMcpUpdateScheduledTaskInput =
   typeof OrchestratorMcpUpdateScheduledTaskInput.Type;

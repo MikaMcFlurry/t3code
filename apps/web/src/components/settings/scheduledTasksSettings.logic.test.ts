@@ -23,6 +23,7 @@ import {
   matchesScheduledTaskScope,
   scheduleFromDraft,
   scheduleLabel,
+  modelRoutingFromDraft,
   taskToDraft,
   unbindDraftFromThread,
 } from "./scheduledTasksSettings.logic";
@@ -469,4 +470,68 @@ it("shows schedule times in the Time format setting", () => {
     }).format(runAt);
     expect(scheduleLabel(once, hour12 ? "12-hour" : "24-hour")).toBe(`Once, ${dateTime}`);
   }
+});
+
+describe("modelRoutingFromDraft", () => {
+  const draft = (
+    routingCandidates: string,
+    routingMinUsageLeft = "",
+    saved: { readonly candidates?: string; readonly minUsageLeft?: string } = {},
+  ) => ({
+    routingCandidates,
+    routingMinUsageLeft,
+    savedRoutingCandidates: saved.candidates ?? "",
+    savedRoutingMinUsageLeft: saved.minUsageLeft ?? "",
+  });
+
+  it("reads the entries in order and the threshold", () => {
+    expect(modelRoutingFromDraft(draft(" claude-2,\ndriver:codex ,, codex-1/gpt-6", "20"))).toEqual(
+      {
+        modelRouting: {
+          candidates: ["claude-2", "driver:codex", "codex-1/gpt-6"],
+          minUsageLeftPercent: 20,
+        },
+      },
+    );
+    expect(modelRoutingFromDraft(draft("claude-2"))).toEqual({
+      modelRouting: { candidates: ["claude-2"] },
+    });
+  });
+
+  it("sends nothing while the fields are as the form opened them, and null to clear", () => {
+    expect(modelRoutingFromDraft(draft(""))).toEqual({ modelRouting: undefined });
+    const saved = { candidates: "claude-2, codex", minUsageLeft: "20" };
+    expect(modelRoutingFromDraft(draft("claude-2,codex", " 20", saved))).toEqual({
+      modelRouting: undefined,
+    });
+    expect(modelRoutingFromDraft(draft(" , ", "20", saved))).toEqual({ modelRouting: null });
+    expect(modelRoutingFromDraft(draft("claude-2, codex", "30", saved))).toEqual({
+      modelRouting: { candidates: ["claude-2", "codex"], minUsageLeftPercent: 30 },
+    });
+  });
+
+  it("refuses a threshold outside 0 to 100 or not a whole number", () => {
+    for (const percent of ["-1", "101", "12.5", "lots"]) {
+      expect(modelRoutingFromDraft(draft("claude-2", percent))).toEqual({
+        error: "invalid-percent",
+      });
+    }
+    expect(
+      modelRoutingFromDraft(draft(Array.from({ length: 17 }, (_, i) => `a${i}`).join(","))),
+    ).toEqual({ error: "too-many" });
+  });
+
+  it("opens a task's routing in the form", () => {
+    const routed = taskToDraft({
+      ...legacyTask,
+      modelRouting: { candidates: ["claude-2", "driver:codex"], minUsageLeftPercent: 20 },
+    });
+    expect(routed).toMatchObject({
+      routingCandidates: "claude-2, driver:codex",
+      routingMinUsageLeft: "20",
+      savedRoutingCandidates: "claude-2, driver:codex",
+    });
+    expect(modelRoutingFromDraft(routed)).toEqual({ modelRouting: undefined });
+    expect(taskToDraft(legacyTask)).toMatchObject({ routingCandidates: "" });
+  });
 });

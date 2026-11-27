@@ -1,10 +1,12 @@
 import { isListedThreadLineage, isWebhookDedupeTemplate } from "@t3tools/contracts";
 import {
   EnvironmentId,
+  MAX_SCHEDULED_TASK_ROUTING_CANDIDATES,
   MAX_WEBHOOK_DELIVERY_AGE_MINUTES,
   type ProjectId,
   ScheduledTaskId,
   type ScheduledTask,
+  type ScheduledTaskModelRouting,
   type ScheduledTaskSchedule,
   type ScheduledTaskThreadMode,
   type ScheduledTaskUpsertSchedule,
@@ -137,6 +139,13 @@ export interface DraftState {
   readonly startFromOrigin: boolean;
   readonly existingWorktreePath: string;
   readonly modelSelection: ModelSelection | null;
+  /** Model priority entries as typed, comma- or newline-separated; empty turns routing off. */
+  readonly routingCandidates: string;
+  /** Minimum usage left in percent as typed; empty means any usage left. */
+  readonly routingMinUsageLeft: string;
+  /** The two fields as the form opened them: a save sends routing only once they change. */
+  readonly savedRoutingCandidates: string;
+  readonly savedRoutingMinUsageLeft: string;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
   readonly signatureEnabled: boolean;
@@ -343,6 +352,7 @@ export function taskToDraft(task: ScheduledTask): DraftState {
         ? task.workspaceStrategy.worktreePath
         : "",
     modelSelection: task.modelSelection,
+    ...routingDraft(task.modelRouting),
     runtimeMode: task.runtimeMode,
     interactionMode: task.interactionMode,
     ...(schedule.type === "webhook" && schedule.signature !== null
@@ -476,4 +486,58 @@ export function defaultScheduledTaskProjectId<
       (scopedToProject ? scopedProjects[0] : undefined)
     )?.id ?? ""
   );
+}
+
+function routingDraft(routing: ScheduledTaskModelRouting | undefined) {
+  const candidates = routing?.candidates.join(", ") ?? "";
+  const minUsageLeft =
+    routing?.minUsageLeftPercent === undefined ? "" : String(routing.minUsageLeftPercent);
+  return {
+    routingCandidates: candidates,
+    routingMinUsageLeft: minUsageLeft,
+    savedRoutingCandidates: candidates,
+    savedRoutingMinUsageLeft: minUsageLeft,
+  };
+}
+
+export const EMPTY_ROUTING_DRAFT = routingDraft(undefined);
+
+type RoutingDraft = Pick<
+  DraftState,
+  | "routingCandidates"
+  | "routingMinUsageLeft"
+  | "savedRoutingCandidates"
+  | "savedRoutingMinUsageLeft"
+>;
+
+const routingEntries = (text: string) =>
+  text
+    .split(/[,\n]/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+
+/**
+ * The `modelRouting` a save sends: the routing, null to clear one, or undefined when the fields
+ * are as the form opened them, so a save from a stale form keeps routing saved elsewhere since.
+ * `invalid-percent` and `too-many` are reported by the form.
+ */
+export function modelRoutingFromDraft(
+  draft: RoutingDraft,
+):
+  | { readonly modelRouting: ScheduledTaskModelRouting | null | undefined }
+  | { readonly error: "invalid-percent" | "too-many" } {
+  const candidates = routingEntries(draft.routingCandidates);
+  const unchanged =
+    candidates.join(",") === routingEntries(draft.savedRoutingCandidates).join(",") &&
+    draft.routingMinUsageLeft.trim() === draft.savedRoutingMinUsageLeft.trim();
+  if (unchanged) return { modelRouting: undefined };
+  if (candidates.length === 0) return { modelRouting: null };
+  if (candidates.length > MAX_SCHEDULED_TASK_ROUTING_CANDIDATES) return { error: "too-many" };
+  const percentText = draft.routingMinUsageLeft.trim();
+  if (percentText === "") return { modelRouting: { candidates } };
+  const percent = Number(percentText);
+  if (!Number.isInteger(percent) || percent < 0 || percent > 100) {
+    return { error: "invalid-percent" };
+  }
+  return { modelRouting: { candidates, minUsageLeftPercent: percent } };
 }
