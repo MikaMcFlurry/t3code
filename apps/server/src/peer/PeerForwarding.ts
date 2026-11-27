@@ -53,6 +53,7 @@ export class PeerForwarding extends Context.Service<
       tool: T,
       environmentId: EnvironmentId,
       params: Tool.Parameters<T>,
+      options?: { readonly requires?: PeerMcpClient.PeerCapabilityRequirement },
     ) => Effect.Effect<Tool.Success<T>, OrchestratorMcpFailure>;
     /** `t3_thread_read` there. */
     readonly readThread: (
@@ -172,6 +173,7 @@ const make = Effect.gen(function* () {
     success: Schema.Top,
     environmentId: EnvironmentId,
     params: unknown,
+    requires?: PeerMcpClient.PeerCapabilityRequirement,
   ) {
     const { caller, limits } = yield* forwardingCaller(scope);
     const encoded = (yield* Schema.encodeUnknownEffect(parameters as Schema.Encoder<unknown>)(
@@ -205,6 +207,7 @@ const make = Effect.gen(function* () {
       limits,
       ...(sender === undefined ? {} : { sender }),
       success: success as Schema.Decoder<A>,
+      ...(requires === undefined ? {} : { requires }),
     });
   });
 
@@ -263,11 +266,19 @@ const make = Effect.gen(function* () {
       : undefined;
   };
 
-  const call: PeerForwarding["Service"]["call"] = (scope, tool, environmentId, params) => {
+  const call: PeerForwarding["Service"]["call"] = (scope, tool, environmentId, params, options) => {
     const forwardTool = (
       args: unknown,
     ): Effect.Effect<Tool.Success<typeof tool>, OrchestratorMcpFailure> =>
-      forward(scope, tool.name, tool.parametersSchema, tool.successSchema, environmentId, args);
+      forward(
+        scope,
+        tool.name,
+        tool.parametersSchema,
+        tool.successSchema,
+        environmentId,
+        args,
+        options?.requires,
+      );
     const newest = newestPage(tool.name, params);
     const forwarded: Effect.Effect<
       Tool.Success<typeof tool>,

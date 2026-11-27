@@ -168,6 +168,18 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
     /** Set by a linked environment whose workflow run this thread is a step of; ignored otherwise. */
     workflowRun: Schema.optional(OrchestrationV2WorkflowOrigin),
+    /**
+     * Set by a linked environment's delegated task (capability `pinnedWorktreeLaunch`): the base
+     * resolves to one commit before launch. `fetch` says where a missing commit was published,
+     * a branch of the repository `repository` names, fetched only via a remote here naming it.
+     */
+    pinBase: Schema.optional(
+      Schema.Struct({
+        fetch: Schema.optional(
+          Schema.Struct({ ref: TrimmedNonEmptyString, repository: TrimmedNonEmptyString }),
+        ),
+      }),
+    ),
   }),
   success: Schema.Struct({
     threadId: ThreadId,
