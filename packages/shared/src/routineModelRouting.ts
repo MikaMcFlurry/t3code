@@ -140,11 +140,11 @@ function forModel(provider: ServerProvider, model: string): ServerProvider {
  * spending every window with at most this much left stop it?" 100 if none applies; null if no data.
  */
 function modelUsageLeft(account: ServerProvider, now: number, model: string) {
-  if ((account.usageLimits?.windows ?? []).length === 0) return null;
   const provider = forModel(account, model);
   const limits = provider.usageLimits;
   const windows = limits?.windows ?? [];
-  if (!limits) return null;
+  // Windows that only limit other models say nothing about this one.
+  if (!limits || windows.length === 0) return null;
   const levels = [...new Set(windows.map((window) => windowLeft(window, now)))].sort(
     (a, b) => a - b,
   );

@@ -541,8 +541,8 @@ export const layer = Layer.effect(
     const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
     const providerRegistry = yield* Effect.serviceOption(ProviderRegistry.ProviderRegistry);
     /**
-     * New-thread runs: a webhook's `t3` routing, the task's own priority list, then the automatic
-     * account setting, all limited to the allowed models. Falls back to the stored model only when the settings or providers
+     * New-thread runs: a webhook's `t3` routing, the task's own list, then the automatic account
+     * setting, within the allowed models. The stored model runs only when settings or providers
      * cannot be read; a run no allowed model can take fails with the reason instead of starting.
      */
     const routedModelSelection = Effect.fn("ScheduledTaskService.routedModelSelection")(function* (
@@ -802,13 +802,13 @@ export const layer = Layer.effect(
           -- A save that left the routing out keeps the row's, even one saved while it ran.
           model_selection_json = CASE
             WHEN ${keepRouting ? 0 : 1} = 1 THEN excluded.model_selection_json
-            WHEN json_type(scheduled_tasks.model_selection_json, ${`$.${MODEL_ROUTING_KEY}`}) IS NULL
-            THEN json_remove(excluded.model_selection_json, ${`$.${MODEL_ROUTING_KEY}`})
-            ELSE json_set(
+            WHEN json_type(scheduled_tasks.model_selection_json, ${`$.${MODEL_ROUTING_KEY}`}) = 'object'
+            THEN json_set(
               excluded.model_selection_json,
               ${`$.${MODEL_ROUTING_KEY}`},
               json(json_extract(scheduled_tasks.model_selection_json, ${`$.${MODEL_ROUTING_KEY}`}))
             )
+            ELSE json_remove(excluded.model_selection_json, ${`$.${MODEL_ROUTING_KEY}`})
           END,
           runtime_mode = excluded.runtime_mode,
           interaction_mode = excluded.interaction_mode,
@@ -1578,6 +1578,15 @@ export const layer = Layer.effect(
       // of silently resetting an existing row.
       const existingTask = yield* findTask(id);
       const threadMode = resolveThreadMode(input, existingTask);
+      // Routing picks the model of a run that starts a thread, so only new-thread tasks keep it.
+      // Checked before the save consumes a webhook secret.
+      const routesRuns = threadMode === "new_thread";
+      if (!routesRuns && input.modelRouting != null) {
+        return yield* taskError(
+          "Model routing applies only to tasks that start a new thread for each run.",
+          { taskId: id },
+        );
+      }
       const keptThreadId =
         input.threadId ?? (input.unbindThread === true ? null : (existingTask?.threadId ?? null));
       // A bound thread belongs to its project, so moving the task leaves it for a new one.
@@ -1677,8 +1686,9 @@ export const layer = Layer.effect(
           ? { type: "root" }
           : input.workspaceStrategy;
       // Omitted keeps the stored routing, so clients that predate it can re-save the task.
-      const modelRouting =
-        input.modelRouting === undefined
+      const modelRouting = !routesRuns
+        ? undefined
+        : input.modelRouting === undefined
           ? existingTask?.modelRouting
           : (input.modelRouting ?? undefined);
       const scheduleUnchanged =
@@ -1719,7 +1729,7 @@ export const layer = Layer.effect(
         scheduleUnchanged ? existingTask.schedule : null,
         threadId === null && input.unbindThread === true ? (existingTask?.threadId ?? null) : null,
         webhook,
-        input.modelRouting === undefined,
+        routesRuns && input.modelRouting === undefined,
       );
       yield* notifyChanged;
       return { task: (yield* findTask(id)) ?? task };

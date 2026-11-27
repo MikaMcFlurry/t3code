@@ -1552,4 +1552,45 @@ describe("per-task model routing", () => {
       );
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
   );
+
+  it.effect("keeps routing only on tasks that start a new thread per run", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const providers = yield* Ref.make<ReadonlyArray<ServerProvider>>([]);
+      const launched = yield* Ref.make<ReadonlyArray<ThreadLaunchService.ThreadLaunchInput>>([]);
+      yield* Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        const refused = yield* service
+          .upsert(taskInput({ threadMode: "fresh_session", modelRouting: routing }))
+          .pipe(Effect.flip);
+        assert.include(refused.message, "new thread");
+        yield* service.upsert(taskInput({ modelRouting: routing }));
+        // Moving the task to one thread drops the routing its runs would no longer use.
+        const moved = yield* service.upsert(taskInput({ threadMode: "fresh_session" }));
+        assert.isUndefined(moved.task.modelRouting);
+        const [row] = yield* sql<{
+          model_selection_json: string;
+        }>`SELECT model_selection_json FROM scheduled_tasks`;
+        assert.notInclude(row?.model_selection_json ?? "", "scheduledTaskRouting");
+      }).pipe(Effect.provide(serviceLayer(providers, launched)));
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+
+  it.effect("a malformed stored routing reads as none and does not block a save", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const providers = yield* Ref.make<ReadonlyArray<ServerProvider>>([]);
+      const launched = yield* Ref.make<ReadonlyArray<ThreadLaunchService.ThreadLaunchInput>>([]);
+      yield* Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        const { task } = yield* service.upsert(taskInput());
+        yield* sql`UPDATE scheduled_tasks SET model_selection_json = ${JSON.stringify({ ...stored, scheduledTaskRouting: "bad" })}`;
+        const { tasks } = yield* service.list();
+        assert.isUndefined(tasks.find((entry) => entry.id === task.id)?.modelRouting);
+        const saved = yield* service.upsert(taskInput({ title: "Renamed" }));
+        assert.equal(saved.task.title, "Renamed");
+        assert.deepEqual(saved.task.modelSelection, stored);
+      }).pipe(Effect.provide(serviceLayer(providers, launched)));
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
 });

@@ -415,6 +415,21 @@ describe("routineModelRouting", () => {
       ).toBe("claude-2");
     });
 
+    it("treats an account whose windows all limit other models as without usage data", () => {
+      const fableOnly: ServerProvider = {
+        ...provider("claude-1", 0),
+        usageLimits: {
+          checkedAt: "2026-09-03T11:00:00.000Z",
+          windows: [{ id: "seven_day_fable", kind: "weekly", label: "Fable", usedPercent: 100 }],
+        },
+      };
+      const result = resolve({
+        providers: [fableOnly, provider("claude-2", 20)],
+        routing: { candidates: ["claude-1", "claude-2"], minUsageLeftPercent: 50 },
+      });
+      expect(result.selection.instanceId).toBe("claude-2");
+    });
+
     it("tries a driver entry's accounts with the most usage left first", () => {
       expect(
         resolve({ routing: { candidates: ["driver:claudeAgent"], minUsageLeftPercent: 20 } })

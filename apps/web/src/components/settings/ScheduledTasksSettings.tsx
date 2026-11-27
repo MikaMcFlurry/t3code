@@ -2035,9 +2035,9 @@ function ScheduledTaskEditorForm({
               <p className="text-xs text-muted-foreground">
                 <T>
                   Each run starts its thread on the first listed account or model with at least this
-                  much usage left, or on the one with the most left when none has. Entries: account,
-                  account/model or driver:kind. Empty: the model above, with the automatic account
-                  settings.
+                  much usage left; if none has, one without usage data, else the one with the most
+                  left. Entries: account, account/model or driver:kind. Empty: the model above, with
+                  the automatic account settings.
                 </T>
               </p>
             </Field>
