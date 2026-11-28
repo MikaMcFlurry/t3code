@@ -7,7 +7,8 @@
   2. when upstream moved, rebases the branches and regenerates mika/main (Update-T3Mika.ps1
      -NoBuild) while the app keeps running. On a conflict the app stays open, UPDATE-KONFLIKT.txt
      names the branches, and the same upstream is not tried again until it moves or the conflict is
-     resolved;
+     resolved. A mika/main that another machine regenerated and pushed (Update-T3Mika.ps1 takes
+     newer origin states first) is still built, so a nightly conflict doesn't block every update;
   3. counts running or queued runs in D:\T3-Mika\home (t3mika-idle.cjs); if any, it tries again
      later. From the update window's start (06:00; set it in D:\T3-Mika\update-fenster.txt as HH:mm,
      or "aus" to never force) it waits up to 10 more minutes, then updates anyway: T3 continues the
@@ -74,7 +75,7 @@ try {
   $failedFile = Join-Path $T3Mika.Root 'update-failed-upstream.txt'
   $noteFile = Join-Path $T3Mika.Root 'UPDATE-KONFLIKT.txt'
   $failedUpstream = if (Test-Path $failedFile) { (Get-Content $failedFile -Raw).Trim() } else { '' }
-  if (-not $Force -and -not $SkipPrep -and $upstream -eq $failedUpstream) { return }
+  if (-not $Force -and -not $SkipPrep -and $upstream -eq $failedUpstream -and $current -eq $lastBuilt) { return }
 
   $database = Join-Path $T3Mika.Home 'userdata\statev2.sqlite'
   $ignored = $IgnoreThread -join ','
@@ -83,20 +84,26 @@ try {
   # Rebase and regenerate mika/main while the app keeps running: it runs from build output,
   # which git leaves alone. Only once per upstream, so a busy night doesn't make new merge
   # commits (and new builds on the iMacs) every 30 minutes.
-  $before = $current
+  # A failed build falls back to what ran before, not to a mika/main that never built.
+  $before = if ($lastBuilt) { $lastBuilt } else { $current }
   if (-not $SkipPrep -and ($Force -or $upstream -ne $main)) {
     Write-Log "Vorbereitung (upstream $($upstream.Substring(0,10)), mika/main $($current.Substring(0,10)))"
+    $conflict = $false
     try {
       & (Join-Path $PSScriptRoot 'Update-T3Mika.ps1') -NoBuild *>> $log
     } catch {
+      $conflict = $true
       Set-Content $failedFile $upstream
       Set-Content $noteFile ("$(Get-Date -Format s): Update auf upstream $($upstream.Substring(0,10)) gestoppt, " +
         "T3 Code Mika laeuft unveraendert weiter. $_ Konflikte loesen (Agent oder von Hand), " +
         "dann mika\Update-T3Mika.ps1 ausfuehren oder diese Datei und update-failed-upstream.txt loeschen.")
       Write-Log "Konflikt, App bleibt offen: $_"
-      return
+      # Upstream moves every night, so a rebase conflict can block updates for days. A mika/main
+      # that another machine regenerated (taken from origin before the rebase) still gets built.
+      if ((git rev-parse mika/main) -eq $lastBuilt) { return }
+      Write-Log "baue stattdessen den gepflegten mika/main $((git rev-parse mika/main).Substring(0,10)) von origin"
     }
-    Remove-Item $failedFile, $noteFile -ErrorAction SilentlyContinue
+    if (-not $conflict) { Remove-Item $failedFile, $noteFile -ErrorAction SilentlyContinue }
   }
   $after = git rev-parse mika/main
   if (-not $Force -and $after -eq $lastBuilt) { return }
