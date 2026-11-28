@@ -71,3 +71,41 @@ function Copy-T3Directory([string]$From, [string]$To, [string[]]$ExcludeDirs = @
   if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE): $From -> $To" }
   $global:LASTEXITCODE = 0
 }
+
+# Adopts the origin state of every local mika/* branch that another machine moved (an agent on an
+# iMac resolving conflicts, say), so the next rebase and merge start from it instead of an old
+# local copy. A branch keeps its local state when it has a commit origin lacks (compared by
+# subject, because rebases change hashes). mika/main is generated: the newer commit wins.
+# Run it while no mika/* branch is checked out here.
+function Sync-T3MikaFromOrigin {
+  git fetch -q origin
+  if ($LASTEXITCODE -ne 0) { Write-Warning 'origin nicht erreichbar, lokale Branches bleiben.'; return }
+  $remote = git for-each-ref --format='%(refname:short)' refs/remotes/origin/mika/
+  foreach ($ref in $remote) {
+    $branch = $ref.Substring('origin/'.Length)
+    $theirs = git rev-parse $ref
+    $ours = git rev-parse -q --verify "refs/heads/$branch" 2>$null
+    if (-not $ours) { continue }
+    if ($ours -eq $theirs) { continue }
+    git merge-base --is-ancestor $theirs $ours
+    if ($LASTEXITCODE -eq 0) { continue }
+    $adopt = $false
+    git merge-base --is-ancestor $ours $theirs
+    if ($LASTEXITCODE -eq 0) {
+      $adopt = $true
+    } elseif ($branch -eq 'mika/main') {
+      $adopt = [long](git log -1 --format=%ct $theirs) -gt [long](git log -1 --format=%ct $ours)
+    } else {
+      $baseOurs = git merge-base $ours upstream/main
+      $baseTheirs = git merge-base $theirs upstream/main
+      $theirSubjects = @(git log --no-merges --format=%s "$baseTheirs..$theirs")
+      $missing = @(git log --no-merges --format=%s "$baseOurs..$ours" | Where-Object { $theirSubjects -notcontains $_ })
+      $adopt = $missing.Count -eq 0
+      if (-not $adopt) { Write-Warning "$branch hat lokale Commits, die origin fehlen; bleibt lokal: $($missing -join '; ')" }
+    }
+    if ($adopt) {
+      git branch -f $branch $theirs 2>$null
+      if ($LASTEXITCODE -ne 0) { Write-Warning "$branch ist woanders ausgecheckt; nicht übernommen." }
+    }
+  }
+}

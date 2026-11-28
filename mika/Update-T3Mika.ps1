@@ -25,6 +25,8 @@ if (-not $SkipFetch) {
   git switch -q main
   git merge -q --ff-only upstream/main
   if ($LASTEXITCODE -ne 0) { throw 'main lässt sich nicht vorspulen. main darf keine eigenen Commits haben.' }
+  # Branch states another machine pushed (conflicts resolved on an iMac) replace stale local ones.
+  Sync-T3MikaFromOrigin
   if (-not $NoPush) { git push -q origin main }
 }
 
